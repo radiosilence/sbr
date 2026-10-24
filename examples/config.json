@@ -1,0 +1,28 @@
+// Runs unchanged under both `sbr run -c` and `sing-box run -c`.
+{
+  "log": { "level": "info" },
+  "inbounds": [
+    { "type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2080 }
+  ],
+  "outbounds": [
+    { "type": "selector", "tag": "proxy", "outbounds": ["ss", "direct"], "default": "direct" },
+    {
+      "type": "shadowsocks", "tag": "ss",
+      "server": "203.0.113.10", "server_port": 8388,
+      "method": "2022-blake3-aes-128-gcm", "password": "Ixi/xBrzF3Nnrel2vh8Dsg=="
+    },
+    { "type": "direct", "tag": "direct" },
+    { "type": "block", "tag": "block" }
+  ],
+  "route": {
+    "rules": [
+      { "ip_is_private": true, "outbound": "direct" },
+      { "domain_suffix": ["doubleclick.net", "googlesyndication.com"], "action": "reject" },
+      { "rule_set": "local-cn", "outbound": "direct" }
+    ],
+    "rule_set": [
+      { "type": "inline", "tag": "local-cn", "rules": [{ "domain_suffix": ["cn"] }, { "ip_cidr": ["1.0.1.0/24"] }] }
+    ],
+    "final": "proxy"
+  }
+}

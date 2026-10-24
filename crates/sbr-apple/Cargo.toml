@@ -1,0 +1,15 @@
+[package]
+name = "sbr-apple"
+description = "C ABI for embedding sbr in an Apple Network Extension"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+sbr-engine.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

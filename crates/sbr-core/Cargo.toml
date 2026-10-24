@@ -1,0 +1,19 @@
+[package]
+name = "sbr-core"
+description = "Session model, router and relay for sbr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sbr-config.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+regex.workspace = true
+aho-corasick.workspace = true
+ipnet.workspace = true
+thiserror.workspace = true
+socket2 = { version = "0.6", features = ["all"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

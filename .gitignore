@@ -1,0 +1,3 @@
+/target
+*.xcframework
+.DS_Store
