@@ -12,7 +12,8 @@ use shadowsocks::relay::socks5::Address;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use super::{Outbound, Upstream};
+use super::Upstream;
+use sbr_core::Outbound;
 
 pub struct Shadowsocks {
     tag: String,
@@ -52,8 +53,7 @@ impl Shadowsocks {
             Ok(ip) => ServerAddr::SocketAddr(std::net::SocketAddr::new(ip, c.server.server_port)),
             Err(_) => ServerAddr::DomainName(c.server.server.clone(), c.server.server_port),
         };
-        let config =
-            ServerConfig::new(addr, c.password.clone(), method).map_err(|e| e.to_string())?;
+        let config = ServerConfig::new(addr, c.password.clone(), method).map_err(|e| e.to_string())?;
         Ok(Self {
             tag,
             server: Destination::from_host_port(&c.server.server, c.server.server_port),
@@ -102,21 +102,13 @@ struct FirstWriteCap<S> {
 const FIRST_WRITE_MAX: usize = 8 * 1024;
 
 impl<S: AsyncRead + Unpin> AsyncRead for FirstWriteCap<S> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }
 
 impl<S: AsyncWrite + Unpin> AsyncWrite for FirstWriteCap<S> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let this = &mut *self;
         if this.first {
             let n = buf.len().min(FIRST_WRITE_MAX);

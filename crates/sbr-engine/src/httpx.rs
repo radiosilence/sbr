@@ -17,10 +17,7 @@ pub fn status_code(head: &[u8]) -> Option<u16> {
 
 /// Read until a complete request head is buffered. Returns the buffer and
 /// the head length; anything after it is early payload.
-pub async fn read_request_head<R: AsyncRead + Unpin>(
-    r: &mut R,
-    mut buf: Vec<u8>,
-) -> io::Result<(Vec<u8>, usize)> {
+pub async fn read_request_head<R: AsyncRead + Unpin>(r: &mut R, mut buf: Vec<u8>) -> io::Result<(Vec<u8>, usize)> {
     loop {
         {
             let mut headers = [httparse::EMPTY_HEADER; 64];

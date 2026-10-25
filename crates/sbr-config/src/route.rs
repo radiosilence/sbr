@@ -36,14 +36,90 @@ pub enum RuleAction {
     None,
     Route {
         outbound: String,
+        options: RouteOptionsAction,
     },
+    RouteOptions(RouteOptionsAction),
     Reject {
         method: RejectMethod,
         no_drop: bool,
     },
-    /// Accepted for compatibility; sbr's proxy inbounds already carry the
-    /// requested domain, so there is nothing to sniff yet.
-    Sniff,
+    HijackDns,
+    Sniff {
+        sniffers: Vec<Protocol>,
+        timeout: Option<std::time::Duration>,
+    },
+    Resolve {
+        server: Option<String>,
+        strategy: Option<crate::DomainStrategy>,
+    },
+}
+
+impl RuleAction {
+    /// Final actions stop rule evaluation.
+    pub fn is_final(&self) -> bool {
+        matches!(self, Self::Route { .. } | Self::Reject { .. } | Self::HijackDns)
+    }
+}
+
+/// Protocols sbr can sniff. Also the values accepted by the `protocol` matcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Protocol {
+    Tls,
+    Http,
+    Quic,
+    Dns,
+    Stun,
+    Bittorrent,
+    Dtls,
+    Ssh,
+    Rdp,
+    Ntp,
+}
+
+impl Protocol {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "tls" => Self::Tls,
+            "http" => Self::Http,
+            "quic" => Self::Quic,
+            "dns" => Self::Dns,
+            "stun" => Self::Stun,
+            "bittorrent" => Self::Bittorrent,
+            "dtls" => Self::Dtls,
+            "ssh" => Self::Ssh,
+            "rdp" => Self::Rdp,
+            "ntp" => Self::Ntp,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tls => "tls",
+            Self::Http => "http",
+            Self::Quic => "quic",
+            Self::Dns => "dns",
+            Self::Stun => "stun",
+            Self::Bittorrent => "bittorrent",
+            Self::Dtls => "dtls",
+            Self::Ssh => "ssh",
+            Self::Rdp => "rdp",
+            Self::Ntp => "ntp",
+        }
+    }
+}
+
+/// `route-options` fields, also accepted inline on `route`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteOptionsAction {
+    pub override_address: Option<String>,
+    pub override_port: Option<u16>,
+    pub udp_disable_domain_unmapping: bool,
+    pub udp_connect: bool,
+    pub udp_timeout: Option<std::time::Duration>,
+    pub tls_fragment: bool,
+    pub tls_fragment_fallback_delay: Option<std::time::Duration>,
+    pub tls_record_fragment: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +154,7 @@ pub struct Matchers {
     pub port_range: Vec<PortRange>,
     pub rule_set: Vec<String>,
     pub rule_set_ip_cidr_match_source: bool,
+    pub protocol: Vec<Protocol>,
 }
 
 #[derive(Debug, Clone)]
@@ -119,10 +196,7 @@ pub(crate) fn parse_route(mut o: Obj, diag: &mut Diag) -> Result<RouteOptions> {
     );
     for k in ["geoip", "geosite"] {
         if o.has(k) {
-            return Err(Error::at(
-                &o.sub(k),
-                "removed in sing-box 1.12; migrate to rule_set",
-            ));
+            return Err(Error::at(&o.sub(k), "removed in sing-box 1.12; migrate to rule_set"));
         }
     }
     o.finish()?;
@@ -137,9 +211,7 @@ fn parse_rule_set(mut o: Obj, diag: &mut Diag) -> Result<RuleSet> {
     let ty: String = o.req("type")?;
     let tag: String = o.req("tag")?;
     let source = match ty.as_str() {
-        "inline" => {
-            RuleSetSource::Inline(parse_rules(o.raw("rules"), &o.sub("rules"), false, diag)?)
-        }
+        "inline" => RuleSetSource::Inline(parse_rules(o.raw("rules"), &o.sub("rules"), false, diag)?),
         "local" => {
             let format = o.string("format")?;
             let path: String = o.req("path")?;
@@ -162,16 +234,10 @@ fn parse_rule_set(mut o: Obj, diag: &mut Diag) -> Result<RuleSet> {
             }
         }
         "remote" => {
-            return Err(Error::at(
-                &o.sub("type"),
-                "remote rule-sets not supported by sbr yet",
-            ));
+            return Err(Error::at(&o.sub("type"), "remote rule-sets not supported by sbr yet"));
         }
         t => {
-            return Err(Error::at(
-                &o.sub("type"),
-                format!("unknown rule-set type {t:?}"),
-            ));
+            return Err(Error::at(&o.sub("type"), format!("unknown rule-set type {t:?}")));
         }
     };
     o.finish()?;
@@ -184,25 +250,15 @@ pub fn parse_rule_set_source(input: &str) -> Result<Vec<Rule>> {
     let mut o = Obj::new(value, "")?;
     let version: u8 = o.req("version")?;
     if !(1..=4).contains(&version) {
-        return Err(Error::at(
-            "version",
-            format!("unsupported rule-set version {version}"),
-        ));
+        return Err(Error::at("version", format!("unsupported rule-set version {version}")));
     }
-    let mut diag = Diag {
-        warnings: Vec::new(),
-    };
+    let mut diag = Diag { warnings: Vec::new() };
     let rules = parse_rules(o.raw("rules"), "rules", false, &mut diag)?;
     o.finish()?;
     Ok(rules)
 }
 
-fn parse_rules(
-    v: Option<Value>,
-    path: &str,
-    with_action: bool,
-    diag: &mut Diag,
-) -> Result<Vec<Rule>> {
+fn parse_rules(v: Option<Value>, path: &str, with_action: bool, diag: &mut Diag) -> Result<Vec<Rule>> {
     array(v, path)?
         .into_iter()
         .enumerate()
@@ -220,10 +276,7 @@ fn parse_rule(mut o: Obj, with_action: bool, diag: &mut Diag) -> Result<Rule> {
                 "and" => LogicalMode::And,
                 "or" => LogicalMode::Or,
                 m => {
-                    return Err(Error::at(
-                        &o.sub("mode"),
-                        format!("unknown logical mode {m:?}"),
-                    ));
+                    return Err(Error::at(&o.sub("mode"), format!("unknown logical mode {m:?}")));
                 }
             };
             let rules = parse_rules(o.raw("rules"), &o.sub("rules"), false, diag)?;
@@ -233,10 +286,7 @@ fn parse_rule(mut o: Obj, with_action: bool, diag: &mut Diag) -> Result<Rule> {
             RuleKind::Logical { mode, rules }
         }
         t => {
-            return Err(Error::at(
-                &o.sub("type"),
-                format!("unknown rule type {t:?}"),
-            ));
+            return Err(Error::at(&o.sub("type"), format!("unknown rule type {t:?}")));
         }
     };
     let action = if with_action {
@@ -245,11 +295,7 @@ fn parse_rule(mut o: Obj, with_action: bool, diag: &mut Diag) -> Result<Rule> {
         RuleAction::None
     };
     o.finish()?;
-    Ok(Rule {
-        kind,
-        invert,
-        action,
-    })
+    Ok(Rule { kind, invert, action })
 }
 
 fn parse_action(o: &mut Obj, diag: &mut Diag) -> Result<RuleAction> {
@@ -259,17 +305,18 @@ fn parse_action(o: &mut Obj, diag: &mut Diag) -> Result<RuleAction> {
             let outbound = o
                 .string("outbound")?
                 .ok_or_else(|| Error::at(&o.sub("outbound"), "missing outbound"))?;
-            RuleAction::Route { outbound }
+            RuleAction::Route {
+                outbound,
+                options: parse_route_options(o, diag)?,
+            }
         }
+        "route-options" => RuleAction::RouteOptions(parse_route_options(o, diag)?),
         "reject" => {
             let method = match o.string("method")?.as_deref() {
                 None | Some("default") => RejectMethod::Default,
                 Some("drop") => RejectMethod::Drop,
                 Some(m) => {
-                    return Err(Error::at(
-                        &o.sub("method"),
-                        format!("unknown reject method {m:?}"),
-                    ));
+                    return Err(Error::at(&o.sub("method"), format!("unknown reject method {m:?}")));
                 }
             };
             let no_drop = o.bool("no_drop")?;
@@ -281,28 +328,74 @@ fn parse_action(o: &mut Obj, diag: &mut Diag) -> Result<RuleAction> {
             }
             RuleAction::Reject { method, no_drop }
         }
+        "hijack-dns" => RuleAction::HijackDns,
         "sniff" => {
-            o.raw("sniffer");
-            o.raw("timeout");
-            diag.warnings.push(format!(
-                "{}: sniff is a no-op in sbr (no TUN inbound yet)",
-                o.path()
-            ));
-            RuleAction::Sniff
+            let path = o.sub("sniffer");
+            let sniffers = o
+                .list::<String>("sniffer")?
+                .iter()
+                .map(|s| Protocol::parse(s).ok_or_else(|| Error::at(&path, format!("unknown sniffer {s:?}"))))
+                .collect::<Result<Vec<_>>>()?;
+            RuleAction::Sniff {
+                sniffers,
+                timeout: o.duration("timeout")?,
+            }
         }
-        a @ ("route-options" | "bypass" | "hijack-dns" | "resolve") => {
+        "resolve" => {
+            let r = RuleAction::Resolve {
+                server: o.string("server")?,
+                strategy: o.opt("strategy")?,
+            };
+            o.tolerate(
+                diag,
+                &[
+                    "timeout",
+                    "disable_cache",
+                    "disable_optimistic_cache",
+                    "rewrite_ttl",
+                    "client_subnet",
+                ],
+            );
+            r
+        }
+        a @ "bypass" => {
             return Err(Error::at(
                 &o.sub("action"),
                 format!("action {a:?} not supported by sbr yet"),
             ));
         }
         a => {
-            return Err(Error::at(
-                &o.sub("action"),
-                format!("unknown rule action {a:?}"),
-            ));
+            return Err(Error::at(&o.sub("action"), format!("unknown rule action {a:?}")));
         }
     })
+}
+
+fn parse_route_options(o: &mut Obj, diag: &mut Diag) -> Result<RouteOptionsAction> {
+    let r = RouteOptionsAction {
+        override_address: o.string("override_address")?,
+        override_port: o.opt::<u16>("override_port")?.filter(|p| *p != 0),
+        udp_disable_domain_unmapping: o.bool("udp_disable_domain_unmapping")?,
+        udp_connect: o.bool("udp_connect")?,
+        udp_timeout: o.duration("udp_timeout")?,
+        tls_fragment: o.bool("tls_fragment")?,
+        tls_fragment_fallback_delay: o.duration("tls_fragment_fallback_delay")?,
+        tls_record_fragment: o.bool("tls_record_fragment")?,
+    };
+    o.tolerate(
+        diag,
+        &[
+            "network_strategy",
+            "fallback_delay",
+            "network_type",
+            "fallback_network_type",
+        ],
+    );
+    for k in ["tls_spoof", "tls_spoof_method"] {
+        if o.has(k) {
+            return Err(Error::at(&o.sub(k), "not supported by sbr yet"));
+        }
+    }
+    Ok(r)
 }
 
 fn parse_matchers(o: &mut Obj) -> Result<Matchers> {
@@ -312,10 +405,7 @@ fn parse_matchers(o: &mut Obj) -> Result<Matchers> {
             None | Some(0) => None,
             Some(v @ (4 | 6)) => Some(v),
             Some(v) => {
-                return Err(Error::at(
-                    &o.sub("ip_version"),
-                    format!("invalid ip version {v}"),
-                ));
+                return Err(Error::at(&o.sub("ip_version"), format!("invalid ip version {v}")));
             }
         },
         network: o.list("network")?,
@@ -347,6 +437,13 @@ fn parse_matchers(o: &mut Obj) -> Result<Matchers> {
         rule_set: o.list("rule_set")?,
         rule_set_ip_cidr_match_source: o.bool("rule_set_ip_cidr_match_source")?
             | o.bool("rule_set_ipcidr_match_source")?,
+        protocol: {
+            let path = o.sub("protocol");
+            o.list::<String>("protocol")?
+                .iter()
+                .map(|s| Protocol::parse(s).ok_or_else(|| Error::at(&path, format!("unknown protocol {s:?}"))))
+                .collect::<Result<Vec<_>>>()?
+        },
     };
     for re in &m.domain_regex {
         // Validated here so config errors surface at load, with a path.
@@ -377,11 +474,7 @@ fn ranges(o: &mut Obj, key: &str) -> Result<Vec<PortRange>> {
         .map(|s| {
             let bad = || Error::at(&path, format!("invalid port range {s:?}"));
             let (a, b) = s.split_once(':').ok_or_else(bad)?;
-            let start = if a.is_empty() {
-                0
-            } else {
-                a.parse().map_err(|_| bad())?
-            };
+            let start = if a.is_empty() { 0 } else { a.parse().map_err(|_| bad())? };
             let end = if b.is_empty() {
                 u16::MAX
             } else {

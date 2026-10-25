@@ -1,13 +1,69 @@
 use std::io;
+use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 
-use sbr_core::{Metadata, Network};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use bytes::Bytes;
+use sbr_core::{BoxFuture, Destination, Metadata, Network};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::net::{TcpStream, UdpSocket};
 
 use super::Context;
-use crate::OpenError;
+use crate::dispatch::{InboundStream, OpenError};
 use crate::socks5::*;
+use crate::udp::{UdpPacket, UdpWriteBack};
+
+/// The client after a CONNECT request: success is sent lazily (when the
+/// engine first needs the client's bytes, or once the outbound is up), as
+/// sing-box does, so sniffing can see the first payload.
+struct SocksClient {
+    s: TcpStream,
+    replied: bool,
+}
+
+impl InboundStream for SocksClient {
+    fn ready(&mut self) -> BoxFuture<'_, io::Result<()>> {
+        Box::pin(async move {
+            if !self.replied {
+                self.replied = true;
+                write_reply(&mut self.s, REP_OK).await?;
+            }
+            Ok(())
+        })
+    }
+    fn fail<'a>(&'a mut self, err: &'a OpenError) -> BoxFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            if self.replied {
+                return Ok(());
+            }
+            self.replied = true;
+            match err {
+                OpenError::Rejected { drop: true } => Ok(()),
+                OpenError::Rejected { drop: false } => write_reply(&mut self.s, REP_NOT_ALLOWED).await,
+                OpenError::Io(e) => write_reply(&mut self.s, reply_code(e)).await,
+            }
+        })
+    }
+}
+
+impl AsyncRead for SocksClient {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.s).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for SocksClient {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.s).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.s).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.s).poll_shutdown(cx)
+    }
+}
 
 pub async fn handle(ctx: &Context, mut s: TcpStream) -> io::Result<()> {
     let source = s.peer_addr()?;
@@ -55,38 +111,82 @@ pub async fn handle(ctx: &Context, mut s: TcpStream) -> io::Result<()> {
     s.read_exact(&mut head).await?;
     let destination = read_addr(&mut s).await?;
     match head[1] {
-        CMD_CONNECT => {}
-        CMD_UDP_ASSOCIATE => {
-            write_reply(&mut s, REP_CMD_UNSUPPORTED).await?;
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "SOCKS5 UDP not supported by sbr yet",
-            ));
+        CMD_CONNECT => {
+            let mut meta = Metadata::new(ctx.tag.clone(), ctx.type_name(), Network::Tcp, source, destination);
+            meta.user = user;
+            ctx.engine.handle_tcp(meta, SocksClient { s, replied: false }).await
         }
+        CMD_UDP_ASSOCIATE => udp_associate(ctx, s, source).await,
         _ => {
             write_reply(&mut s, REP_CMD_UNSUPPORTED).await?;
-            return Ok(());
+            Ok(())
         }
     }
+}
 
-    let meta = Metadata {
-        inbound: ctx.tag.clone(),
-        inbound_type: ctx.type_name(),
-        network: Network::Tcp,
-        source,
-        destination,
-        user,
-    };
-    match ctx.engine.open(&meta).await {
-        Ok(remote) => {
-            write_reply(&mut s, REP_OK).await?;
-            ctx.engine.relay(&meta, s, remote).await
+/// RFC 1928 §7. The association lives as long as the TCP control connection.
+async fn udp_associate(ctx: &Context, mut ctrl: TcpStream, client: SocketAddr) -> io::Result<()> {
+    let local = ctrl.local_addr()?;
+    let sock = Arc::new(UdpSocket::bind(SocketAddr::new(local.ip(), 0)).await?);
+    let bound = sock.local_addr()?;
+    let mut rep = vec![VER, REP_OK, 0];
+    write_addr(&mut rep, &Destination::from(bound))?;
+    ctrl.write_all(&rep).await?;
+
+    let back: Arc<dyn UdpWriteBack> = Arc::new(SocksUdpBack { sock: sock.clone() });
+    let relay = async {
+        let mut buf = vec![0u8; 65535];
+        loop {
+            let (n, from) = sock.recv_from(&mut buf).await?;
+            // Only the client's host may use the association.
+            if from.ip() != client.ip() && !client.ip().is_unspecified() {
+                continue;
+            }
+            let pkt = &buf[..n];
+            if n < 4 || pkt[2] != 0 {
+                continue; // fragmented datagrams are optional and unsupported
+            }
+            let mut cur = std::io::Cursor::new(&pkt[3..]);
+            let Ok(destination) = read_addr(&mut cur).await else {
+                continue;
+            };
+            let off = 3 + cur.position() as usize;
+            ctx.engine.handle_udp(
+                &ctx.tag,
+                ctx.type_name(),
+                UdpPacket {
+                    source: from,
+                    destination,
+                    payload: Bytes::copy_from_slice(&pkt[off..]),
+                },
+                back.clone(),
+            );
         }
-        Err(OpenError::Rejected { drop: true }) => Ok(()),
-        Err(OpenError::Rejected { drop: false }) => write_reply(&mut s, REP_NOT_ALLOWED).await,
-        Err(OpenError::Io(e)) => {
-            write_reply(&mut s, reply_code(&e)).await?;
-            Err(e)
+        #[allow(unreachable_code)]
+        io::Result::Ok(())
+    };
+    let mut sink = [0u8; 64];
+    tokio::select! {
+        r = relay => r,
+        _ = async { while matches!(ctrl.read(&mut sink).await, Ok(n) if n > 0) {} } => Ok(()),
+    }
+}
+
+struct SocksUdpBack {
+    sock: Arc<UdpSocket>,
+}
+
+impl UdpWriteBack for SocksUdpBack {
+    fn write_back(&self, payload: &[u8], from: &Destination, to: SocketAddr) -> io::Result<()> {
+        let mut out = Vec::with_capacity(payload.len() + 22);
+        out.extend_from_slice(&[0, 0, 0]);
+        write_addr(&mut out, from)?;
+        out.extend_from_slice(payload);
+        // Non-blocking: if the socket buffer is full the datagram is dropped.
+        match self.sock.try_send_to(&out, to) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(()),
+            Err(e) => Err(e),
         }
     }
 }

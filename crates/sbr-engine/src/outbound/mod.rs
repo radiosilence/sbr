@@ -1,3 +1,7 @@
+//! Outbound registry. Each protocol lives in its own module and registers in
+//! `build_one`; protocol modules only depend on `BuildContext` and `Upstream`.
+
+mod direct;
 mod group;
 mod http;
 mod shadowsocks;
@@ -9,67 +13,49 @@ use std::sync::Arc;
 
 use sbr_config::{Dial, Outbound as OutboundConfig, OutboundKind};
 use sbr_core::dial::{self, DialOptions};
-use sbr_core::{BoxFuture, Destination, Stream};
+use sbr_core::dns::Dns;
+use sbr_core::{BoxPacketConn, Destination, Stream};
 
 pub use group::Selector;
+pub use sbr_core::{Group, Outbound, PacketConn};
 
-pub trait Outbound: Send + Sync {
-    fn tag(&self) -> &str;
-    fn kind(&self) -> &'static str;
-    /// Open a TCP stream to `dest` through this outbound.
-    fn connect<'a>(&'a self, dest: &'a Destination) -> BoxFuture<'a, io::Result<Stream>>;
-    fn as_selector(&self) -> Option<&Selector> {
-        None
-    }
+/// Shared services outbounds may need while being built.
+#[derive(Clone)]
+pub struct BuildContext {
+    pub dns: Arc<dyn Dns>,
 }
 
 /// How an outbound reaches its server: the system network, or another
 /// outbound (`detour`).
 #[derive(Clone)]
 pub enum Upstream {
-    System(DialOptions),
+    System(DialOptions, Arc<dyn Dns>),
     Detour(Arc<dyn Outbound>),
 }
 
 impl Upstream {
+    pub fn new(d: &Dial, ctx: &BuildContext, detour: Option<Arc<dyn Outbound>>) -> Self {
+        match detour {
+            Some(o) => Upstream::Detour(o),
+            None => Upstream::System(DialOptions::from(d), ctx.dns.clone()),
+        }
+    }
+
     pub async fn connect(&self, dest: &Destination) -> io::Result<Stream> {
         match self {
-            Upstream::System(opts) => Ok(Box::new(dial::connect(dest, opts).await?)),
+            Upstream::System(opts, dns) => Ok(Box::new(dial::connect(dest, opts, dns.as_ref()).await?)),
             Upstream::Detour(o) => o.connect(dest).await,
         }
     }
-}
 
-struct Direct {
-    tag: String,
-    opts: DialOptions,
-}
-
-impl Outbound for Direct {
-    fn tag(&self) -> &str {
-        &self.tag
-    }
-    fn kind(&self) -> &'static str {
-        "direct"
-    }
-    fn connect<'a>(&'a self, dest: &'a Destination) -> BoxFuture<'a, io::Result<Stream>> {
-        Box::pin(async move { Ok(Box::new(dial::connect(dest, &self.opts).await?) as Stream) })
-    }
-}
-
-struct Block {
-    tag: String,
-}
-
-impl Outbound for Block {
-    fn tag(&self) -> &str {
-        &self.tag
-    }
-    fn kind(&self) -> &'static str {
-        "block"
-    }
-    fn connect<'a>(&'a self, _: &'a Destination) -> BoxFuture<'a, io::Result<Stream>> {
-        Box::pin(async { Err(io::Error::new(io::ErrorKind::PermissionDenied, "blocked")) })
+    /// A UDP association towards `dest` (the protocol's server).
+    pub async fn connect_udp(&self, dest: &Destination) -> io::Result<BoxPacketConn> {
+        match self {
+            Upstream::System(opts, dns) => Ok(Box::new(
+                direct::DirectPacket::new(dest, opts.clone(), dns.clone()).await?,
+            )),
+            Upstream::Detour(o) => o.connect_udp(dest).await,
+        }
     }
 }
 
@@ -83,98 +69,78 @@ pub enum BuildError {
 
 /// Instantiate every outbound, resolving detours and group members first.
 /// Returns them in config order so indices match the router's.
-pub fn build_all(configs: &[OutboundConfig]) -> Result<Vec<Arc<dyn Outbound>>, BuildError> {
-    let index: HashMap<&str, usize> = configs
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.tag.as_str(), i))
-        .collect();
-    let mut built: Vec<Option<Arc<dyn Outbound>>> = vec![None; configs.len()];
-    let mut visiting = vec![false; configs.len()];
+pub fn build_all(configs: &[OutboundConfig], ctx: &BuildContext) -> Result<Vec<Arc<dyn Outbound>>, BuildError> {
+    let index: HashMap<&str, usize> = configs.iter().enumerate().map(|(i, c)| (c.tag.as_str(), i)).collect();
+    let mut b = Builder {
+        configs,
+        index,
+        ctx,
+        built: vec![None; configs.len()],
+        visiting: vec![false; configs.len()],
+    };
     for i in 0..configs.len() {
-        build_one(i, configs, &index, &mut built, &mut visiting)?;
+        b.build(i)?;
     }
-    Ok(built.into_iter().map(|o| o.expect("built")).collect())
+    Ok(b.built.into_iter().map(|o| o.expect("built")).collect())
 }
 
-fn build_one(
-    i: usize,
-    configs: &[OutboundConfig],
-    index: &HashMap<&str, usize>,
-    built: &mut Vec<Option<Arc<dyn Outbound>>>,
-    visiting: &mut Vec<bool>,
-) -> Result<Arc<dyn Outbound>, BuildError> {
-    if let Some(o) = &built[i] {
-        return Ok(o.clone());
+struct Builder<'a> {
+    configs: &'a [OutboundConfig],
+    index: HashMap<&'a str, usize>,
+    ctx: &'a BuildContext,
+    built: Vec<Option<Arc<dyn Outbound>>>,
+    visiting: Vec<bool>,
+}
+
+impl Builder<'_> {
+    fn dep(&mut self, tag: &str) -> Result<Arc<dyn Outbound>, BuildError> {
+        self.build(self.index[tag])
     }
-    let cfg = &configs[i];
-    if visiting[i] {
-        return Err(BuildError::Cycle(i, cfg.tag.clone()));
-    }
-    visiting[i] = true;
-    let dep = |tag: &str, built: &mut Vec<Option<Arc<dyn Outbound>>>, visiting: &mut Vec<bool>| {
-        build_one(index[tag], configs, index, built, visiting)
-    };
-    let upstream =
-        |d: &Dial, built: &mut Vec<_>, visiting: &mut Vec<_>| -> Result<Upstream, BuildError> {
-            Ok(match &d.detour {
-                Some(t) => Upstream::Detour(dep(t, built, visiting)?),
-                None => Upstream::System(DialOptions::from(d)),
-            })
+
+    fn upstream(&mut self, d: &Dial) -> Result<Upstream, BuildError> {
+        let detour = match &d.detour {
+            Some(t) => Some(self.dep(t)?),
+            None => None,
         };
-    let tag = cfg.tag.clone();
-    let invalid = |e: String| BuildError::Invalid(i, tag.clone(), e);
-    let out: Arc<dyn Outbound> = match &cfg.kind {
-        OutboundKind::Direct(d) => {
-            if d.detour.is_some() {
-                return Err(invalid("direct outbound cannot have a detour".into()));
+        Ok(Upstream::new(d, self.ctx, detour))
+    }
+
+    fn build(&mut self, i: usize) -> Result<Arc<dyn Outbound>, BuildError> {
+        if let Some(o) = &self.built[i] {
+            return Ok(o.clone());
+        }
+        let cfg = &self.configs[i];
+        if self.visiting[i] {
+            return Err(BuildError::Cycle(i, cfg.tag.clone()));
+        }
+        self.visiting[i] = true;
+        let tag = cfg.tag.clone();
+        let invalid = |e: String| BuildError::Invalid(i, cfg.tag.clone(), e);
+        let out: Arc<dyn Outbound> = match &cfg.kind {
+            OutboundKind::Direct(d) => {
+                if d.detour.is_some() {
+                    return Err(invalid("direct outbound cannot have a detour".into()));
+                }
+                Arc::new(direct::Direct::new(tag, d, self.ctx))
             }
-            Arc::new(Direct {
-                tag: cfg.tag.clone(),
-                opts: DialOptions::from(d),
-            })
-        }
-        OutboundKind::Block => Arc::new(Block {
-            tag: cfg.tag.clone(),
-        }),
-        OutboundKind::Socks(s) => Arc::new(socks::Socks::new(
-            cfg.tag.clone(),
-            s,
-            upstream(&s.dial, built, visiting)?,
-        )),
-        OutboundKind::Http(h) => Arc::new(http::HttpConnect::new(
-            cfg.tag.clone(),
-            h,
-            upstream(&h.dial, built, visiting)?,
-        )),
-        OutboundKind::Shadowsocks(s) => Arc::new(
-            shadowsocks::Shadowsocks::new(cfg.tag.clone(), s, upstream(&s.dial, built, visiting)?)
-                .map_err(invalid)?,
-        ),
-        OutboundKind::Selector(g) => {
-            let members = g
-                .outbounds
-                .iter()
-                .map(|t| dep(t, built, visiting))
-                .collect::<Result<Vec<_>, _>>()?;
-            Arc::new(Selector::new(
-                cfg.tag.clone(),
-                "selector",
-                members,
-                g.default.as_deref(),
-            ))
-        }
-        OutboundKind::UrlTest(g) => {
-            // No latency probing yet: behaves as a selector pinned to the first member.
-            let members = g
-                .outbounds
-                .iter()
-                .map(|t| dep(t, built, visiting))
-                .collect::<Result<Vec<_>, _>>()?;
-            Arc::new(Selector::new(cfg.tag.clone(), "urltest", members, None))
-        }
-    };
-    visiting[i] = false;
-    built[i] = Some(out.clone());
-    Ok(out)
+            OutboundKind::Block => Arc::new(direct::Block { tag }),
+            OutboundKind::Socks(s) => Arc::new(socks::Socks::new(tag, s, self.upstream(&s.dial)?)),
+            OutboundKind::Http(h) => Arc::new(http::HttpConnect::new(tag, h, self.upstream(&h.dial)?)),
+            OutboundKind::Shadowsocks(s) => {
+                Arc::new(shadowsocks::Shadowsocks::new(tag, s, self.upstream(&s.dial)?).map_err(invalid)?)
+            }
+            OutboundKind::Selector(g) => {
+                let members = g.outbounds.iter().map(|t| self.dep(t)).collect::<Result<Vec<_>, _>>()?;
+                Arc::new(Selector::new(tag, "selector", members, g.default.as_deref()))
+            }
+            OutboundKind::UrlTest(g) => {
+                // No latency probing yet: behaves as a selector pinned to the first member.
+                let members = g.outbounds.iter().map(|t| self.dep(t)).collect::<Result<Vec<_>, _>>()?;
+                Arc::new(Selector::new(tag, "urltest", members, None))
+            }
+        };
+        self.visiting[i] = false;
+        self.built[i] = Some(out.clone());
+        Ok(out)
+    }
 }

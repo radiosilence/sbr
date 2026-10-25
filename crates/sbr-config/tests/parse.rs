@@ -62,16 +62,9 @@ fn parses_typical_config() {
     let OutboundKind::Shadowsocks(ss) = &o.outbounds[1].kind else {
         panic!()
     };
-    assert_eq!(
-        ss.dial.connect_timeout,
-        Some(std::time::Duration::from_secs(5))
-    );
+    assert_eq!(ss.dial.connect_timeout, Some(std::time::Duration::from_secs(5)));
     assert!(o.warnings.iter().any(|w| w.starts_with("dns")));
-    assert!(
-        o.warnings
-            .iter()
-            .any(|w| w.contains("auto_detect_interface"))
-    );
+    assert!(o.warnings.iter().any(|w| w.contains("auto_detect_interface")));
 }
 
 fn err(json: &str) -> String {
@@ -81,19 +74,13 @@ fn err(json: &str) -> String {
 #[test]
 fn rejects_unknown_fields_with_path() {
     let e = err(r#"{"outbounds":[{"type":"direct","tag":"d","bogus":1}]}"#);
-    assert_eq!(
-        e,
-        "outbounds[0].bogus: unknown field, or not supported by sbr yet"
-    );
+    assert_eq!(e, "outbounds[0].bogus: unknown field, or not supported by sbr yet");
 }
 
 #[test]
 fn rejects_unsupported_protocols_loudly() {
     let e = err(r#"{"outbounds":[{"type":"vmess","tag":"v"}]}"#);
-    assert!(
-        e.contains("outbounds[0].type") && e.contains("vmess"),
-        "{e}"
-    );
+    assert!(e.contains("outbounds[0].type") && e.contains("vmess"), "{e}");
 }
 
 #[test]
@@ -106,9 +93,7 @@ fn rejects_unsupported_matchers() {
 
 #[test]
 fn checks_references() {
-    let e = err(
-        r#"{"outbounds":[{"type":"direct","tag":"d"}],"route":{"rules":[{"port":1,"outbound":"nope"}]}}"#,
-    );
+    let e = err(r#"{"outbounds":[{"type":"direct","tag":"d"}],"route":{"rules":[{"port":1,"outbound":"nope"}]}}"#);
     assert_eq!(e, "route.rules[0].outbound: outbound not found: nope");
     let e = err(r#"{"outbounds":[{"type":"direct","tag":"d"},{"type":"direct","tag":"d"}]}"#);
     assert!(e.contains("duplicate"), "{e}");
@@ -124,9 +109,39 @@ fn implicit_direct() {
 
 #[test]
 fn rule_set_source() {
-    let rules = parse_rule_set_source(
-        r#"{"version":3,"rules":[{"domain":["a.com"]},{"ip_cidr":"10.0.0.0/8"}]}"#,
+    let rules =
+        parse_rule_set_source(r#"{"version":3,"rules":[{"domain":["a.com"]},{"ip_cidr":"10.0.0.0/8"}]}"#).unwrap();
+    assert_eq!(rules.len(), 2);
+}
+
+#[test]
+fn tun_inbound_and_actions() {
+    let o = Options::parse(
+        r#"{
+        "inbounds":[{"type":"tun","tag":"tun-in","address":["172.19.0.1/30","fdfe:dcba:9876::1/126"],
+                     "mtu":9000,"auto_route":true,"strict_route":true,"stack":"mixed","inet4_route_address":"0.0.0.0/1",
+                     "platform":{"http_proxy":{"enabled":false}}}],
+        "outbounds":[{"type":"direct","tag":"d"}],
+        "route":{"rules":[
+            {"inbound":"tun-in","action":"sniff","sniffer":["tls","http"],"timeout":"300ms"},
+            {"protocol":"dns","action":"hijack-dns"},
+            {"protocol":"quic","action":"reject"},
+            {"action":"route-options","override_address":"127.0.0.1"},
+            {"action":"resolve","strategy":"prefer_ipv4"},
+            {"port":443,"outbound":"d","override_port":8443}
+        ]}
+    }"#,
     )
     .unwrap();
-    assert_eq!(rules.len(), 2);
+    let InboundKind::Tun(t) = &o.inbounds[0].kind else {
+        panic!()
+    };
+    assert_eq!(t.address.len(), 2);
+    assert_eq!(t.route_address.len(), 1, "legacy inet4_route_address merges");
+    assert!(o.warnings.iter().any(|w| w.contains("stack")));
+    assert!(matches!(&o.route.rules[0].action, RuleAction::Sniff { sniffers, .. } if sniffers.len() == 2));
+    assert_eq!(o.route.rules[1].action, RuleAction::HijackDns);
+    assert!(
+        matches!(&o.route.rules[5].action, RuleAction::Route { options, .. } if options.override_port == Some(8443))
+    );
 }

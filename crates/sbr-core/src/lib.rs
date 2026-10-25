@@ -3,12 +3,16 @@
 
 mod addr;
 pub mod dial;
+pub mod dns;
+pub mod outbound;
 pub mod relay;
 pub mod router;
 mod session;
+pub mod sniff;
 
 pub use addr::{Destination, Host, is_private};
-pub use session::{Metadata, Network};
+pub use outbound::{BoxPacketConn, Group, Outbound, PacketConn};
+pub use session::{Metadata, Network, Protocol};
 
 use std::future::Future;
 use std::pin::Pin;

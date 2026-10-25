@@ -5,8 +5,9 @@ use sbr_config::HttpOutbound;
 use sbr_core::{BoxFuture, Destination, Stream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::{Outbound, Upstream};
+use super::Upstream;
 use crate::httpx;
+use sbr_core::Outbound;
 
 /// HTTP/1.1 CONNECT client (plain; TLS-wrapped proxies come with the TLS layer).
 pub struct HttpConnect {
@@ -48,10 +49,7 @@ impl Outbound for HttpConnect {
     fn connect<'a>(&'a self, dest: &'a Destination) -> BoxFuture<'a, io::Result<Stream>> {
         Box::pin(async move {
             let mut s = self.upstream.connect(&self.server).await?;
-            let req = format!(
-                "CONNECT {dest} HTTP/1.1\r\nHost: {dest}\r\n{}\r\n",
-                self.extra_headers
-            );
+            let req = format!("CONNECT {dest} HTTP/1.1\r\nHost: {dest}\r\n{}\r\n", self.extra_headers);
             s.write_all(req.as_bytes()).await?;
             // Read exactly the response head, byte-wise, so no tunnel bytes are consumed.
             let mut head = Vec::with_capacity(256);

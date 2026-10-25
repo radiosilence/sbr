@@ -1,26 +1,31 @@
 //! The sbr runtime: builds inbounds and outbounds from a sing-box config and
 //! moves bytes between them.
 
+pub mod dispatch;
 mod httpx;
 pub mod inbound;
 pub mod outbound;
 mod socks5;
+pub mod udp;
 
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use sbr_config::Options;
+use sbr_config::{InboundKind, Options};
+use sbr_core::dns::{Dns, SystemDns};
 use sbr_core::relay::{self, Traffic};
-use sbr_core::router::{Decision, Router};
+use sbr_core::router::Router;
 use sbr_core::{Metadata, Stream};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
-pub use outbound::{Outbound, Selector};
+pub use dispatch::{InboundStream, OpenError};
+pub use outbound::{BuildContext, Group, Outbound, PacketConn, Selector};
 pub use sbr_config;
+pub use sbr_core;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -32,21 +37,23 @@ pub enum Error {
     Router(#[from] sbr_core::router::BuildError),
     #[error("inbounds[{0}] ({1}): listen {2}: {3}")]
     Listen(usize, String, SocketAddr, io::Error),
-}
-
-#[derive(Debug)]
-pub enum OpenError {
-    Rejected { drop: bool },
-    Io(io::Error),
+    #[error("inbounds[{0}] ({1}): {2}")]
+    Inbound(usize, String, String),
 }
 
 /// Knobs that are about the host, not the config.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Settings {
     /// Per-direction relay buffer.
     pub relay_buffer: usize,
-    /// Resolves `local` rule-set paths. Defaults to the filesystem.
+    /// Resolves relative paths (local rule-sets, cache files).
     pub base_dir: Option<std::path::PathBuf>,
+    /// DNS implementation; defaults to the OS resolver.
+    pub dns: Option<Arc<dyn Dns>>,
+    /// Pre-opened TUN file descriptor (Apple Network Extension, Android
+    /// VpnService). When set, the `tun` inbound adopts it instead of creating
+    /// and configuring an interface.
+    pub tun_fd: Option<i32>,
 }
 
 impl Default for Settings {
@@ -54,13 +61,17 @@ impl Default for Settings {
         Self {
             relay_buffer: relay::DEFAULT_BUFFER,
             base_dir: None,
+            dns: None,
+            tun_fd: None,
         }
     }
 }
 
 pub struct Engine {
-    outbounds: Vec<Arc<dyn Outbound>>,
-    router: Router,
+    pub(crate) outbounds: Vec<Arc<dyn Outbound>>,
+    pub(crate) router: Router,
+    pub(crate) dns: Arc<dyn Dns>,
+    pub(crate) nat: udp::Nat,
     pub traffic: Traffic,
     active: AtomicUsize,
     relay_buffer: usize,
@@ -68,24 +79,21 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(options: &Options, settings: &Settings) -> Result<Self, Error> {
-        let outbounds = outbound::build_all(&options.outbounds)?;
+        let dns: Arc<dyn Dns> = settings.dns.clone().unwrap_or_else(|| Arc::new(SystemDns));
+        let ctx = BuildContext { dns: dns.clone() };
+        let outbounds = outbound::build_all(&options.outbounds, &ctx)?;
         let router = Router::new(
             &options.route.rules,
             &options.route.rule_sets,
             options.final_outbound(),
             |tag| outbounds.iter().position(|o| o.tag() == tag),
-            |path| {
-                let p = std::path::Path::new(path);
-                let p = match &settings.base_dir {
-                    Some(base) if p.is_relative() => base.join(p),
-                    _ => p.to_path_buf(),
-                };
-                std::fs::read_to_string(p)
-            },
+            |path| std::fs::read_to_string(resolve_path(settings, path)),
         )?;
         Ok(Self {
             outbounds,
             router,
+            dns,
+            nat: udp::Nat::default(),
             traffic: Traffic::default(),
             active: AtomicUsize::new(0),
             relay_buffer: settings.relay_buffer,
@@ -100,34 +108,15 @@ impl Engine {
         &self.outbounds
     }
 
+    pub fn dns(&self) -> &Arc<dyn Dns> {
+        &self.dns
+    }
+
     pub fn active_connections(&self) -> usize {
         self.active.load(Ordering::Relaxed)
     }
 
-    /// Route and connect. Inbounds call this, then reply to the client.
-    pub async fn open(&self, meta: &Metadata) -> Result<Stream, OpenError> {
-        match self.router.route(meta) {
-            Decision::Reject { drop } => {
-                info!(inbound = %meta.inbound, dest = %meta.destination, "rejected");
-                Err(OpenError::Rejected { drop })
-            }
-            Decision::Route(i) => {
-                let out = &self.outbounds[i];
-                debug!(inbound = %meta.inbound, dest = %meta.destination, outbound = out.tag(), "route");
-                out.connect(&meta.destination).await.map_err(|e| {
-                    warn!(inbound = %meta.inbound, dest = %meta.destination, outbound = out.tag(), error = %e, "connect failed");
-                    OpenError::Io(e)
-                })
-            }
-        }
-    }
-
-    pub async fn relay<A>(
-        &self,
-        meta: &Metadata,
-        mut client: A,
-        mut remote: Stream,
-    ) -> io::Result<()>
+    pub(crate) async fn relay<A>(&self, meta: &Metadata, mut client: A, mut remote: Stream) -> io::Result<()>
     where
         A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
@@ -140,16 +129,17 @@ impl Engine {
                 Ok(())
             }
             // Resets mid-stream are normal life for a proxy.
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
-                ) =>
-            {
-                Ok(())
-            }
+            Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe) => Ok(()),
             Err(e) => Err(e),
         }
+    }
+}
+
+pub fn resolve_path(settings: &Settings, path: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(path);
+    match &settings.base_dir {
+        Some(base) if p.is_relative() => base.join(p),
+        _ => p.to_path_buf(),
     }
 }
 
@@ -170,9 +160,12 @@ impl Instance {
         let mut tasks = JoinSet::new();
         let mut listening = Vec::new();
         for (i, ib) in options.inbounds.iter().enumerate() {
-            let (sbr_config::InboundKind::Mixed(p)
-            | sbr_config::InboundKind::Socks(p)
-            | sbr_config::InboundKind::Http(p)) = &ib.kind;
+            let p = match &ib.kind {
+                InboundKind::Mixed(p) | InboundKind::Socks(p) | InboundKind::Http(p) => p,
+                InboundKind::Tun(_) => {
+                    return Err(Error::Inbound(i, ib.tag.clone(), "tun inbound not wired yet".into()));
+                }
+            };
             let addr = SocketAddr::new(p.listen.listen, p.listen.listen_port);
             let listener = TcpListener::bind(addr)
                 .await
@@ -182,11 +175,7 @@ impl Instance {
                 .map_err(|e| Error::Listen(i, ib.tag.clone(), addr, e))?;
             info!(inbound = %ib.tag, %local, "listening");
             listening.push((ib.tag.clone(), local));
-            let ctx = Arc::new(inbound::Context::from_kind(
-                engine.clone(),
-                &ib.tag,
-                &ib.kind,
-            ));
+            let ctx = Arc::new(inbound::Context::new(engine.clone(), &ib.tag, &ib.kind));
             tasks.spawn(accept_loop(listener, ctx));
         }
         Ok(Self {

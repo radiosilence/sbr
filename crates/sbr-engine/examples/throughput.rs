@@ -54,9 +54,7 @@ async fn ss_server(method: &str, key: &str) -> u16 {
                 };
                 let mut r = TcpStream::connect(addr.to_string()).await.unwrap();
                 r.set_nodelay(true).unwrap();
-                let _ =
-                    tokio::io::copy_bidirectional_with_sizes(&mut s, &mut r, 64 * 1024, 64 * 1024)
-                        .await;
+                let _ = tokio::io::copy_bidirectional_with_sizes(&mut s, &mut r, 64 * 1024, 64 * 1024).await;
             });
         }
     });

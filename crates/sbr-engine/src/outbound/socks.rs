@@ -3,8 +3,9 @@ use std::io;
 use sbr_config::SocksOutbound;
 use sbr_core::{BoxFuture, Destination, Stream};
 
-use super::{Outbound, Upstream};
+use super::Upstream;
 use crate::socks5;
+use sbr_core::Outbound;
 
 pub struct Socks {
     tag: String,
@@ -15,10 +16,7 @@ pub struct Socks {
 
 impl Socks {
     pub fn new(tag: String, c: &SocksOutbound, upstream: Upstream) -> Self {
-        let auth = c
-            .username
-            .clone()
-            .map(|u| (u, c.password.clone().unwrap_or_default()));
+        let auth = c.username.clone().map(|u| (u, c.password.clone().unwrap_or_default()));
         Self {
             tag,
             server: Destination::from_host_port(&c.server.server, c.server.server_port),

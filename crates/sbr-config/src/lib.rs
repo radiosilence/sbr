@@ -9,6 +9,7 @@
 
 mod obj;
 mod route;
+mod tls;
 pub mod types;
 
 use std::net::{IpAddr, Ipv4Addr};
@@ -18,6 +19,7 @@ use obj::{Diag, Obj};
 use serde_json::Value;
 
 pub use route::*;
+pub use tls::{Ech, Multiplex, Reality, TlsOutbound, Transport, Utls};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -67,6 +69,34 @@ pub enum InboundKind {
     Mixed(ProxyInbound),
     Socks(ProxyInbound),
     Http(ProxyInbound),
+    Tun(TunInbound),
+}
+
+impl InboundKind {
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Mixed(_) => "mixed",
+            Self::Socks(_) => "socks",
+            Self::Http(_) => "http",
+            Self::Tun(_) => "tun",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TunInbound {
+    pub interface_name: Option<String>,
+    pub mtu: Option<u32>,
+    /// Interface prefixes, e.g. 172.19.0.1/30 and fdfe:dcba:9876::1/126.
+    pub address: Vec<ipnet::IpNet>,
+    pub auto_route: bool,
+    pub strict_route: bool,
+    pub route_address: Vec<ipnet::IpNet>,
+    pub route_exclude_address: Vec<ipnet::IpNet>,
+    pub loopback_address: Vec<IpAddr>,
+    pub udp_timeout: Option<Duration>,
+    /// `system`, `gvisor` or `mixed`; sbr always runs its own system stack.
+    pub stack: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,9 +243,7 @@ impl Options {
     }
 
     pub fn from_value(value: Value) -> Result<Self> {
-        let mut diag = Diag {
-            warnings: Vec::new(),
-        };
+        let mut diag = Diag { warnings: Vec::new() };
         let mut root = Obj::new(value, "")?;
         root.raw("$schema");
 
@@ -236,10 +264,7 @@ impl Options {
         }
         if let Some(exp) = root.raw("experimental") {
             let mut exp = Obj::new(exp, "experimental")?;
-            exp.tolerate(
-                &mut diag,
-                &["cache_file", "clash_api", "v2ray_api", "debug"],
-            );
+            exp.tolerate(&mut diag, &["cache_file", "clash_api", "v2ray_api", "debug"]);
             exp.finish()?;
         }
         for key in [
@@ -297,10 +322,7 @@ impl Options {
 
     /// The tag of the outbound used when no rule matches.
     pub fn final_outbound(&self) -> &str {
-        self.route
-            .final_outbound
-            .as_deref()
-            .unwrap_or(&self.outbounds[0].tag)
+        self.route.final_outbound.as_deref().unwrap_or(&self.outbounds[0].tag)
     }
 
     fn check_references(&self) -> Result<()> {
@@ -377,24 +399,16 @@ impl Options {
             .map(|(i, r)| (r, format!("route.rules[{i}]")))
             .collect();
         while let Some((rule, path)) = stack.pop() {
-            if let RuleAction::Route { outbound } = &rule.action {
+            if let RuleAction::Route { outbound, .. } = &rule.action {
                 need(format!("{path}.outbound"), outbound)?;
             }
             if let RuleKind::Logical { rules, .. } = &rule.kind {
-                stack.extend(
-                    rules
-                        .iter()
-                        .enumerate()
-                        .map(|(i, r)| (r, format!("{path}.rules[{i}]"))),
-                );
+                stack.extend(rules.iter().enumerate().map(|(i, r)| (r, format!("{path}.rules[{i}]"))));
             }
             if let RuleKind::Default(m) = &rule.kind {
                 for i in &m.inbound {
                     if !in_tags.contains(i.as_str()) {
-                        return Err(Error::at(
-                            &format!("{path}.inbound"),
-                            format!("inbound not found: {i}"),
-                        ));
+                        return Err(Error::at(&format!("{path}.inbound"), format!("inbound not found: {i}")));
                     }
                 }
                 for rs in &m.rule_set {
@@ -415,10 +429,7 @@ fn array(v: Option<Value>, path: &str) -> Result<Vec<Value>> {
     match v {
         None => Ok(Vec::new()),
         Some(Value::Array(a)) => Ok(a),
-        Some(other) => Err(Error::at(
-            path,
-            format!("expected array, got {}", obj::kind(&other)),
-        )),
+        Some(other) => Err(Error::at(path, format!("expected array, got {}", obj::kind(&other)))),
     }
 }
 
@@ -430,10 +441,7 @@ fn parse_log(mut o: Obj) -> Result<LogOptions> {
         timestamp: o.bool("timestamp")?,
     };
     if let Some(l) = &log.level
-        && ![
-            "trace", "debug", "info", "warn", "warning", "error", "fatal", "panic",
-        ]
-        .contains(&l.as_str())
+        && !["trace", "debug", "info", "warn", "warning", "error", "fatal", "panic"].contains(&l.as_str())
     {
         return Err(Error::at("log.level", format!("unknown level {l:?}")));
     }
@@ -515,6 +523,7 @@ fn parse_inbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Inbound> {
                 _ => InboundKind::Http(p),
             }
         }
+        "tun" => InboundKind::Tun(parse_tun(&mut o, diag)?),
         other => {
             return Err(Error::at(
                 &o.sub("type"),
@@ -526,7 +535,114 @@ fn parse_inbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Inbound> {
     Ok(Inbound { tag, kind })
 }
 
-fn parse_dial(o: &mut Obj, diag: &mut Diag) -> Result<Dial> {
+fn prefixes(o: &mut Obj, key: &str) -> Result<Vec<ipnet::IpNet>> {
+    let path = o.sub(key);
+    o.list::<String>(key)?
+        .into_iter()
+        .map(|s| {
+            s.parse::<ipnet::IpNet>()
+                .or_else(|_| s.parse::<IpAddr>().map(ipnet::IpNet::from))
+                .map_err(|_| Error::at(&path, format!("invalid prefix {s:?}")))
+        })
+        .collect()
+}
+
+fn parse_tun(o: &mut Obj, diag: &mut Diag) -> Result<TunInbound> {
+    let mut t = TunInbound {
+        interface_name: o.string("interface_name")?,
+        mtu: o.opt::<u32>("mtu")?.filter(|m| *m != 0),
+        address: prefixes(o, "address")?,
+        auto_route: o.bool("auto_route")?,
+        strict_route: o.bool("strict_route")?,
+        route_address: prefixes(o, "route_address")?,
+        route_exclude_address: prefixes(o, "route_exclude_address")?,
+        loopback_address: o.list("loopback_address")?,
+        udp_timeout: match o.raw("udp_timeout") {
+            // Legacy integer seconds or a duration string.
+            Some(Value::Number(n)) => n.as_u64().map(Duration::from_secs),
+            Some(Value::String(s)) if !s.is_empty() => {
+                Some(types::parse_duration(&s).map_err(|e| Error::at(&o.sub("udp_timeout"), e))?)
+            }
+            _ => None,
+        },
+        stack: o.string("stack")?,
+    };
+    // Deprecated split fields, still accepted by sing-box.
+    for (legacy, into_route, exclude) in [
+        ("inet4_address", false, false),
+        ("inet6_address", false, false),
+        ("inet4_route_address", true, false),
+        ("inet6_route_address", true, false),
+        ("inet4_route_exclude_address", false, true),
+        ("inet6_route_exclude_address", false, true),
+    ] {
+        let v = prefixes(o, legacy)?;
+        match (into_route, exclude) {
+            (true, _) => t.route_address.extend(v),
+            (_, true) => t.route_exclude_address.extend(v),
+            _ => t.address.extend(v),
+        }
+    }
+    if let Some(stack) = &t.stack {
+        if !["system", "gvisor", "mixed"].contains(&stack.as_str()) {
+            return Err(Error::at(&o.sub("stack"), format!("unknown stack {stack:?}")));
+        }
+        if stack != "system" {
+            diag.warnings
+                .push(format!("{}.stack: {stack:?} runs on sbr's system stack", o.path()));
+        }
+    }
+    if t.address.is_empty() {
+        return Err(Error::at(&o.sub("address"), "missing interface address"));
+    }
+    for k in [
+        "route_address_set",
+        "route_exclude_address_set",
+        "auto_redirect",
+        "netns",
+    ] {
+        if o.has(k) {
+            return Err(Error::at(&o.sub(k), "not supported by sbr yet"));
+        }
+    }
+    o.tolerate(
+        diag,
+        &[
+            "dns_mode",
+            "dns_address",
+            "iproute2_table_index",
+            "iproute2_rule_index",
+            "auto_redirect_input_mark",
+            "auto_redirect_output_mark",
+            "auto_redirect_reset_mark",
+            "auto_redirect_tproxy_mark",
+            "auto_redirect_nfqueue",
+            "auto_redirect_iproute2_fallback_rule_index",
+            "exclude_mptcp",
+            "include_interface",
+            "exclude_interface",
+            "include_uid",
+            "include_uid_range",
+            "exclude_uid",
+            "exclude_uid_range",
+            "include_android_user",
+            "include_package",
+            "exclude_package",
+            "include_mac_address",
+            "exclude_mac_address",
+            "udp_mapping",
+            "udp_filtering",
+            "udp_nat_max",
+            "multi_queue",
+            "platform",
+            "gso",
+            "endpoint_independent_nat",
+        ],
+    );
+    Ok(t)
+}
+
+pub(crate) fn parse_dial(o: &mut Obj, diag: &mut Diag) -> Result<Dial> {
     let d = Dial {
         detour: o.string("detour")?,
         connect_timeout: o.duration("connect_timeout")?,
@@ -550,16 +666,13 @@ fn parse_dial(o: &mut Obj, diag: &mut Diag) -> Result<Dial> {
     Ok(d)
 }
 
-fn parse_server(o: &mut Obj) -> Result<ServerAddr> {
+pub(crate) fn parse_server(o: &mut Obj) -> Result<ServerAddr> {
     let server: String = o.req("server")?;
     if server.is_empty() {
         return Err(Error::at(&o.sub("server"), "empty server address"));
     }
     let server_port: u16 = o.req("server_port")?;
-    Ok(ServerAddr {
-        server,
-        server_port,
-    })
+    Ok(ServerAddr { server, server_port })
 }
 
 fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
@@ -583,16 +696,10 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
             let dial = parse_dial(&mut o, diag)?;
             let version = o.string("version")?.unwrap_or_else(|| "5".into());
             if !["4", "4a", "5"].contains(&version.as_str()) {
-                return Err(Error::at(
-                    &o.sub("version"),
-                    format!("unknown version {version:?}"),
-                ));
+                return Err(Error::at(&o.sub("version"), format!("unknown version {version:?}")));
             }
             if version != "5" {
-                return Err(Error::at(
-                    &o.sub("version"),
-                    "only SOCKS5 is supported by sbr yet",
-                ));
+                return Err(Error::at(&o.sub("version"), "only SOCKS5 is supported by sbr yet"));
             }
             if let Some(n) = o.opt::<String>("network")?
                 && n == "udp"
@@ -614,10 +721,7 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
                 .get::<serde_json::Map<String, Value>>("headers")?
                 .into_iter()
                 .flat_map(|(k, v)| match v {
-                    Value::Array(vs) => vs
-                        .into_iter()
-                        .map(|v| (k.clone(), json_str(v)))
-                        .collect::<Vec<_>>(),
+                    Value::Array(vs) => vs.into_iter().map(|v| (k.clone(), json_str(v))).collect::<Vec<_>>(),
                     v => vec![(k, json_str(v))],
                 })
                 .collect();

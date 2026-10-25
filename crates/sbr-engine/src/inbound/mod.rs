@@ -24,11 +24,13 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn from_kind(engine: Arc<Engine>, tag: &str, kind: &InboundKind) -> Self {
+    /// Proxy inbounds only (mixed/socks/http).
+    pub fn new(engine: Arc<Engine>, tag: &str, kind: &InboundKind) -> Self {
         let (flavor, p) = match kind {
             InboundKind::Mixed(p) => (Flavor::Mixed, p),
             InboundKind::Socks(p) => (Flavor::Socks, p),
             InboundKind::Http(p) => (Flavor::Http, p),
+            InboundKind::Tun(_) => unreachable!("tun is not a proxy inbound"),
         };
         Self {
             engine,
@@ -48,19 +50,13 @@ impl Context {
 
     pub fn check_user(&self, user: &str, pass: &str) -> bool {
         // Not constant-time; matches sing-box. Local proxy auth is a speed bump, not a vault.
-        self.users
-            .iter()
-            .any(|u| u.username == user && u.password == pass)
+        self.users.iter().any(|u| u.username == user && u.password == pass)
     }
 
     pub fn check_basic(&self, header: &[u8]) -> Option<Arc<str>> {
         let v = std::str::from_utf8(header).ok()?.trim();
-        let b64 = v
-            .strip_prefix("Basic ")
-            .or_else(|| v.strip_prefix("basic "))?;
-        let raw = base64::engine::general_purpose::STANDARD
-            .decode(b64.trim())
-            .ok()?;
+        let b64 = v.strip_prefix("Basic ").or_else(|| v.strip_prefix("basic "))?;
+        let raw = base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok()?;
         let (u, p) = std::str::from_utf8(&raw).ok()?.split_once(':')?;
         self.check_user(u, p).then(|| u.into())
     }

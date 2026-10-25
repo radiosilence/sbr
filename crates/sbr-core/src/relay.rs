@@ -18,21 +18,13 @@ pub struct Traffic {
 
 impl Traffic {
     pub fn snapshot(&self) -> (u64, u64) {
-        (
-            self.up.load(Ordering::Relaxed),
-            self.down.load(Ordering::Relaxed),
-        )
+        (self.up.load(Ordering::Relaxed), self.down.load(Ordering::Relaxed))
     }
 }
 
 /// Copy until both directions hit EOF, propagating half-closes. Returns
 /// (client→remote, remote→client) byte counts.
-pub async fn relay<A, B>(
-    client: &mut A,
-    remote: &mut B,
-    buffer: usize,
-    traffic: &Traffic,
-) -> io::Result<(u64, u64)>
+pub async fn relay<A, B>(client: &mut A, remote: &mut B, buffer: usize, traffic: &Traffic) -> io::Result<(u64, u64)>
 where
     A: AsyncRead + AsyncWrite + Unpin + ?Sized,
     B: AsyncRead + AsyncWrite + Unpin + ?Sized,

@@ -19,11 +19,7 @@ pub struct SbrInstance {
 const RELAY_BUFFER: usize = 16 * 1024;
 
 fn worker_threads() -> usize {
-    if cfg!(any(
-        target_os = "ios",
-        target_os = "tvos",
-        target_os = "visionos"
-    )) {
+    if cfg!(any(target_os = "ios", target_os = "tvos", target_os = "visionos")) {
         2
     } else {
         std::thread::available_parallelism().map_or(4, |n| n.get().min(8))
@@ -83,6 +79,8 @@ pub unsafe extern "C" fn sbr_start(
             .build()
             .map_err(|e| e.to_string())?;
         let settings = Settings {
+            dns: None,
+            tun_fd: None,
             relay_buffer: RELAY_BUFFER,
             base_dir: unsafe { str_arg(base_dir) }.map(Into::into),
         };
@@ -119,8 +117,7 @@ pub unsafe extern "C" fn sbr_stop(instance: *mut SbrInstance) {
         let _g = b.runtime.enter();
         i.shutdown();
     }
-    b.runtime
-        .shutdown_timeout(std::time::Duration::from_secs(2));
+    b.runtime.shutdown_timeout(std::time::Duration::from_secs(2));
 }
 
 fn instance_ref<'a>(p: *mut SbrInstance) -> Option<&'a Instance> {
@@ -131,11 +128,7 @@ fn instance_ref<'a>(p: *mut SbrInstance) -> Option<&'a Instance> {
 /// # Safety
 /// `instance` must be live; strings NULL or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sbr_select(
-    instance: *mut SbrInstance,
-    group: *const c_char,
-    member: *const c_char,
-) -> i32 {
+pub unsafe extern "C" fn sbr_select(instance: *mut SbrInstance, group: *const c_char, member: *const c_char) -> i32 {
     let (Some(i), Some(g), Some(m)) = (instance_ref(instance), unsafe { str_arg(group) }, unsafe {
         str_arg(member)
     }) else {
@@ -143,7 +136,7 @@ pub unsafe extern "C" fn sbr_select(
     };
     i.engine
         .outbound(g)
-        .and_then(|o| o.as_selector())
+        .and_then(|o| o.as_group())
         .is_some_and(|s| s.select(m)) as i32
 }
 
@@ -159,18 +152,18 @@ pub unsafe extern "C" fn sbr_groups(instance: *mut SbrInstance) -> *mut c_char {
         .engine
         .outbounds()
         .iter()
-        .filter_map(|o| o.as_selector().map(|s| (o, s)))
+        .filter_map(|o| o.as_group().map(|s| (o, s)))
         .enumerate()
     {
         if n > 0 {
             out.push(',');
         }
-        let members: Vec<String> = s.1.members().map(json_str).collect();
+        let members: Vec<String> = s.1.members().iter().map(|m| json_str(m.tag())).collect();
         out.push_str(&format!(
             r#"{{"tag":{},"type":{},"selected":{},"members":[{}]}}"#,
             json_str(s.0.tag()),
             json_str(s.0.kind()),
-            json_str(s.1.selected()),
+            json_str(s.1.selected().tag()),
             members.join(",")
         ));
     }
@@ -196,12 +189,7 @@ fn json_str(s: &str) -> String {
 /// # Safety
 /// `instance` must be live; out-pointers NULL or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sbr_stats(
-    instance: *mut SbrInstance,
-    up: *mut u64,
-    down: *mut u64,
-    active: *mut u64,
-) {
+pub unsafe extern "C" fn sbr_stats(instance: *mut SbrInstance, up: *mut u64, down: *mut u64, active: *mut u64) {
     let Some(i) = instance_ref(instance) else {
         return;
     };
@@ -264,12 +252,7 @@ mod tests {
             assert!(sbr_check(cfg.as_ptr()).is_null());
             let bad = CString::new(r#"{"outbounds":[{"type":"warp-drive"}]}"#).unwrap();
             let e = sbr_check(bad.as_ptr());
-            assert!(
-                CStr::from_ptr(e)
-                    .to_str()
-                    .unwrap()
-                    .contains("outbounds[0].type")
-            );
+            assert!(CStr::from_ptr(e).to_str().unwrap().contains("outbounds[0].type"));
             sbr_string_free(e);
 
             let mut err = ptr::null_mut();

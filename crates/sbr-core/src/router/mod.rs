@@ -12,7 +12,7 @@ mod sets;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use sbr_config::{LogicalMode, Matchers, RejectMethod, Rule, RuleAction, RuleKind, RuleSet};
+use sbr_config::{DomainStrategy, LogicalMode, Matchers, Protocol, RejectMethod, Rule, RuleAction, RuleKind, RuleSet};
 
 use crate::addr::is_private;
 use crate::session::{Metadata, Network};
@@ -28,19 +28,100 @@ pub enum BuildError {
     Outbound(String),
 }
 
-/// What to do with a connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Decision {
-    /// Index into the engine's outbound table.
-    Route(usize),
+/// A compiled rule action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Final. Index into the engine's outbound table.
+    Route {
+        outbound: usize,
+        options: RouteOptions,
+    },
+    /// Final.
     Reject {
         drop: bool,
+        no_drop: bool,
+    },
+    /// Final.
+    HijackDns,
+    RouteOptions(RouteOptions),
+    /// Empty `sniffers` means "all".
+    Sniff {
+        sniffers: Vec<Protocol>,
+        timeout: Option<std::time::Duration>,
+    },
+    Resolve {
+        server: Option<String>,
+        strategy: Option<DomainStrategy>,
     },
 }
 
+impl Action {
+    pub fn is_final(&self) -> bool {
+        matches!(self, Action::Route { .. } | Action::Reject { .. } | Action::HijackDns)
+    }
+}
+
+/// Resolved `route-options`; later options override earlier ones field by field.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RouteOptions {
+    pub override_address: Option<crate::Host>,
+    pub override_port: Option<u16>,
+    pub udp_disable_domain_unmapping: bool,
+    pub udp_connect: bool,
+    pub udp_timeout: Option<std::time::Duration>,
+    pub tls_fragment: bool,
+    pub tls_record_fragment: bool,
+    pub tls_fragment_fallback_delay: Option<std::time::Duration>,
+}
+
+impl RouteOptions {
+    fn compile(o: &sbr_config::RouteOptionsAction) -> Self {
+        Self {
+            override_address: o
+                .override_address
+                .as_deref()
+                .map(|a| crate::Destination::from_host_port(a, 0).host),
+            override_port: o.override_port,
+            udp_disable_domain_unmapping: o.udp_disable_domain_unmapping,
+            udp_connect: o.udp_connect,
+            udp_timeout: o.udp_timeout,
+            tls_fragment: o.tls_fragment,
+            tls_record_fragment: o.tls_record_fragment,
+            tls_fragment_fallback_delay: o.tls_fragment_fallback_delay,
+        }
+    }
+
+    pub fn merge(&mut self, o: &RouteOptions) {
+        if o.override_address.is_some() {
+            self.override_address.clone_from(&o.override_address);
+        }
+        if o.override_port.is_some() {
+            self.override_port = o.override_port;
+        }
+        self.udp_disable_domain_unmapping |= o.udp_disable_domain_unmapping;
+        self.udp_connect |= o.udp_connect;
+        if o.udp_timeout.is_some() {
+            self.udp_timeout = o.udp_timeout;
+        }
+        self.tls_fragment |= o.tls_fragment;
+        self.tls_record_fragment |= o.tls_record_fragment;
+        if o.tls_fragment_fallback_delay.is_some() {
+            self.tls_fragment_fallback_delay = o.tls_fragment_fallback_delay;
+        }
+    }
+
+    /// Where to actually connect.
+    pub fn apply(&self, dest: &crate::Destination) -> crate::Destination {
+        crate::Destination {
+            host: self.override_address.clone().unwrap_or_else(|| dest.host.clone()),
+            port: self.override_port.unwrap_or(dest.port),
+        }
+    }
+}
+
 pub struct Router {
-    rules: Vec<(Node, Decision)>,
-    fallback: Decision,
+    rules: Vec<(Node, Action)>,
+    final_outbound: usize,
 }
 
 impl Router {
@@ -59,8 +140,7 @@ impl Router {
             let rules = match &rs.source {
                 sbr_config::RuleSetSource::Inline(r) => r.clone(),
                 sbr_config::RuleSetSource::LocalSource(path) => {
-                    let text = load(path)
-                        .map_err(|e| BuildError::RuleSet(rs.tag.clone(), format!("{path}: {e}")))?;
+                    let text = load(path).map_err(|e| BuildError::RuleSet(rs.tag.clone(), format!("{path}: {e}")))?;
                     sbr_config::parse_rule_set_source(&text)
                         .map_err(|e| BuildError::RuleSet(rs.tag.clone(), e.to_string()))?
                 }
@@ -70,39 +150,83 @@ impl Router {
                 .enumerate()
                 .map(|(i, r)| Node::compile(r, &format!("rule_set[{}].rules[{i}]", rs.tag), &sets))
                 .collect::<Result<Vec<_>, _>>()?;
-            let mergeable =
-                matches!(nodes.as_slice(), [Node::Default(d)] if !d.invert && d.rule_set.is_none());
+            let mergeable = matches!(nodes.as_slice(), [Node::Default(d)] if !d.invert && d.rule_set.is_none());
             sets.insert(rs.tag.clone(), Arc::new(CompiledSet { nodes, mergeable }));
         }
 
         let resolve = |tag: &str| outbound(tag).ok_or_else(|| BuildError::Outbound(tag.to_owned()));
         let mut compiled = Vec::with_capacity(rules.len());
         for (i, r) in rules.iter().enumerate() {
-            let decision = match &r.action {
-                RuleAction::Route { outbound } => Decision::Route(resolve(outbound)?),
-                RuleAction::Reject { method, .. } => Decision::Reject {
-                    drop: *method == RejectMethod::Drop,
+            let action = match &r.action {
+                RuleAction::Route { outbound, options } => Action::Route {
+                    outbound: resolve(outbound)?,
+                    options: RouteOptions::compile(options),
                 },
-                // Non-final actions: nothing for the router to decide.
-                RuleAction::Sniff | RuleAction::None => continue,
+                RuleAction::Reject { method, no_drop } => Action::Reject {
+                    drop: *method == RejectMethod::Drop,
+                    no_drop: *no_drop,
+                },
+                RuleAction::HijackDns => Action::HijackDns,
+                RuleAction::RouteOptions(o) => Action::RouteOptions(RouteOptions::compile(o)),
+                RuleAction::Sniff { sniffers, timeout } => Action::Sniff {
+                    sniffers: sniffers.clone(),
+                    timeout: *timeout,
+                },
+                RuleAction::Resolve { server, strategy } => Action::Resolve {
+                    server: server.clone(),
+                    strategy: *strategy,
+                },
+                RuleAction::None => continue,
             };
-            compiled.push((
-                Node::compile(r, &format!("route.rules[{i}]"), &sets)?,
-                decision,
-            ));
+            compiled.push((Node::compile(r, &format!("route.rules[{i}]"), &sets)?, action));
         }
         Ok(Self {
             rules: compiled,
-            fallback: Decision::Route(resolve(final_tag)?),
+            final_outbound: resolve(final_tag)?,
         })
     }
 
-    pub fn route(&self, meta: &Metadata) -> Decision {
+    /// The first rule at or after `from` that matches, with its index.
+    /// Callers run non-final actions and continue from `index + 1`.
+    pub fn next(&self, meta: &Metadata, from: usize) -> Option<(usize, &Action)> {
         let ctx = Ctx::default();
         self.rules
             .iter()
-            .find(|(n, _)| n.matches(meta, ctx))
-            .map_or(self.fallback, |(_, d)| *d)
+            .enumerate()
+            .skip(from)
+            .find(|(_, (n, _))| n.matches(meta, ctx))
+            .map(|(i, (_, a))| (i, a))
+    }
+
+    /// `route.final`, or the first outbound.
+    pub fn final_outbound(&self) -> usize {
+        self.final_outbound
+    }
+
+    /// Evaluate to a final action without performing any side effects
+    /// (sniff/resolve are skipped, route-options are folded in).
+    pub fn route(&self, meta: &Metadata) -> Action {
+        let mut opts = RouteOptions::default();
+        let mut i = 0;
+        while let Some((idx, action)) = self.next(meta, i) {
+            i = idx + 1;
+            match action {
+                Action::RouteOptions(o) => opts.merge(o),
+                Action::Route { outbound, options } => {
+                    opts.merge(options);
+                    return Action::Route {
+                        outbound: *outbound,
+                        options: opts,
+                    };
+                }
+                a if a.is_final() => return a.clone(),
+                _ => {}
+            }
+        }
+        Action::Route {
+            outbound: self.final_outbound,
+            options: opts,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -141,6 +265,7 @@ struct DefaultRule {
     inbound: HashSet<Box<str>>,
     auth_user: HashSet<Box<str>>,
     network: Vec<Network>,
+    protocol: Vec<Protocol>,
     ip_version: Option<u8>,
     source_ip: IpSet,
     source_ip_is_private: bool,
@@ -188,9 +313,7 @@ impl Node {
         sets: &std::collections::HashMap<String, Arc<CompiledSet>>,
     ) -> Result<Node, BuildError> {
         Ok(match &r.kind {
-            RuleKind::Default(m) => {
-                Node::Default(Box::new(DefaultRule::compile(m, r.invert, path, sets)?))
-            }
+            RuleKind::Default(m) => Node::Default(Box::new(DefaultRule::compile(m, r.invert, path, sets)?)),
             RuleKind::Logical { mode, rules } => Node::Logical {
                 mode: *mode,
                 invert: r.invert,
@@ -206,11 +329,7 @@ impl Node {
     fn matches(&self, meta: &Metadata, ctx: Ctx) -> bool {
         match self {
             Node::Default(d) => d.matches(meta, ctx),
-            Node::Logical {
-                mode,
-                rules,
-                invert,
-            } => {
+            Node::Logical { mode, rules, invert } => {
                 let hit = match mode {
                     LogicalMode::And => rules.iter().all(|r| r.matches(meta, ctx)),
                     LogicalMode::Or => rules.iter().any(|r| r.matches(meta, ctx)),
@@ -248,17 +367,13 @@ impl DefaultRule {
             inbound: m.inbound.iter().map(|s| s.as_str().into()).collect(),
             auth_user: m.auth_user.iter().map(|s| s.as_str().into()).collect(),
             network: m.network.clone(),
+            protocol: m.protocol.clone(),
             ip_version: m.ip_version,
             source_ip: IpSet::new(&m.source_ip_cidr),
             source_ip_is_private: m.source_ip_is_private,
             source_port: PortSet::new(&m.source_port, &m.source_port_range),
-            domain: DomainSet::new(
-                &m.domain,
-                &m.domain_suffix,
-                &m.domain_keyword,
-                &m.domain_regex,
-            )
-            .map_err(|e| BuildError::Regex(path.to_owned(), e))?,
+            domain: DomainSet::new(&m.domain, &m.domain_suffix, &m.domain_keyword, &m.domain_regex)
+                .map_err(|e| BuildError::Regex(path.to_owned(), e))?,
             dest_ip: IpSet::new(&m.ip_cidr),
             dest_ip_is_private: m.ip_is_private,
             dest_port: PortSet::new(&m.port, &m.port_range),
@@ -267,6 +382,7 @@ impl DefaultRule {
         let empty = r.inbound.is_empty()
             && r.auth_user.is_empty()
             && r.network.is_empty()
+            && r.protocol.is_empty()
             && r.ip_version.is_none()
             && r.source_ip.is_empty()
             && !r.source_ip_is_private
@@ -283,21 +399,16 @@ impl DefaultRule {
         !self.dest_ip.is_empty() || self.dest_ip_is_private
     }
 
-    fn dest_ip_hit(&self, ip: Option<std::net::IpAddr>) -> bool {
-        ip.is_some_and(|ip| {
-            self.dest_ip.contains(ip) || (self.dest_ip_is_private && is_private(ip))
-        })
+    fn ip_hit(&self, ip: std::net::IpAddr) -> bool {
+        self.dest_ip.contains(ip) || (self.dest_ip_is_private && is_private(ip))
     }
 
     /// The AND-ed, non-grouped fields.
     fn items_match(&self, meta: &Metadata) -> bool {
         (self.inbound.is_empty() || self.inbound.contains(&*meta.inbound))
             && (self.network.is_empty() || self.network.contains(&meta.network))
-            && (self.auth_user.is_empty()
-                || meta
-                    .user
-                    .as_deref()
-                    .is_some_and(|u| self.auth_user.contains(u)))
+            && (self.protocol.is_empty() || meta.protocol.is_some_and(|p| self.protocol.contains(&p)))
+            && (self.auth_user.is_empty() || meta.user.as_deref().is_some_and(|u| self.auth_user.contains(u)))
             && self.ip_version.is_none_or(|v| match meta.destination.ip() {
                 Some(std::net::IpAddr::V4(_)) => v == 4,
                 Some(std::net::IpAddr::V6(_)) => v == 6,
@@ -314,20 +425,16 @@ impl DefaultRule {
             });
         }
         if ctx.ip_cidr_match_source && self.has_dest_ip() {
-            g.add(SRC_ADDR, || self.dest_ip_hit(Some(src_ip)));
+            g.add(SRC_ADDR, || self.ip_hit(src_ip));
         }
         if !self.source_port.is_empty() {
             g.add(SRC_PORT, || self.source_port.contains(meta.source.port()));
         }
         if !self.domain.is_empty() {
-            g.add(DST_ADDR, || {
-                meta.destination
-                    .domain()
-                    .is_some_and(|d| self.domain.matches(d))
-            });
+            g.add(DST_ADDR, || meta.domain().is_some_and(|d| self.domain.matches(d)));
         }
         if !ctx.ip_cidr_match_source && self.has_dest_ip() {
-            g.add(DST_ADDR, || self.dest_ip_hit(meta.destination.ip()));
+            g.add(DST_ADDR, || meta.destination_ips().any(|ip| self.ip_hit(ip)));
         }
         if !self.dest_port.is_empty() {
             g.add(DST_PORT, || self.dest_port.contains(meta.destination.port));

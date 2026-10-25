@@ -22,10 +22,7 @@ impl Obj {
         let path = path.into();
         match value {
             Value::Object(map) => Ok(Self { map, path }),
-            other => Err(Error::at(
-                &path,
-                format!("expected object, got {}", kind(&other)),
-            )),
+            other => Err(Error::at(&path, format!("expected object, got {}", kind(&other)))),
         }
     }
 
@@ -75,8 +72,7 @@ impl Obj {
                 .into_iter()
                 .enumerate()
                 .map(|(i, v)| {
-                    serde_json::from_value(v)
-                        .map_err(|e| Error::at(&format!("{}[{i}]", self.sub(key)), e.to_string()))
+                    serde_json::from_value(v).map_err(|e| Error::at(&format!("{}[{i}]", self.sub(key)), e.to_string()))
                 })
                 .collect(),
             Some(v) => serde_json::from_value(v)
@@ -116,8 +112,7 @@ impl Obj {
             if let Some(v) = self.raw(key)
                 && truthy(&v)
             {
-                diag.warnings
-                    .push(format!("{}: ignored by sbr", self.sub(key)));
+                diag.warnings.push(format!("{}: ignored by sbr", self.sub(key)));
             }
         }
     }
@@ -129,10 +124,7 @@ impl Obj {
             } else {
                 format!("{}.{key}", self.path)
             };
-            return Err(Error::at(
-                &path,
-                "unknown field, or not supported by sbr yet",
-            ));
+            return Err(Error::at(&path, "unknown field, or not supported by sbr yet"));
         }
         Ok(())
     }

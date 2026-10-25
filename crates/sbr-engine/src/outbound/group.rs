@@ -2,9 +2,7 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use sbr_core::{BoxFuture, Destination, Stream};
-
-use super::Outbound;
+use sbr_core::{BoxFuture, BoxPacketConn, Destination, Group, Outbound, Stream};
 
 pub struct Selector {
     tag: String,
@@ -14,12 +12,7 @@ pub struct Selector {
 }
 
 impl Selector {
-    pub fn new(
-        tag: String,
-        kind: &'static str,
-        members: Vec<Arc<dyn Outbound>>,
-        default: Option<&str>,
-    ) -> Self {
+    pub fn new(tag: String, kind: &'static str, members: Vec<Arc<dyn Outbound>>, default: Option<&str>) -> Self {
         let selected = default
             .and_then(|d| members.iter().position(|m| m.tag() == d))
             .unwrap_or(0);
@@ -31,16 +24,23 @@ impl Selector {
         }
     }
 
-    pub fn members(&self) -> impl Iterator<Item = &str> {
-        self.members.iter().map(|m| m.tag())
+    fn current(&self) -> Arc<dyn Outbound> {
+        self.members[self.selected.load(Ordering::Relaxed)].clone()
     }
+}
 
-    pub fn selected(&self) -> &str {
-        self.members[self.selected.load(Ordering::Relaxed)].tag()
+impl Group for Selector {
+    fn members(&self) -> Vec<Arc<dyn Outbound>> {
+        self.members.clone()
     }
-
+    fn selected(&self) -> Arc<dyn Outbound> {
+        self.current()
+    }
     /// Switch the active member. Existing connections are left alone.
-    pub fn select(&self, tag: &str) -> bool {
+    fn select(&self, tag: &str) -> bool {
+        if self.kind != "selector" {
+            return false;
+        }
         match self.members.iter().position(|m| m.tag() == tag) {
             Some(i) => {
                 self.selected.store(i, Ordering::Relaxed);
@@ -59,10 +59,14 @@ impl Outbound for Selector {
         self.kind
     }
     fn connect<'a>(&'a self, dest: &'a Destination) -> BoxFuture<'a, io::Result<Stream>> {
-        let member = self.members[self.selected.load(Ordering::Relaxed)].clone();
+        let member = self.current();
         Box::pin(async move { member.connect(dest).await })
     }
-    fn as_selector(&self) -> Option<&Selector> {
+    fn connect_udp<'a>(&'a self, dest: &'a Destination) -> BoxFuture<'a, io::Result<BoxPacketConn>> {
+        let member = self.current();
+        Box::pin(async move { member.connect_udp(dest).await })
+    }
+    fn as_group(&self) -> Option<&dyn Group> {
         Some(self)
     }
 }

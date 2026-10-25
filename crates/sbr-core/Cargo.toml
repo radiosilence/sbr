@@ -13,6 +13,7 @@ regex.workspace = true
 aho-corasick.workspace = true
 ipnet.workspace = true
 thiserror.workspace = true
+httparse = "1.10"
 socket2 = { version = "0.6", features = ["all"] }
 
 [dev-dependencies]

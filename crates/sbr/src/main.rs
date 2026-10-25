@@ -12,12 +12,7 @@ struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
     /// Configuration file path
-    #[arg(
-        short = 'c',
-        long = "config",
-        global = true,
-        default_value = "config.json"
-    )]
+    #[arg(short = 'c', long = "config", global = true, default_value = "config.json")]
     config: PathBuf,
     /// Working directory (relative paths in the config resolve against it)
     #[arg(short = 'D', long = "directory", global = true)]
@@ -38,8 +33,7 @@ enum Cmd {
 }
 
 fn load(cli: &Cli) -> Result<Options> {
-    let text = std::fs::read_to_string(&cli.config)
-        .with_context(|| format!("read {}", cli.config.display()))?;
+    let text = std::fs::read_to_string(&cli.config).with_context(|| format!("read {}", cli.config.display()))?;
     Options::parse(&text).with_context(|| format!("decode config at {}", cli.config.display()))
 }
 
@@ -90,9 +84,7 @@ fn main() -> Result<()> {
         Cmd::Run => {
             let o = load(&cli)?;
             init_log(&o, cli.disable_color);
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
+            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
             rt.block_on(async {
                 let instance = Instance::start(&o, Settings::default()).await?;
                 tracing::info!("sing-box compatible core started");

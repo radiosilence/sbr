@@ -9,6 +9,7 @@ use socket2::{SockRef, TcpKeepalive};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::task::JoinSet;
 
+use crate::dns::Dns;
 use crate::{Destination, Host};
 
 /// sing-box `C.TCPConnectTimeout`.
@@ -40,57 +41,56 @@ impl From<&Dial> for DialOptions {
     }
 }
 
+/// Resolve `dest` to socket addresses in dial order.
 pub async fn resolve(
-    host: &str,
-    port: u16,
+    dest: &Destination,
     strategy: Option<DomainStrategy>,
+    dns: &dyn Dns,
 ) -> io::Result<Vec<SocketAddr>> {
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
-    let (v4, v6): (Vec<_>, Vec<_>) = addrs.into_iter().partition(|a| a.is_ipv4());
-    let ordered = match strategy.unwrap_or(DomainStrategy::AsIs) {
-        DomainStrategy::Ipv4Only => v4,
-        DomainStrategy::Ipv6Only => v6,
-        DomainStrategy::PreferIpv4 => v4.into_iter().chain(v6).collect(),
-        DomainStrategy::PreferIpv6 => v6.into_iter().chain(v4).collect(),
-        DomainStrategy::AsIs => interleave(v6, v4),
-    };
-    if ordered.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("no usable addresses for {host}"),
-        ));
-    }
-    Ok(ordered)
+    Ok(match &dest.host {
+        Host::Ip(ip) => vec![SocketAddr::new(*ip, dest.port)],
+        Host::Domain(d) => dns
+            .lookup(d, strategy)
+            .await?
+            .into_iter()
+            .map(|ip| SocketAddr::new(ip, dest.port))
+            .collect(),
+    })
 }
 
-fn interleave(a: Vec<SocketAddr>, b: Vec<SocketAddr>) -> Vec<SocketAddr> {
-    let mut out = Vec::with_capacity(a.len() + b.len());
-    let (mut a, mut b) = (a.into_iter(), b.into_iter());
-    loop {
-        match (a.next(), b.next()) {
-            (None, None) => return out,
-            (x, y) => out.extend(x.into_iter().chain(y)),
-        }
-    }
-}
-
-pub async fn connect(dest: &Destination, opts: &DialOptions) -> io::Result<TcpStream> {
+pub async fn connect(dest: &Destination, opts: &DialOptions, dns: &dyn Dns) -> io::Result<TcpStream> {
     let timeout = opts.connect_timeout.unwrap_or(CONNECT_TIMEOUT);
     let fut = async {
-        let addrs = match &dest.host {
-            Host::Ip(ip) => vec![SocketAddr::new(*ip, dest.port)],
-            Host::Domain(d) => resolve(d, dest.port, opts.domain_strategy).await?,
-        };
+        let addrs = resolve(dest, opts.domain_strategy, dns).await?;
         happy_eyeballs(addrs, opts).await
     };
-    let stream = tokio::time::timeout(timeout, fut).await.map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("connect {dest}: timed out"),
-        )
-    })??;
+    let stream = tokio::time::timeout(timeout, fut)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, format!("connect {dest}: timed out")))??;
     tune(&stream, opts)?;
     Ok(stream)
+}
+
+/// An unconnected UDP socket for `family_of`'s address family, honouring
+/// `bind_interface`.
+pub fn bind_udp(family_of: IpAddr, opts: &DialOptions) -> io::Result<tokio::net::UdpSocket> {
+    let domain = if family_of.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    sock.set_nonblocking(true)?;
+    if let Some(iface) = &opts.bind_interface {
+        bind_device_sock(&sock, iface, family_of)?;
+    }
+    let any: SocketAddr = if family_of.is_ipv4() {
+        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+    } else {
+        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    };
+    sock.bind(&any.into())?;
+    tokio::net::UdpSocket::from_std(sock.into())
 }
 
 async fn happy_eyeballs(addrs: Vec<SocketAddr>, opts: &DialOptions) -> io::Result<TcpStream> {
@@ -131,7 +131,7 @@ async fn connect_one(addr: SocketAddr, bind_interface: Option<String>) -> io::Re
         TcpSocket::new_v6()?
     };
     if let Some(iface) = bind_interface {
-        bind_device(&sock, &iface, addr.ip())?;
+        bind_device_sock(&SockRef::from(&sock), &iface, addr.ip())?;
     }
     sock.connect(addr).await
 }
@@ -148,8 +148,8 @@ fn tune(s: &TcpStream, opts: &DialOptions) -> io::Result<()> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn bind_device(sock: &TcpSocket, iface: &str, _ip: IpAddr) -> io::Result<()> {
-    SockRef::from(sock).bind_device(Some(iface.as_bytes()))
+fn bind_device_sock(sock: &socket2::Socket, iface: &str, _ip: IpAddr) -> io::Result<()> {
+    sock.bind_device(Some(iface.as_bytes()))
 }
 
 #[cfg(any(
@@ -160,8 +160,7 @@ fn bind_device(sock: &TcpSocket, iface: &str, _ip: IpAddr) -> io::Result<()> {
     target_os = "visionos"
 ))]
 fn bind_device(sock: &TcpSocket, iface: &str, ip: IpAddr) -> io::Result<()> {
-    let idx = std::num::NonZeroU32::new(nix_if_nametoindex(iface)?)
-        .ok_or_else(|| io::Error::other("bad interface"))?;
+    let idx = std::num::NonZeroU32::new(nix_if_nametoindex(iface)?).ok_or_else(|| io::Error::other("bad interface"))?;
     match ip {
         IpAddr::V4(_) => SockRef::from(sock).bind_device_by_index_v4(Some(idx)),
         IpAddr::V6(_) => SockRef::from(sock).bind_device_by_index_v6(Some(idx)),
@@ -196,7 +195,7 @@ fn nix_if_nametoindex(name: &str) -> io::Result<u32> {
     target_os = "watchos",
     target_os = "visionos"
 )))]
-fn bind_device(_: &TcpSocket, _: &str, _: IpAddr) -> io::Result<()> {
+fn bind_device_sock(_: &socket2::Socket, _: &str, _: IpAddr) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "bind_interface is not supported on this platform",

@@ -32,12 +32,7 @@ fn port(i: &Instance, tag: &str) -> u16 {
     i.listening.iter().find(|(t, _)| t == tag).unwrap().1.port()
 }
 
-async fn socks_connect(
-    proxy: u16,
-    host: &str,
-    port: u16,
-    auth: Option<(&str, &str)>,
-) -> std::io::Result<TcpStream> {
+async fn socks_connect(proxy: u16, host: &str, port: u16, auth: Option<(&str, &str)>) -> std::io::Result<TcpStream> {
     let mut s = TcpStream::connect(("127.0.0.1", proxy)).await?;
     let method = if auth.is_some() { 2 } else { 0 };
     s.write_all(&[5, 1, method]).await?;
@@ -77,14 +72,10 @@ async fn roundtrip(s: &mut TcpStream, payload: &[u8]) {
 #[tokio::test]
 async fn mixed_socks5_and_http_connect() {
     let target = echo().await;
-    let i =
-        start(r#"{"inbounds":[{"type":"mixed","tag":"in","listen":"127.0.0.1","listen_port":0}]}"#)
-            .await;
+    let i = start(r#"{"inbounds":[{"type":"mixed","tag":"in","listen":"127.0.0.1","listen_port":0}]}"#).await;
     let p = port(&i, "in");
 
-    let mut s = socks_connect(p, "localhost", target.port(), None)
-        .await
-        .unwrap();
+    let mut s = socks_connect(p, "localhost", target.port(), None).await.unwrap();
     roundtrip(&mut s, b"hello over socks").await;
 
     let mut h = TcpStream::connect(("127.0.0.1", p)).await.unwrap();
@@ -113,29 +104,19 @@ async fn http_forward_proxy_rewrites_request() {
         let mut buf = vec![0u8; 4096];
         let n = s.read(&mut buf).await.unwrap();
         let req = String::from_utf8_lossy(&buf[..n]).to_string();
-        let body = req.lines().next().unwrap().to_owned()
-            + if req.contains("Proxy-Connection") {
-                " LEAK"
-            } else {
-                ""
-            };
-        s.write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
-                body.len()
-            )
-            .as_bytes(),
-        )
-        .await
-        .unwrap();
+        let body = req.lines().next().unwrap().to_owned() + if req.contains("Proxy-Connection") { " LEAK" } else { "" };
+        s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes())
+            .await
+            .unwrap();
     });
-    let i =
-        start(r#"{"inbounds":[{"type":"http","tag":"in","listen":"127.0.0.1","listen_port":0}]}"#)
-            .await;
-    let mut c = TcpStream::connect(("127.0.0.1", port(&i, "in")))
-        .await
-        .unwrap();
-    c.write_all(format!("GET http://{origin}/a?b=1 HTTP/1.1\r\nHost: {origin}\r\nProxy-Connection: keep-alive\r\n\r\n").as_bytes()).await.unwrap();
+    let i = start(r#"{"inbounds":[{"type":"http","tag":"in","listen":"127.0.0.1","listen_port":0}]}"#).await;
+    let mut c = TcpStream::connect(("127.0.0.1", port(&i, "in"))).await.unwrap();
+    c.write_all(
+        format!("GET http://{origin}/a?b=1 HTTP/1.1\r\nHost: {origin}\r\nProxy-Connection: keep-alive\r\n\r\n")
+            .as_bytes(),
+    )
+    .await
+    .unwrap();
     let mut resp = String::new();
     c.read_to_string(&mut resp).await.unwrap();
     assert!(resp.ends_with("GET /a?b=1 HTTP/1.1"), "{resp}");
@@ -173,22 +154,14 @@ async fn routing_reject_and_selector() {
     )
     .await;
     let p = port(&i, "in");
-    let e = socks_connect(p, "x.blocked.test", 80, None)
-        .await
-        .unwrap_err();
+    let e = socks_connect(p, "x.blocked.test", 80, None).await.unwrap_err();
     assert!(e.to_string().contains("socks reply 2"), "{e}");
     // selector defaults to block…
-    assert!(
-        socks_connect(p, "127.0.0.1", target.port(), None)
-            .await
-            .is_err()
-    );
+    assert!(socks_connect(p, "127.0.0.1", target.port(), None).await.is_err());
     // …and switching it takes effect for new connections.
-    let sel = i.engine.outbound("sel").unwrap().as_selector().unwrap();
+    let sel = i.engine.outbound("sel").unwrap().as_group().unwrap();
     assert!(sel.select("direct"));
-    let mut s = socks_connect(p, "127.0.0.1", target.port(), None)
-        .await
-        .unwrap();
+    let mut s = socks_connect(p, "127.0.0.1", target.port(), None).await.unwrap();
     roundtrip(&mut s, b"selected").await;
 }
 
@@ -266,8 +239,108 @@ async fn shadowsocks_2022() {
         got
     };
     let (_, got) = tokio::join!(send, recv);
-    assert!(
-        got == big,
-        "1 MB through shadowsocks-2022 must survive intact"
+    assert!(got == big, "1 MB through shadowsocks-2022 must survive intact");
+}
+
+#[tokio::test]
+async fn socks5_udp_associate_and_dns_hijack() {
+    // UDP echo
+    let echo = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let echo_addr = echo.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut b = [0u8; 2048];
+        loop {
+            let (n, from) = echo.recv_from(&mut b).await.unwrap();
+            echo.send_to(&b[..n], from).await.unwrap();
+        }
+    });
+    let i = start(
+        r#"{"inbounds":[{"type":"socks","tag":"in","listen":"127.0.0.1","listen_port":0}],
+            "route":{"rules":[{"action":"sniff"},{"protocol":"dns","action":"hijack-dns"}]}}"#,
+    )
+    .await;
+    let mut ctrl = TcpStream::connect(("127.0.0.1", port(&i, "in"))).await.unwrap();
+    ctrl.write_all(&[5, 1, 0]).await.unwrap();
+    let mut r = [0u8; 2];
+    ctrl.read_exact(&mut r).await.unwrap();
+    ctrl.write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+    let mut rep = [0u8; 10];
+    ctrl.read_exact(&mut rep).await.unwrap();
+    assert_eq!(rep[1], 0);
+    let relay = SocketAddr::from(([127, 0, 0, 1], u16::from_be_bytes([rep[8], rep[9]])));
+    let u = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    let wrap = |dst: SocketAddr, payload: &[u8]| {
+        let std::net::IpAddr::V4(ip) = dst.ip() else {
+            unreachable!()
+        };
+        let mut p = vec![0, 0, 0, 1];
+        p.extend_from_slice(&ip.octets());
+        p.extend_from_slice(&dst.port().to_be_bytes());
+        p.extend_from_slice(payload);
+        p
+    };
+    u.send_to(&wrap(echo_addr, b"ping"), relay).await.unwrap();
+    let mut b = [0u8; 2048];
+    let n = tokio::time::timeout(std::time::Duration::from_secs(3), u.recv(&mut b))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&b[10..n], b"ping");
+    assert_eq!(
+        &b[4..10],
+        &wrap(echo_addr, b"")[4..10],
+        "reply carries the echo server as source"
     );
+
+    // A DNS query to an address nobody listens on is answered by hijack-dns.
+    let q = b"\xab\xcd\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x09localhost\x00\x00\x01\x00\x01";
+    let u2 = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    // fresh control connection per association isn't needed: new source port = new NAT session
+    u2.send_to(&wrap("192.0.2.53:53".parse().unwrap(), q), relay)
+        .await
+        .unwrap();
+    let n = tokio::time::timeout(std::time::Duration::from_secs(3), u2.recv(&mut b))
+        .await
+        .unwrap()
+        .unwrap();
+    let resp = &b[10..n];
+    assert_eq!(&resp[..2], b"\xab\xcd");
+    assert_eq!(
+        &resp[resp.len() - 4..],
+        &[127, 0, 0, 1],
+        "localhost resolves to 127.0.0.1"
+    );
+}
+
+#[tokio::test]
+async fn sniffed_domain_routes() {
+    let target = echo().await;
+    // HTTP Host sniffing on a CONNECT to a bare IP: the Host header decides the outbound.
+    let i = start(
+        r#"{"inbounds":[{"type":"mixed","tag":"in","listen":"127.0.0.1","listen_port":0}],
+            "outbounds":[{"type":"direct","tag":"d"},{"type":"block","tag":"b"}],
+            "route":{"rules":[{"action":"sniff","sniffer":"http"},{"domain_suffix":"blocked.test","outbound":"b"}]}}"#,
+    )
+    .await;
+    let p = port(&i, "in");
+    let mut s = socks_connect(p, "127.0.0.1", target.port(), None).await.unwrap();
+    s.write_all(b"GET / HTTP/1.1\r\nHost: ok.test\r\n\r\n").await.unwrap();
+    let mut got = [0u8; 33];
+    s.read_exact(&mut got).await.unwrap();
+    assert_eq!(
+        &got, b"GET / HTTP/1.1\r\nHost: ok.test\r\n\r\n",
+        "sniffed bytes are replayed upstream"
+    );
+
+    let mut s = socks_connect(p, "127.0.0.1", target.port(), None).await.unwrap();
+    s.write_all(b"GET / HTTP/1.1\r\nHost: www.blocked.test\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = [0u8; 16];
+    let n = tokio::time::timeout(std::time::Duration::from_secs(2), s.read(&mut buf))
+        .await
+        .unwrap()
+        .unwrap_or(0);
+    assert_eq!(n, 0, "blocked after sniffing: connection closed without echo");
 }

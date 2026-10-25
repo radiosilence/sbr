@@ -16,9 +16,7 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     }
     let mut total = 0f64;
     while !rest.is_empty() {
-        let num_end = rest
-            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
-            .ok_or_else(err)?;
+        let num_end = rest.find(|c: char| !(c.is_ascii_digit() || c == '.')).ok_or_else(err)?;
         if num_end == 0 {
             return Err(err());
         }

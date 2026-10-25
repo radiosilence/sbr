@@ -186,13 +186,7 @@ mod tests {
 
     #[test]
     fn domain_keyword_regex() {
-        let s = DomainSet::new(
-            &["x.org".into()],
-            &[],
-            &["goog".into()],
-            &[r"^ads?\d+\.".into()],
-        )
-        .unwrap();
+        let s = DomainSet::new(&["x.org".into()], &[], &["goog".into()], &[r"^ads?\d+\.".into()]).unwrap();
         assert!(s.matches("x.org"));
         assert!(!s.matches("a.x.org"));
         assert!(s.matches("www.google.com"));
