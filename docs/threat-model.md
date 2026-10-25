@@ -85,7 +85,7 @@ Two state-controlled international chokepoints (Beltelecom and the National Traf
 
 **Against sbr.** REALITY with a browser fingerprint and a plausible, unblocked SNI is the primary path. Hysteria2 with Salamander escapes the QUIC SNI rule but is high-entropy UDP exposed to volume and QoS policy. Hysteria2 without Salamander, and TUIC, carry a decryptable Initial; sbr splits the SNI across Initial packets, which these censors do not reassemble. Shadowsocks-2022 and raw VMess are exactly what the FET heuristic blocks if it returns. Trojan/VMess over TLS with a rustls ClientHello is the weakest TCP option. Anything pinned to TCP/443 fails during events like 20 Aug 2025.
 
-**Mitigations.** Current browser fingerprints; SNIs that are not blocked in China (the deployment's own notes already prefer `www.bing.com`/`www.apple.com` there); a non-443 fallback port; QUIC Initial slicing; high server ports for QUIC; moderate volume per IP and several IPs.
+**Mitigations.** Current browser fingerprints; SNIs that are not blocked in China (the deployment's own notes already prefer `www.bing.com`/`www.apple.com` there); a non-443 fallback port; QUIC Initial slicing; high server ports for QUIC; moderate volume per IP and several IPs. `docs/china.md` maps each technique to what sbr and the deployment do, lists what is unverified, and proposes an in-China probe.
 
 ## Egypt
 
