@@ -13,7 +13,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-
 use super::buf::CHUNK;
 use super::wire::{self, ACK, FIN, Opts, Out, PSH, RST, SYN, Seg};
 use super::{Ctx, Shared};
@@ -35,6 +34,10 @@ const TIME_WAIT: Duration = Duration::from_secs(5);
 /// How long a connection the engine has closed may keep draining its send
 /// buffer or waiting for the app's FIN.
 const ORPHAN_LINGER: Duration = Duration::from_secs(60);
+/// The longest a deferred handshake waits for the engine's verdict, and how
+/// long a silently dropped SYN keeps absorbing the app's retransmissions
+/// (about as long as a kernel keeps retrying a connect).
+const HOLD_LIMIT: Duration = Duration::from_secs(75);
 /// Out-of-order segments held per connection; more are dropped and
 /// retransmitted by the peer.
 const MAX_OOO: usize = 64;
@@ -157,8 +160,12 @@ pub struct Tcb {
     orphan: bool,
     pub wake_rd: bool,
     pub wake_wr: bool,
-    /// Set once, when the handshake completes.
-    pub established_now: bool,
+    /// The SYN-ACK waits for the engine (`Stream::accept`).
+    held: bool,
+    /// Dropped by the engine without a reply: ignore the app's SYNs.
+    blackhole: bool,
+    /// Hand the connection to the engine now (set once).
+    pub accept_now: bool,
     /// Why the connection died, for the stream.
     pub error: Option<io::ErrorKind>,
 }
@@ -174,6 +181,7 @@ impl Tcb {
         rx_cap: usize,
         tx_cap: usize,
         shared: Arc<Shared>,
+        defer: Option<Instant>,
     ) -> Self {
         let v6 = local.is_ipv6();
         let ts_ok = seg.ts.is_some();
@@ -228,22 +236,30 @@ impl Tcb {
             retries: 0,
             rto_at: None,
             persist: false,
-            linger_at: None,
+            linger_at: defer.map(|now| now + HOLD_LIMIT),
             scheduled: None,
             ack_due: false,
             ack_now: false,
-            synack_due: true,
+            synack_due: defer.is_none(),
             rst_due: false,
             orphan: false,
             wake_rd: false,
             wake_wr: false,
-            established_now: false,
+            held: defer.is_some(),
+            blackhole: false,
+            accept_now: defer.is_some(),
             error: None,
         }
     }
 
     pub fn irs(&self) -> u32 {
         self.irs
+    }
+
+    /// The engine already has this connection (deferred handshakes are
+    /// handed over on the SYN).
+    fn accepted(&self) -> bool {
+        self.shared.m.lock().unwrap().handed
     }
 
     pub fn deadline(&self) -> Option<Instant> {
@@ -273,8 +289,12 @@ impl Tcb {
                 return Ok(());
             }
             if seg.has(SYN) {
-                // A retransmitted SYN: our SYN-ACK was lost.
-                self.synack_due = true;
+                // A retransmitted SYN: our SYN-ACK was lost (or is still
+                // waiting for the engine).
+                self.synack_due = !self.held;
+                return Ok(());
+            }
+            if self.held {
                 return Ok(());
             }
             if !seg.has(ACK) {
@@ -284,7 +304,7 @@ impl Tcb {
                 return send_rst_for(self.local, self.remote, seg, cx);
             }
             self.state = State::Established;
-            self.established_now = true;
+            self.accept_now |= !self.accepted();
             self.snd_una = seg.ack;
             self.snd_wnd = (seg.wnd as u32) << self.snd_shift;
             self.snd_wl1 = seg.seq;
@@ -778,9 +798,27 @@ impl Tcb {
             drop(g);
             if rst {
                 self.abort(io::ErrorKind::ConnectionAborted);
+            } else if self.state == State::SynReceived {
+                // Swallow the app's retransmitted SYNs, as a black hole
+                // would, rather than routing each one again.
+                self.held = true;
+                self.blackhole = true;
+                self.synack_due = false;
+                self.rto_at = None;
+                self.linger_at = Some(now + HOLD_LIMIT);
             } else {
                 self.state = State::Closed;
             }
+            return;
+        }
+        if g.accept && self.held && !self.blackhole {
+            self.held = false;
+            self.synack_due = true;
+            self.linger_at = None;
+        }
+        if g.dropped && self.state == State::SynReceived && !self.blackhole {
+            drop(g);
+            self.abort(io::ErrorKind::ConnectionAborted);
             return;
         }
         if std::mem::take(&mut g.want_ack) {
@@ -806,7 +844,7 @@ impl Tcb {
             && t <= now
         {
             self.linger_at = None;
-            if self.state == State::TimeWait {
+            if self.state == State::TimeWait || self.blackhole {
                 self.state = State::Closed;
             } else {
                 self.abort(io::ErrorKind::TimedOut);
@@ -1148,7 +1186,9 @@ impl Tcb {
         let step = ((self.rx_cap / 2) as u32).min(self.smss);
         let wnd = if free >= cur.saturating_add(step) { free } else { cur };
         let floor = self.rx_cap.min(CHUNK).saturating_sub(rx_len) as u32;
-        let wnd = wnd.min(cur.saturating_add(mem.min(u32::MAX as usize) as u32).max(floor)).max(cur);
+        let wnd = wnd
+            .min(cur.saturating_add(mem.min(u32::MAX as usize) as u32).max(floor))
+            .max(cur);
         wnd.min(65535 << self.rcv_shift)
     }
 }

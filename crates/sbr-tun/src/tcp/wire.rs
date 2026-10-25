@@ -270,7 +270,11 @@ pub fn sum_be(data: &[u8]) -> u32 {
     t = (t >> 16) + (t & 0xffff);
     t = (t >> 16) + (t & 0xffff);
     let t = t as u16;
-    (if cfg!(target_endian = "little") { t.swap_bytes() } else { t }) as u32
+    (if cfg!(target_endian = "little") {
+        t.swap_bytes()
+    } else {
+        t
+    }) as u32
 }
 
 #[cfg(test)]
@@ -318,7 +322,10 @@ mod tests {
             let h = packet::parse(p).unwrap();
             let s = parse(p, &h).unwrap();
             assert_eq!((s.seq, s.ack, s.flags, s.wnd), (1000, 2000, SYN | ACK, 65535));
-            assert_eq!((s.mss, s.ws, s.sack_perm, s.ts), (Some(1460), Some(7), true, Some((123, 456))));
+            assert_eq!(
+                (s.mss, s.ws, s.sack_perm, s.ts),
+                (Some(1460), Some(7), true, Some((123, 456)))
+            );
             assert_eq!(&p[s.payload.clone()], b"hello");
 
             let mut o = Opts::default();

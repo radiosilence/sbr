@@ -204,7 +204,10 @@ impl Sim {
 
     /// A smoltcp client socket connecting to `server:port`.
     fn connect(&mut self, v6: bool, port: u16, rx: usize, tx: usize, ts: bool) -> SocketHandle {
-        let mut s = stcp::Socket::new(stcp::SocketBuffer::new(vec![0; rx]), stcp::SocketBuffer::new(vec![0; tx]));
+        let mut s = stcp::Socket::new(
+            stcp::SocketBuffer::new(vec![0; rx]),
+            stcp::SocketBuffer::new(vec![0; tx]),
+        );
         if ts {
             s.set_tsval_generator(Some(|| 0x1234_5678));
         }
@@ -327,6 +330,7 @@ struct Echo {
 
 impl Echo {
     fn new(s: Stream) -> Self {
+        s.accept();
         Self {
             s,
             pend: Vec::new(),
@@ -456,6 +460,7 @@ fn cfg(rx: usize, tx: usize) -> TcpConfig {
         max_connections: 0,
         pool_keep: 1 << 20,
         memory_limit: 0,
+        defer_handshake: false,
     }
 }
 
@@ -474,7 +479,15 @@ fn clean_echo_v4_and_v6() {
 #[test]
 fn clean_echo_jumbo_mtu_without_timestamps() {
     let mut sim = Sim::new(cfg(1 << 20, 1 << 20), 9000);
-    echo(&mut sim, 1, 4 << 20, false, false, 512 << 10, Duration::from_millis(100));
+    echo(
+        &mut sim,
+        1,
+        4 << 20,
+        false,
+        false,
+        512 << 10,
+        Duration::from_millis(100),
+    );
 }
 
 #[test]
@@ -488,11 +501,17 @@ fn loss_reordering_and_duplication() {
             dup: 0.01,
         });
         echo(&mut sim, 2, 1 << 20, seed == 2, ts, 128 << 10, Duration::from_secs(300));
-        assert!(sim.down.dropped > 0 && sim.up.dropped > 0, "the test must actually lose packets");
+        assert!(
+            sim.down.dropped > 0 && sim.up.dropped > 0,
+            "the test must actually lose packets"
+        );
         // Most of our losses must be repaired by fast retransmit, not by
         // waiting out a timeout.
         let st = sim.tcp.stats;
-        eprintln!("seed {seed}: {st:?}, {} of {} dropped toward the app", sim.down.dropped, sim.down.sent);
+        eprintln!(
+            "seed {seed}: {st:?}, {} of {} dropped toward the app",
+            sim.down.dropped, sim.down.sent
+        );
         assert!(st.fast_retransmits > 0, "{st:?}");
         assert!(st.timeouts * 4 < sim.down.dropped as u64, "{st:?}");
     }
@@ -685,7 +704,10 @@ fn half_close_from_the_engine() {
     });
     assert_eq!(got_resp, b"bye");
     assert!(got == upload);
-    assert!(matches!(poll_write(&mut srv, b"x"), Some(Err(_))), "writes after shutdown fail");
+    assert!(
+        matches!(poll_write(&mut srv, b"x"), Some(Err(_))),
+        "writes after shutdown fail"
+    );
     drop(srv);
     sim.run(Duration::from_secs(10), |sim| {
         sim.tcp.live() == 0 && sim.sock(h).state() == stcp::State::Closed
@@ -823,11 +845,10 @@ fn stray_segment_gets_a_reset() {
     let p = &buf[HEADROOM..];
     let h = packet::parse(p).unwrap();
     let mut out = Vec::new();
-    sim.tcp
-        .input(p, &h, sim.t0, &mut |b: &mut [u8]| {
-            out.push(b[HEADROOM..].to_vec());
-            Ok(())
-        });
+    sim.tcp.input(p, &h, sim.t0, &mut |b: &mut [u8]| {
+        out.push(b[HEADROOM..].to_vec());
+        Ok(())
+    });
     assert_eq!(out.len(), 1);
     let h = packet::parse(&out[0]).unwrap();
     let s = wire::parse(&out[0], &h).unwrap();
@@ -839,7 +860,9 @@ fn stray_segment_gets_a_reset() {
 #[test]
 fn idle_connections_cost_no_timers_or_buffers() {
     let mut sim = Sim::new(cfg(256 << 10, 256 << 10), 1500);
-    let hs: Vec<_> = (0..20).map(|_| sim.connect(false, 80, 64 << 10, 64 << 10, true)).collect();
+    let hs: Vec<_> = (0..20)
+        .map(|_| sim.connect(false, 80, 64 << 10, 64 << 10, true))
+        .collect();
     let mut srvs = Vec::new();
     sim.run(Duration::from_secs(5), |sim| {
         srvs.extend(sim.take_accepted().into_iter().map(|(_, _, s)| Echo::new(s)));
@@ -907,7 +930,9 @@ fn memory_limit_bounds_all_buffers_together() {
     let mut c = cfg(256 << 10, 256 << 10);
     c.memory_limit = limit;
     let mut sim = Sim::new(c, 1500);
-    let hs: Vec<_> = (0..n).map(|_| sim.connect(false, 80, 256 << 10, 256 << 10, true)).collect();
+    let hs: Vec<_> = (0..n)
+        .map(|_| sim.connect(false, 80, 256 << 10, 256 << 10, true))
+        .collect();
     let mut srvs = Vec::new();
     sim.run(Duration::from_secs(5), |sim| {
         srvs.extend(sim.take_accepted().into_iter().map(|(_, _, s)| s));
@@ -972,4 +997,111 @@ fn memory_limit_bounds_all_buffers_together() {
         got_up.iter().chain(&got_down).all(|&g| g == data.len())
     });
     assert!(peak <= bound, "buffers peaked at {peak}, over {bound}");
+}
+
+fn deferred() -> TcpConfig {
+    let mut c = cfg(64 << 10, 64 << 10);
+    c.defer_handshake = true;
+    c
+}
+
+/// With a deferred handshake the engine gets the connection on the SYN,
+/// and the app's connect completes only once the engine accepts.
+#[test]
+fn deferred_handshake_waits_for_the_engine() {
+    let mut sim = Sim::new(deferred(), 1500);
+    let h = sim.connect(false, 443, 64 << 10, 64 << 10, true);
+    let mut srv = None;
+    sim.run(Duration::from_secs(1), |sim| {
+        if let Some((_, _, s)) = sim.take_accepted().pop() {
+            srv = Some(s);
+        }
+        srv.is_some()
+    });
+    // The outbound takes three seconds to connect; the app's SYN
+    // retransmissions in the meantime draw nothing and create nothing.
+    let until = sim.now + Duration::from_secs(3);
+    sim.run(Duration::from_secs(4), |sim| sim.now >= until);
+    assert_eq!(sim.sock(h).state(), stcp::State::SynSent);
+    assert_eq!(sim.tcp.stats.accepted, 1);
+    assert_eq!(sim.tcp.live(), 1);
+    let mut e = Echo::new(srv.unwrap());
+    sim.run(Duration::from_secs(5), |sim| {
+        sim.sock(h).state() == stcp::State::Established
+    });
+    let data = pattern(100 << 10, 2);
+    let mut c = Client {
+        h,
+        data: data.clone(),
+        sent: 0,
+        got: Vec::new(),
+    };
+    sim.run(Duration::from_secs(10), |sim| {
+        e.step();
+        c.step(sim);
+        c.done(sim)
+    });
+    assert!(c.got == data);
+}
+
+#[test]
+fn deferred_handshake_refused_resets_the_connect() {
+    let mut sim = Sim::new(deferred(), 1500);
+    let h = sim.connect(false, 443, 4096, 4096, true);
+    let mut srv = None;
+    sim.run(Duration::from_secs(1), |sim| {
+        if let Some((_, _, s)) = sim.take_accepted().pop() {
+            srv = Some(s);
+        }
+        srv.is_some()
+    });
+    srv.as_ref().unwrap().abort();
+    sim.run(Duration::from_secs(1), |sim| sim.sock(h).state() == stcp::State::Closed);
+    assert_eq!(sim.tcp.live(), 0);
+    assert_eq!(sim.tcp.stats.resets_out, 1);
+}
+
+#[test]
+fn deferred_handshake_dropped_engine_resets_the_connect() {
+    let mut sim = Sim::new(deferred(), 1500);
+    let h = sim.connect(false, 443, 4096, 4096, true);
+    sim.run(Duration::from_secs(1), |sim| {
+        // The engine task dies without a verdict.
+        !sim.take_accepted().is_empty()
+    });
+    sim.run(Duration::from_secs(1), |sim| sim.sock(h).state() == stcp::State::Closed);
+    assert_eq!(sim.tcp.live(), 0);
+}
+
+#[test]
+fn deferred_handshake_silent_drop_is_a_black_hole() {
+    let mut sim = Sim::new(deferred(), 1500);
+    let h = sim.connect(false, 443, 4096, 4096, true);
+    let mut srv = None;
+    sim.run(Duration::from_secs(1), |sim| {
+        if let Some((_, _, s)) = sim.take_accepted().pop() {
+            srv = Some(s);
+        }
+        srv.is_some()
+    });
+    srv.unwrap().discard();
+    let until = sim.now + Duration::from_secs(20);
+    sim.run(Duration::from_secs(21), |sim| sim.now >= until);
+    assert_eq!(sim.sock(h).state(), stcp::State::SynSent, "no answer at all");
+    assert_eq!(sim.tcp.stats.accepted, 1, "retransmitted SYNs are not routed again");
+    assert_eq!(sim.tcp.stats.segments_out, 0);
+    // The placeholder goes away on its own.
+    sim.sock(h).abort();
+    sim.run(Duration::from_secs(120), |sim| sim.tcp.live() == 0);
+}
+
+#[test]
+fn deferred_handshake_echo_under_loss() {
+    let mut sim = Sim::new(deferred(), 1500);
+    sim.impair(Impair {
+        loss: 0.02,
+        reorder: 0.02,
+        dup: 0.0,
+    });
+    echo(&mut sim, 20, 64 << 10, false, true, 64 << 10, Duration::from_secs(300));
 }

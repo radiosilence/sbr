@@ -116,7 +116,9 @@ impl Apps {
         Self {
             // SAFETY: the fd is owned by the AsyncFd and closed only after its
             // registration is gone.
-            fd: unsafe { AsyncFd::register(fd) }.map_err(|e| -> std::io::Error { e.into() }).unwrap(),
+            fd: unsafe { AsyncFd::register(fd) }
+                .map_err(|e| -> std::io::Error { e.into() })
+                .unwrap(),
             iface,
             sockets: SocketSet::new(Vec::new()),
             dev,
@@ -126,7 +128,10 @@ impl Apps {
     }
 
     fn connect(&mut self, to: SocketAddr, buf: usize) -> SocketHandle {
-        let mut s = stcp::Socket::new(stcp::SocketBuffer::new(vec![0; buf]), stcp::SocketBuffer::new(vec![0; buf]));
+        let mut s = stcp::Socket::new(
+            stcp::SocketBuffer::new(vec![0; buf]),
+            stcp::SocketBuffer::new(vec![0; buf]),
+        );
         s.set_nagle_enabled(false);
         self.port += 1;
         s.connect(self.iface.context(), (IpAddress::from(to.ip()), to.port()), self.port)
@@ -209,6 +214,7 @@ async fn start(tcp: TcpConfig) -> (Arc<Stack>, Apps, Arc<Mutex<Vec<UdpIn>>>) {
         cfg,
         |acc| {
             // The engine side: echo, then close.
+            acc.stream.accept();
             tokio::spawn(async move {
                 let (mut r, mut w) = tokio::io::split(acc.stream);
                 let _ = tokio::io::copy(&mut r, &mut w).await;
@@ -239,7 +245,11 @@ async fn echo_many_connections_through_the_packet_loop() {
     let mut got: Vec<Vec<u8>> = vec![Vec::new(); n];
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        assert!(Instant::now() < deadline, "timed out: got {:?}", got.iter().map(Vec::len).collect::<Vec<_>>());
+        assert!(
+            Instant::now() < deadline,
+            "timed out: got {:?}",
+            got.iter().map(Vec::len).collect::<Vec<_>>()
+        );
         apps.step().await;
         let mut done = true;
         for i in 0..n {

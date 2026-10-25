@@ -50,6 +50,15 @@ pub struct TcpConfig {
     pub max_connections: usize,
     /// Spare buffer memory kept for reuse across connections.
     pub pool_keep: usize,
+    /// Connect before accepting: hand each connection to the engine on the
+    /// app's SYN and answer only once the engine has a verdict, a SYN-ACK
+    /// when the outbound connected (`Stream::accept`) or a reset when it
+    /// failed or a rule rejected it. The app's connect() then takes as long
+    /// as the outbound's and fails the way a refused connect does, so it
+    /// can fall back at once instead of seeing an established connection
+    /// die. A config that sniffs before routing still completes the
+    /// handshake first, since sniffing needs the app's first bytes.
+    pub defer_handshake: bool,
     /// Cap on what all connections' buffers hold together (0: none). At the
     /// cap, receive windows stop opening and writes wait, except that each
     /// connection may always buffer one 16 KiB chunk each way.
@@ -76,6 +85,7 @@ impl Default for TcpConfig {
                 max_connections: 0,
                 pool_keep: 1 << 20,
                 memory_limit: 8 << 20,
+                defer_handshake: true,
             }
         } else {
             Self {
@@ -84,6 +94,7 @@ impl Default for TcpConfig {
                 max_connections: 0,
                 pool_keep: 8 << 20,
                 memory_limit: 0,
+                defer_handshake: true,
             }
         }
     }
@@ -119,6 +130,10 @@ pub(crate) struct Inner {
     pub abort: Option<bool>,
     /// Already on the packet loop's list.
     pub queued: bool,
+    /// The engine has the stream.
+    pub handed: bool,
+    /// The engine asked for the handshake to complete.
+    pub accept: bool,
 }
 
 impl Inner {
@@ -138,6 +153,8 @@ impl Inner {
             dropped: false,
             abort: None,
             queued: false,
+            handed: false,
+            accept: false,
         }
     }
 }
@@ -166,6 +183,16 @@ pub struct Stream {
 }
 
 impl Stream {
+    /// Complete the handshake (with `defer_handshake`; otherwise it is
+    /// already complete). Idempotent.
+    pub fn accept(&self) {
+        let mut g = self.shared.m.lock().unwrap();
+        if !g.accept && g.err.is_none() {
+            g.accept = true;
+            self.env.queue(&mut g, self.shared.key);
+        }
+    }
+
     /// Reset the connection (the outbound refused it).
     pub fn abort(&self) {
         self.request_abort(true);
@@ -469,6 +496,7 @@ impl Tcp {
             self.cfg.rx_buffer,
             self.cfg.tx_buffer,
             shared,
+            self.cfg.defer_handshake.then_some(now),
         );
         self.slots[i as usize].tcb = Some(Box::new(t));
         self.table.insert((remote, local), i);
@@ -487,7 +515,9 @@ impl Tcp {
     pub fn drain_app(&mut self, now: Instant) {
         let pending = std::mem::take(&mut *self.env.pending.lock().unwrap());
         for (i, serial) in pending {
-            let Some(s) = self.slots.get_mut(i as usize) else { continue };
+            let Some(s) = self.slots.get_mut(i as usize) else {
+                continue;
+            };
             if s.serial != serial {
                 continue;
             }
@@ -543,7 +573,9 @@ impl Tcp {
             let i = dirty[k];
             k += 1;
             let (mut cx, slots) = self.ctx(now, link);
-            let Some(t) = slots[i as usize].tcb.as_mut() else { continue };
+            let Some(t) = slots[i as usize].tcb.as_mut() else {
+                continue;
+            };
             if t.output(&mut cx).is_err() {
                 // Keep this and the rest for the retry.
                 self.blocked_until = Some(now + BLOCKED_RETRY);
@@ -591,7 +623,8 @@ impl Tcp {
         if let Some(w) = wr {
             w.wake();
         }
-        if std::mem::take(&mut t.established_now) && t.state != State::Closed {
+        if std::mem::take(&mut t.accept_now) && t.state != State::Closed {
+            t.shared.m.lock().unwrap().handed = true;
             let stream = Stream {
                 shared: t.shared.clone(),
                 env: self.env.clone(),

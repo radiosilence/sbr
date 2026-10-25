@@ -25,6 +25,11 @@ const DEFAULT_MTU: u32 = 9000;
 struct TunClient(Accepted);
 
 impl InboundStream for TunClient {
+    fn ready(&mut self) -> sbr_core::BoxFuture<'_, io::Result<()>> {
+        self.0.stream.accept();
+        Box::pin(async { Ok(()) })
+    }
+
     /// With the userspace stack the app gets a reset, as from a refused
     /// connect; the kernel stack can only close.
     fn fail<'a>(&'a mut self, err: &'a OpenError) -> sbr_core::BoxFuture<'a, io::Result<()>> {

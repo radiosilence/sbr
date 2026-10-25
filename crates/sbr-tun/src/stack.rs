@@ -5,9 +5,9 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -86,6 +86,15 @@ pub enum TcpConn {
 }
 
 impl TcpConn {
+    /// The engine is ready for the connection: with the userspace stack's
+    /// deferred handshake this sends the SYN-ACK. The kernel stack has
+    /// already completed it.
+    pub fn accept(&self) {
+        if let Self::User(s) = self {
+            s.accept();
+        }
+    }
+
     /// The outbound refused the connection: reset it, or with `silent`
     /// forget it without a word to the app. The kernel stack can only
     /// close.

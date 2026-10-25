@@ -92,7 +92,9 @@ async fn connect(n: u8, port: u16) -> TcpStream {
 }
 
 async fn echo_bytes(s: &mut TcpStream, len: usize) {
-    let data: Vec<u8> = (0..len as u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+    let data: Vec<u8> = (0..len as u32)
+        .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
+        .collect();
     let (mut r, mut w) = s.split();
     let send = async {
         w.write_all(&data).await.unwrap();
