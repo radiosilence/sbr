@@ -66,6 +66,7 @@ pub struct SbrRuntimeStats {
     pub udp_sessions: u64,
     pub uplink_bytes: u64,
     pub downlink_bytes: u64,
+    pub cpu_time_us: u64,
 }
 
 /// What a start needs besides the config; reused by `sbr_reload`.
@@ -685,6 +686,7 @@ pub unsafe extern "C" fn sbr_runtime_stats(instance: *mut SbrInstance, out: *mut
         let mut s = SbrRuntimeStats {
             memory_footprint: sys::memory_footprint(),
             memory_available: sys::memory_available(),
+            cpu_time_us: sys::cpu_time_us(),
             ..Default::default()
         };
         if let Some(e) = engine_of(instance) {

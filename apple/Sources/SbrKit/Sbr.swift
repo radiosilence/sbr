@@ -49,6 +49,8 @@ public struct SbrStats: Codable, Sendable, Hashable {
     /// Bytes relayed since start, live.
     public var uplinkBytes: UInt64
     public var downlinkBytes: UInt64
+    /// CPU time the process has used, in microseconds.
+    public var cpuTimeMicros: UInt64 = 0
 }
 
 /// A running sbr core. Thread-safe; stopped by `stop()` or on release.
@@ -206,7 +208,8 @@ public final class Sbr: @unchecked Sendable {
             activeConnections: s.active_connections,
             udpSessions: s.udp_sessions,
             uplinkBytes: s.uplink_bytes,
-            downlinkBytes: s.downlink_bytes
+            downlinkBytes: s.downlink_bytes,
+            cpuTimeMicros: s.cpu_time_us
         )
     }
 

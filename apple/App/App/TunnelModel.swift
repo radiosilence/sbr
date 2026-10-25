@@ -9,6 +9,8 @@ final class TunnelModel: ObservableObject {
     @Published private(set) var stats: SbrStats?
     @Published private(set) var uploadRate: Double = 0 // bytes/s
     @Published private(set) var downloadRate: Double = 0
+    /// Share of one core the tunnel used over the last poll, 0…1+.
+    @Published private(set) var cpuShare: Double = 0
     @Published private(set) var testing: Set<String> = []
     @Published var errorMessage: String?
     /// Why the tunnel last stopped without being asked to, from the system.
@@ -185,6 +187,7 @@ final class TunnelModel: ObservableObject {
                         let dt = max(now.timeIntervalSince(last.at), 0.001)
                         uploadRate = Double(s.uplinkBytes &- last.stats.uplinkBytes) / dt
                         downloadRate = Double(s.downlinkBytes &- last.stats.downlinkBytes) / dt
+                        cpuShare = Double(s.cpuTimeMicros &- last.stats.cpuTimeMicros) / 1e6 / dt
                     }
                     last = (s, now)
                     stats = s

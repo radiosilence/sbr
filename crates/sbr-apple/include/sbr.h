@@ -48,6 +48,8 @@ typedef struct SbrRuntimeStats {
     /* Bytes relayed since start, including connections still open. */
     uint64_t uplink_bytes;
     uint64_t downlink_bytes;
+    /* User plus system CPU time the process has used, in microseconds. */
+    uint64_t cpu_time_us;
 } SbrRuntimeStats;
 
 /* Log levels passed to the callback. */

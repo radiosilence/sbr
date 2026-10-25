@@ -154,3 +154,14 @@ mod tests {
         assert_eq!(super::find_utun_fd(), None);
     }
 }
+
+/// User plus system CPU time this process has used, in microseconds.
+pub fn cpu_time_us() -> u64 {
+    // SAFETY: getrusage fills a zeroed rusage for this process.
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) } != 0 {
+        return 0;
+    }
+    let us = |t: libc::timeval| t.tv_sec as u64 * 1_000_000 + t.tv_usec as u64;
+    us(ru.ru_utime) + us(ru.ru_stime)
+}

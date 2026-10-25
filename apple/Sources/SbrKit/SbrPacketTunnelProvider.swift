@@ -413,14 +413,26 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             let clock = ISO8601DateFormatter()
             var peak: UInt64 = 0
             var tick = 0
+            var lastCPU: (micros: UInt64, at: Date)?
             while !Task.isCancelled {
-                // Sampled every second, saved with the interval's peak every
-                // 5 s: a memory kill can follow a spike within seconds.
+                // Sampled every second, saved every 5 s with the interval's
+                // peak memory and CPU share: iOS kills an extension for memory
+                // or CPU without a report the extension can see.
                 if let self, let core = self.core {
-                    peak = max(peak, core.stats().memoryFootprint)
+                    let s = core.stats()
+                    peak = max(peak, s.memoryFootprint)
                     if tick % 5 == 0, let url = Self.heartbeatURL {
-                        let beat = String(format: "%@ with %.1f MB in use (peak %.1f MB)", clock.string(from: Date()),
-                                          Double(core.stats().memoryFootprint) / 1_048_576, Double(peak) / 1_048_576)
+                        let now = Date()
+                        var cpu = ""
+                        if let last = lastCPU {
+                            let share = Double(s.cpuTimeMicros &- last.micros) / 1e6 / max(now.timeIntervalSince(last.at), 0.001)
+                            cpu = String(format: ", cpu %.0f%%", share * 100)
+                        }
+                        lastCPU = (s.cpuTimeMicros, now)
+                        let beat = String(format: "%@ with %.1f MB in use (peak %.1f MB, %.0f MB left)%@, %d tcp",
+                                          clock.string(from: now), Double(s.memoryFootprint) / 1_048_576,
+                                          Double(peak) / 1_048_576, Double(s.memoryAvailable) / 1_048_576, cpu,
+                                          Int(s.activeConnections))
                         try? beat.write(to: url, atomically: true, encoding: .utf8)
                         Self.saveRecent()
                         peak = 0

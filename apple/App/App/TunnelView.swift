@@ -97,7 +97,7 @@ struct TunnelView: View {
                 Spacer()
             }
             if let s = tunnel.stats {
-                Text("\(s.activeConnections) tcp · \(s.udpSessions) udp · \(Self.bytes(Double(s.memoryFootprint))) mem")
+                Text("\(s.activeConnections) tcp · \(s.udpSessions) udp · \(Self.bytes(Double(s.memoryFootprint))) mem · \(Int(tunnel.cpuShare * 100))% cpu")
                     .font(.sbr(.fine)).foregroundStyle(Color.sbrMuted).padding(.top, Theme.Space.s)
             }
         }
