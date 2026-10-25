@@ -91,7 +91,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             startPathMonitor()
             logger.info("tunnel up on fd \(fd)")
         } catch {
-            logger.error("start failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("start failed: \(error.localizedDescription, privacy: .private)")
             throw error
         }
     }

@@ -72,9 +72,9 @@ is the actual target:
      section.
    - FakeIP persistence: the `CacheFile::table("fakeip")` hook exists (TODO in
      `cache.rs`), but `sbr_dns::FakeIp` doesn't call it yet.
-   - `urltest` should re-probe on network change (`sbr_network_changed` →
-     `Engine::network_changed`). Check it does; sing-box does, and the user's
-     power tuning relies on it.
+   - ~~`urltest` should re-probe on network change~~ Done with issue #4:
+     `Engine::network_changed` clears outbound health and re-probes groups
+     in use (idle ones on their next use).
 
 ## Project rules the user set
 

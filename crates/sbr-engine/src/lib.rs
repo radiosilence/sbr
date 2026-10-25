@@ -6,6 +6,7 @@ pub mod clash;
 pub mod dispatch;
 mod dns;
 pub mod fetch;
+pub mod health;
 mod httpx;
 pub mod inbound;
 pub mod outbound;
@@ -22,10 +23,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sbr_config::{InboundKind, Options};
+use sbr_core::Metadata;
 use sbr_core::dns::{Dns, SystemDns};
 use sbr_core::relay::{self, Traffic};
 use sbr_core::router::{ClashMode, Router, RuleSets};
-use sbr_core::{Metadata, Stream};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
@@ -257,18 +258,22 @@ impl Engine {
     /// (same interface) or fails fast on its own. Pooled upstream state
     /// (multiplex sessions, QUIC connections, DNS cache) belongs here too as
     /// it lands, so the next request dials over the new path. Outbounds with
-    /// long-lived sockets (WireGuard) replace them.
+    /// long-lived sockets (WireGuard) replace them. Outbound health is
+    /// forgotten (a different network has a different censor) and `urltest`
+    /// groups re-probe: at once if in use, otherwise on their next use.
     pub fn network_changed(&self) {
         let udp = self.nat.clear();
         for o in &self.outbounds {
             o.network_changed();
         }
+        self.groups.network_changed();
         info!(udp_sessions = udp, "network changed: reset path-bound state");
     }
 
-    pub(crate) async fn relay<A>(&self, meta: &Metadata, mut client: A, mut remote: Stream) -> io::Result<()>
+    pub(crate) async fn relay<A, B>(&self, meta: &Metadata, mut client: A, mut remote: B) -> io::Result<()>
     where
         A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+        B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
         let r = relay::relay(&mut client, &mut remote, self.relay_buffer, &self.traffic).await;
         match r {

@@ -302,11 +302,19 @@ pub unsafe extern "C" fn sbr_groups(instance: *mut SbrInstance) -> *mut c_char {
                     .members()
                     .iter()
                     .map(|m| {
+                        let d = env.degraded(&real_tag(m.as_ref()));
                         format!(
-                            r#"{{"tag":{},"type":{},"delay":{}}}"#,
+                            r#"{{"tag":{},"type":{},"delay":{},"degraded":{},"reason":{},"retry_in":{}}}"#,
                             json_str(m.tag()),
                             json_str(m.kind()),
-                            delay(m.as_ref())
+                            delay(m.as_ref()),
+                            d.is_some(),
+                            d.map_or("null".to_owned(), |d| json_str(d.reason.as_str())),
+                            d.map_or("null".to_owned(), |d| d
+                                .until
+                                .saturating_duration_since(std::time::Instant::now())
+                                .as_secs()
+                                .to_string()),
                         )
                     })
                     .collect();
