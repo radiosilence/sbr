@@ -117,6 +117,27 @@ char *sbr_groups(SbrInstance *instance);
  * members) and return at once; results appear in sbr_groups. 1 = started. */
 int32_t sbr_url_test(SbrInstance *instance, const char *group);
 
+/* Open connections (TCP streams and UDP sessions), newest first, as JSON:
+ * {"total":312,"upload_total":1024,"download_total":4096,
+ *  "connections":[{"id":"3f2a...-8b1c-000000000123","network":"tcp",
+ *    "inbound":"tun/tun-in","source":"172.19.0.1:50123",
+ *    "destination":"1.2.3.4:443","domain":"example.com","ip":"1.2.3.4",
+ *    "protocol":"tls","chain":["hy2-a","auto","proxy"],
+ *    "rule":"domain_suffix=[example.com] => route(proxy)",
+ *    "upload":512,"download":2048,"start":1761397200123}, ...]}
+ * `total` counts every open connection; at most `limit` are listed (0 or
+ * anything above 200 means 200). `destination` is the address as requested;
+ * `domain` is the requested or sniffed domain and `ip` the resolved address,
+ * each null when unknown; `protocol` is the sniffed protocol or null.
+ * `chain` runs from the leaf outbound to the one the rule chose; `rule` is
+ * "final" for route.final. Byte counts are live; `start` is Unix ms.
+ * `*_total` include closed connections. NULL when the instance is stopped. */
+char *sbr_connections(SbrInstance *instance, uint32_t limit);
+
+/* Close the connection with this `id` from sbr_connections. 1 if it was
+ * open, 0 otherwise. */
+int32_t sbr_close_connection(SbrInstance *instance, const char *id);
+
 /* Bytes relayed so far (live) and currently open TCP connections. Any
  * out-pointer may be NULL. */
 void sbr_stats(SbrInstance *instance, uint64_t *up, uint64_t *down, uint64_t *active);

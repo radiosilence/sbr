@@ -592,10 +592,7 @@ fn conn_json(api: &ApiState, c: &Conn) -> Value {
     let inbound = format!("{}/{}", m.inbound_type, m.inbound);
     let host = m.domain().unwrap_or("");
     let dst_ip = m.destination_ips().next().map(|ip| ip.to_string()).unwrap_or_default();
-    let rule = match c.rule.and_then(|i| api.engine.router.rule_info(i)) {
-        Some(r) => format!("{} => {}", r.payload, r.action),
-        None => "final".into(),
-    };
+    let rule = api.engine.rule_label(c.rule);
     json!({
         "id": c.uuid(&api.engine.tracker),
         "metadata": {

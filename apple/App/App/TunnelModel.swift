@@ -20,6 +20,21 @@ final class TunnelModel: ObservableObject {
         }
     }
 
+    /// Connect on demand everywhere except `trustedNetworks` (Wi-Fi SSIDs).
+    @Published var autoConnect = UserDefaults.standard.bool(forKey: "autoConnect") {
+        didSet {
+            UserDefaults.standard.set(autoConnect, forKey: "autoConnect")
+            Task { try? await self.install(onDemand: self.autoConnect) }
+        }
+    }
+
+    @Published var trustedNetworks = UserDefaults.standard.stringArray(forKey: "trustedNetworks") ?? [] {
+        didSet {
+            UserDefaults.standard.set(trustedNetworks, forKey: "trustedNetworks")
+            Task { try? await self.install() }
+        }
+    }
+
     /// Debug-level engine logs in the logs tab, for diagnosing a profile.
     @Published var verbose = UserDefaults.standard.bool(forKey: "verbose") {
         didSet {
@@ -60,16 +75,7 @@ final class TunnelModel: ObservableObject {
         do {
             if manager == nil { try await install() }
             guard let manager else { return }
-            if on {
-                if !manager.isEnabled {
-                    manager.isEnabled = true
-                    try await manager.saveToPreferences()
-                    try await manager.loadFromPreferences()
-                }
-                try manager.connection.startVPNTunnel()
-            } else {
-                manager.connection.stopVPNTunnel()
-            }
+            try await TunnelControl.setOn(on, manager)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -154,6 +160,62 @@ final class TunnelModel: ObservableObject {
         }
     }
 
+    /// A connection with its rate over the last poll and when bytes last moved.
+    struct LiveConnection: Identifiable, Hashable {
+        var connection: SbrConnection
+        var uploadRate: Double = 0
+        var downloadRate: Double = 0
+        var lastActive: Date
+        var id: String { connection.id }
+    }
+
+    @Published private(set) var connections: [LiveConnection] = []
+    @Published private(set) var connectionsTotal = 0
+
+    /// Poll the tunnel's connections once a second while the connections
+    /// tab is visible. Rows sort by when bytes last moved, newest first.
+    func pollConnections() async {
+        var previous: [String: LiveConnection] = [:]
+        var lastAt = Date()
+        while !Task.isCancelled {
+            if isConnected, let session, let snapshot = try? await session.send(.connections).connections {
+                let now = Date()
+                let dt = max(now.timeIntervalSince(lastAt), 0.001)
+                lastAt = now
+                let rows = snapshot.connections.map { c in
+                    guard let p = previous[c.id] else {
+                        return LiveConnection(connection: c, lastActive: c.startDate)
+                    }
+                    let up = c.upload &- p.connection.upload, down = c.download &- p.connection.download
+                    return LiveConnection(
+                        connection: c,
+                        uploadRate: Double(up) / dt,
+                        downloadRate: Double(down) / dt,
+                        lastActive: up + down > 0 ? now : p.lastActive
+                    )
+                }
+                previous = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+                connections = rows.sorted { ($0.lastActive, $0.connection.start) > ($1.lastActive, $1.connection.start) }
+                connectionsTotal = snapshot.total
+            } else if !isConnected {
+                previous = [:]
+                connections = []
+                connectionsTotal = 0
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    }
+
+    func closeConnection(id: String) async {
+        guard let session else { return }
+        connections.removeAll { $0.id == id }
+        do {
+            _ = try await session.send(.closeConnection(id: id))
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     /// The profile as the tunnel runs it: with `verbose`, its log level is
     /// raised to debug.
     private var installedConfig: String? {
@@ -167,11 +229,15 @@ final class TunnelModel: ObservableObject {
         return String(decoding: data, as: UTF8.self)
     }
 
-    private func install() async throws {
+    /// Save the VPN configuration. `onDemand` arms or disarms auto-connect;
+    /// nil keeps whatever a manual connect or disconnect last left it as.
+    private func install(onDemand: Bool? = nil) async throws {
         #if SBR_SYSTEM_EXTENSION
         try await SystemExtensionActivator.activate(identifier: AppConfig.tunnelBundleIdentifier)
         #endif
         let m = manager ?? NETunnelProviderManager()
+        // An intent may have changed it from another process since.
+        if manager != nil { try? await m.loadFromPreferences() }
         let proto = (m.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = AppConfig.tunnelBundleIdentifier
         proto.serverAddress = "sbr"
@@ -181,6 +247,8 @@ final class TunnelModel: ObservableObject {
         m.protocolConfiguration = proto
         m.localizedDescription = "sbr"
         m.isEnabled = true
+        m.onDemandRules = autoConnect ? OnDemand.rules(trusted: trustedNetworks) : nil
+        m.isOnDemandEnabled = autoConnect && (onDemand ?? (manager == nil || m.isOnDemandEnabled))
         try await m.saveToPreferences()
         // A freshly saved manager must be reloaded before it can start.
         try await m.loadFromPreferences()
@@ -198,6 +266,7 @@ final class TunnelModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.status = connection.status
+                TunnelControl.reloadControl()
                 if connection.status != .connected { self.groups = [] }
             }
         }

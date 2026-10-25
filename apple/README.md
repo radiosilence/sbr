@@ -46,7 +46,8 @@ That is the whole extension. The base class:
    interfaces changes. `wake()` calls it too, because UDP NAT mappings are likely gone
    after sleep. `sleep()` returns immediately: an idle sbr arms no timers, so there is
    nothing to pause.
-6. Answers `SbrRequest` app messages (`groups`, `select`, `stats`, `reload`).
+6. Answers `SbrRequest` app messages (`groups`, `select`, `stats`, `connections`,
+   `closeConnection`, `reload`).
    On the app side, call `NETunnelProviderSession.send(_:)`.
 
 Override `loadConfiguration()`, `coreOptions` (threads, buffer, connection cap)
@@ -67,6 +68,8 @@ char           *sbr_reload(SbrInstance *instance, const char *config_json);
 void            sbr_stop(SbrInstance *instance);
 int32_t         sbr_select(SbrInstance *instance, const char *group, const char *member);
 char           *sbr_groups(SbrInstance *instance);
+char           *sbr_connections(SbrInstance *instance, uint32_t limit);
+int32_t         sbr_close_connection(SbrInstance *instance, const char *id);
 void            sbr_stats(SbrInstance *instance, uint64_t *up, uint64_t *down, uint64_t *active);
 void            sbr_runtime_stats(SbrInstance *instance, SbrRuntimeStats *out);
 void            sbr_network_changed(SbrInstance *instance);

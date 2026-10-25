@@ -240,6 +240,15 @@ impl Engine {
         self.nat.len()
     }
 
+    /// The route rule a tracked connection matched, as dashboards show it:
+    /// `payload => action`, or `final` for `route.final`.
+    pub fn rule_label(&self, rule: Option<usize>) -> String {
+        match rule.and_then(|i| self.router.rule_info(i)) {
+            Some(r) => format!("{} => {}", r.payload, r.action),
+            None => "final".into(),
+        }
+    }
+
     /// Take a connection slot, or `None` when `max_connections` is reached.
     pub(crate) fn admit(&self) -> Option<Slot<'_>> {
         let n = self.active.fetch_add(1, Ordering::Relaxed);

@@ -5,9 +5,9 @@
 #     apple/testflight.sh [build-number]
 #
 # Needs apple/SbrCore.xcframework (build-xcframework.sh), the Apple
-# Distribution identity in a keychain, and the "sbr App Store" and
-# "sbr tunnel App Store" profiles installed (tools/fetch-profiles.py). The
-# build number defaults to the UTC time as YYYYMMDDHHMM: App Store Connect
+# Distribution identity in a keychain, and the "sbr App Store", "sbr tunnel
+# App Store" and "sbr widgets App Store" profiles installed
+# (tools/fetch-profiles.py). The build number defaults to the UTC time as YYYYMMDDHHMM: App Store Connect
 # takes each build number of a version once, and only rising ones.
 set -euo pipefail
 cd "$(dirname "$0")/App"
@@ -51,6 +51,7 @@ cat > "$out/ExportOptions.plist" <<PLIST
     <dict>
         <key>$bundle</key><string>sbr App Store</string>
         <key>$bundle.tunnel</key><string>sbr tunnel App Store</string>
+        <key>$bundle.widgets</key><string>sbr widgets App Store</string>
     </dict>
     <key>uploadSymbols</key><true/>
     <key>manageAppVersionAndBuildNumber</key><false/>
