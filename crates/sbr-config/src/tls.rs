@@ -36,6 +36,43 @@ pub struct TlsOutbound {
     pub ech: Option<Ech>,
 }
 
+impl TlsOutbound {
+    /// The `utls.fingerprint` name the handshake should imitate, or `None`
+    /// for rustls. sbr imitates a browser (`""`, Chrome) when `utls` is
+    /// absent and `browser_by_default`, and uses rustls when `utls.enabled`
+    /// is explicitly false or the options need what only rustls does here
+    /// (TLS 1.2, client certificates, ECH); with `utls` enabled those are
+    /// errors, naming the field.
+    pub fn browser_fingerprint(&self, browser_by_default: bool) -> std::result::Result<Option<&str>, String> {
+        let explicit = match &self.utls {
+            Some(u) if !u.enabled => return Ok(None),
+            Some(u) => Some(u.fingerprint.as_deref().unwrap_or_default()),
+            None => None,
+        };
+        let needs_rustls = [
+            (
+                self.max_version.as_deref().is_some_and(|v| v != "1.3"),
+                "tls.max_version: browser fingerprints need TLS 1.3",
+            ),
+            (
+                self.client_certificate.is_some() || self.client_certificate_path.is_some(),
+                "tls.client_certificate: not supported with a browser fingerprint",
+            ),
+            (
+                self.ech.as_ref().is_some_and(|e| e.enabled),
+                "tls.ech: not supported with a browser fingerprint",
+            ),
+        ];
+        if let Some((_, why)) = needs_rustls.iter().find(|(hit, _)| *hit) {
+            return match explicit {
+                Some(_) => Err(format!("{why} (set tls.utls.enabled to false to use rustls)")),
+                None => Ok(None),
+            };
+        }
+        Ok(explicit.or(browser_by_default.then_some("")))
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Utls {
     pub enabled: bool,

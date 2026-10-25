@@ -692,7 +692,9 @@ async fn inner_tls_echo(pki: &Pki) -> SocketAddr {
 }
 
 /// TLS client options against sing-box: pinning, client certs, version
-/// caps, uTLS, ClientHello fragmentation, ECH, and the HTTP proxy over TLS.
+/// caps, each browser fingerprint and rustls, ClientHello fragmentation,
+/// ECH, and the HTTP proxy over TLS. Cases without `utls` use the default
+/// browser (Chrome) handshake.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tls_options_interop() {
     let ech = singbox().and_then(|bin| {
@@ -743,6 +745,41 @@ async fn tls_options_interop() {
                 name: "tls-utls-alpn".into(),
                 inbound: trojan_in.clone(),
                 outbound: trojan_out(tls_with(json!({"utls": {"enabled": true, "fingerprint": "chrome"}}))),
+                udp: false,
+            },
+            Case {
+                name: "tls-utls-firefox".into(),
+                inbound: trojan_in.clone(),
+                outbound: trojan_out(tls_with(json!({"utls": {"enabled": true, "fingerprint": "firefox"}}))),
+                udp: false,
+            },
+            Case {
+                name: "tls-utls-safari".into(),
+                inbound: trojan_in.clone(),
+                outbound: trojan_out(tls_with(json!({"utls": {"enabled": true, "fingerprint": "safari"}}))),
+                udp: false,
+            },
+            Case {
+                name: "tls-utls-ios-insecure".into(),
+                inbound: trojan_in.clone(),
+                outbound: trojan_out(json!({"enabled": true, "insecure": true, "utls": {"enabled": true, "fingerprint": "ios"}})),
+                udp: false,
+            },
+            Case {
+                name: "tls-rustls".into(),
+                inbound: trojan_in.clone(),
+                outbound: trojan_out(tls_with(json!({"utls": {"enabled": false}}))),
+                udp: false,
+            },
+            Case {
+                // A browser without a client certificate answers the request empty.
+                name: "tls-client-auth-requested".into(),
+                inbound: {
+                    let mut i = trojan_in.clone();
+                    i["tls"]["client_authentication"] = json!("request");
+                    i
+                },
+                outbound: trojan_out(pki.client_tls()),
                 udp: false,
             },
             Case {

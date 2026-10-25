@@ -1,26 +1,27 @@
-//! A client TLS connection: rustls, or REALITY (`sbr-reality`). Both run over
-//! [`TlsIo`], which also gives XTLS Vision its way out to the raw stream.
+//! A client TLS connection: rustls, or `sbr-reality`'s browser-fingerprinted
+//! TLS 1.3 (ordinary or REALITY). Both run over [`TlsIo`], which also gives
+//! XTLS Vision its way out to the raw stream.
 
 use std::io::{self, Read as _};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use sbr_core::Stream;
-use sbr_reality::RealityStream;
+use sbr_reality::TlsStream as BrowserStream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::{TlsIo, TlsStream};
 
 pub enum TlsConn {
     Rustls(Box<TlsStream>),
-    Reality(Box<RealityStream<TlsIo>>),
+    Browser(Box<BrowserStream<TlsIo>>),
 }
 
 impl TlsConn {
     fn io(&mut self) -> &mut TlsIo {
         match self {
             Self::Rustls(t) => t.get_mut().0,
-            Self::Reality(r) => r.get_mut(),
+            Self::Browser(r) => r.get_mut(),
         }
     }
 
@@ -32,7 +33,7 @@ impl TlsConn {
     /// Make sure the TLS layer never consumes bytes past the record it is
     /// working on (Vision may switch to raw after any record).
     pub fn limit_reads(&mut self) {
-        // REALITY's record layer already decrypts one record at a time.
+        // sbr-reality's record layer already decrypts one record at a time.
         if let Self::Rustls(t) = self {
             t.get_mut().0.limit_to_records();
         }
@@ -60,7 +61,7 @@ impl TlsConn {
                     }
                 }
             }
-            Self::Reality(r) => out = r.take_buffered(),
+            Self::Browser(r) => out = r.take_buffered(),
         }
         out.extend_from_slice(&self.io().take_raw());
         Ok(out)
@@ -71,7 +72,7 @@ impl AsyncRead for TlsConn {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Rustls(t) => Pin::new(&mut **t).poll_read(cx, buf),
-            Self::Reality(r) => Pin::new(&mut **r).poll_read(cx, buf),
+            Self::Browser(r) => Pin::new(&mut **r).poll_read(cx, buf),
         }
     }
 }
@@ -80,7 +81,7 @@ impl AsyncWrite for TlsConn {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             Self::Rustls(t) => Pin::new(&mut **t).poll_write(cx, buf),
-            Self::Reality(r) => Pin::new(&mut **r).poll_write(cx, buf),
+            Self::Browser(r) => Pin::new(&mut **r).poll_write(cx, buf),
         }
     }
     fn poll_write_vectored(
@@ -90,25 +91,25 @@ impl AsyncWrite for TlsConn {
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             Self::Rustls(t) => Pin::new(&mut **t).poll_write_vectored(cx, bufs),
-            Self::Reality(r) => Pin::new(&mut **r).poll_write_vectored(cx, bufs),
+            Self::Browser(r) => Pin::new(&mut **r).poll_write_vectored(cx, bufs),
         }
     }
     fn is_write_vectored(&self) -> bool {
         match self {
             Self::Rustls(t) => t.is_write_vectored(),
-            Self::Reality(r) => r.is_write_vectored(),
+            Self::Browser(r) => r.is_write_vectored(),
         }
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Rustls(t) => Pin::new(&mut **t).poll_flush(cx),
-            Self::Reality(r) => Pin::new(&mut **r).poll_flush(cx),
+            Self::Browser(r) => Pin::new(&mut **r).poll_flush(cx),
         }
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Rustls(t) => Pin::new(&mut **t).poll_shutdown(cx),
-            Self::Reality(r) => Pin::new(&mut **r).poll_shutdown(cx),
+            Self::Browser(r) => Pin::new(&mut **r).poll_shutdown(cx),
         }
     }
 }

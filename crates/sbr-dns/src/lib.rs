@@ -285,8 +285,8 @@ impl DnsRouter {
                     resolver,
                 ))
             };
-            let tls = |t: &sbr_config::TlsOutbound, host: &str, alpn: &[&str]| {
-                transport::tls::Tls::new(t, host, alpn, read).map_err(|e| at(format!("{path}.tls"), e))
+            let tls = |t: &sbr_config::TlsOutbound, host: &str, alpn: &[&str], browser: bool| {
+                transport::tls::Tls::new(t, host, alpn, browser, read).map_err(|e| at(format!("{path}.tls"), e))
             };
             specs.push(match &s.kind {
                 DnsServerKind::Local => Spec::Local(dialer(&sd)),
@@ -320,7 +320,7 @@ impl DnsRouter {
                 }
                 DnsServerKind::Tls { server, tls: t } => {
                     let (r, res) = remote(server)?;
-                    let tls = tls(t, &server.server, &[])?;
+                    let tls = tls(t, &server.server, &[], false)?;
                     Spec::Stream(r, res, Some(tls))
                 }
                 DnsServerKind::Https {
@@ -331,7 +331,7 @@ impl DnsRouter {
                     headers,
                 } => {
                     let (r, res) = remote(server)?;
-                    let tls = tls(t, &server.server, &["h2"])?;
+                    let tls = tls(t, &server.server, &["h2"], true)?;
                     let host = t.server_name.clone().unwrap_or_else(|| server.server.clone());
                     let host = if host.contains(':') { format!("[{host}]") } else { host };
                     let authority = if server.server_port == 443 {

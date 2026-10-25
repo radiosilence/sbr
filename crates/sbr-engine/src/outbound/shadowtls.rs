@@ -13,8 +13,11 @@
 //!   server tags and XOR-masks its handshake records so we can tell it apart
 //!   from a hijacker; data records carry a chained 4-byte HMAC.
 //!
-//! The handshake reads exactly one record at a time, so no byte that
-//! belongs to the post-handshake protocol is ever consumed by rustls.
+//! The camouflage handshake is a browser's (`sbr-reality`) unless the `tls`
+//! options pick rustls (see `tlsmini`); a censor sees a browser talking to
+//! the camouflage site. Either way the handshake reads exactly one record
+//! at a time ([`Tap`]), so no byte that belongs to the post-handshake
+//! protocol is consumed by the TLS client.
 
 use std::io;
 use std::pin::Pin;
@@ -28,6 +31,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use super::Upstream;
 use super::tlsmini::{Scripted, TlsClient, tls_err, with_script};
+use crate::transport::Prefixed;
 
 const HEADER: usize = 5;
 const HMAC_LEN: usize = 4;
@@ -126,6 +130,63 @@ impl ShadowTls {
             return Err(io::Error::other("shadowtls: could not reproduce the ClientHello"));
         }
         Ok((c2, hello2))
+    }
+}
+
+impl ShadowTls {
+    async fn connect_browser(&self, cfg: &sbr_reality::TlsConfig, s: Stream) -> io::Result<Stream> {
+        match self.version {
+            1 => browser_handshake(cfg, s, None, |_| Ok(())).await,
+            2 => {
+                let mut h = hmac::Context::with_key(&self.key());
+                let s = browser_handshake(cfg, s, None, |rec: &mut Vec<u8>| {
+                    h.update(rec);
+                    Ok(())
+                })
+                .await?;
+                let mut prefix = [0u8; 8];
+                prefix.copy_from_slice(&h.sign().as_ref()[..8]);
+                Ok(Box::new(Framed::new(s, Mode::V2 { prefix: Some(prefix) })) as Stream)
+            }
+            _ => {
+                let mut st = V3Handshake {
+                    key: self.key(),
+                    password: self.password.as_bytes().to_vec(),
+                    server_random: None,
+                    read_hmac: None,
+                    mask: Vec::new(),
+                    tls13: false,
+                    authorized: false,
+                };
+                let key = self.key();
+                let sid = move |hello: &mut [u8]| v3_session_id(&key, hello);
+                let s = browser_handshake(cfg, s, Some(&sid), |rec: &mut Vec<u8>| st.on_record(rec)).await?;
+                self.v3_framed(s, st)
+            }
+        }
+    }
+
+    fn v3_framed(&self, s: Stream, st: V3Handshake) -> io::Result<Stream> {
+        let (Some(random), true) = (st.server_random, st.authorized) else {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "shadowtls: traffic hijacked",
+            ));
+        };
+        let tagged = |suffix: &[u8]| {
+            let mut h = hmac::Context::with_key(&self.key());
+            h.update(&random);
+            h.update(suffix);
+            h
+        };
+        Ok(Box::new(Framed::new(
+            s,
+            Mode::V3 {
+                add: tagged(b"C"),
+                verify: tagged(b"S"),
+                ignore: st.read_hmac,
+            },
+        )) as Stream)
     }
 }
 
@@ -254,6 +315,118 @@ impl V3Handshake {
     }
 }
 
+/// Hands the TLS client one whole server record at a time, after `on_record`
+/// has seen (and possibly rewritten) it. Reads from `inner` exactly the
+/// bytes of the current record, so nothing past the handshake is consumed.
+struct Tap<'a, F> {
+    inner: &'a mut Stream,
+    rec: Vec<u8>,
+    /// Bytes of `rec` filled from `inner`; `rec` is complete when it holds
+    /// a header and the body that header announces.
+    filled: usize,
+    /// Read position once the record is complete and processed.
+    pos: Option<usize>,
+    on_record: F,
+}
+
+impl<'a, F: FnMut(&mut Vec<u8>) -> io::Result<()>> Tap<'a, F> {
+    fn new(inner: &'a mut Stream, on_record: F) -> Self {
+        Self {
+            inner,
+            rec: vec![0; HEADER],
+            filled: 0,
+            pos: None,
+            on_record,
+        }
+    }
+}
+
+impl<F: FnMut(&mut Vec<u8>) -> io::Result<()> + Unpin> AsyncRead for Tap<'_, F> {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        loop {
+            if let Some(pos) = this.pos {
+                if pos < this.rec.len() {
+                    let n = (this.rec.len() - pos).min(buf.remaining());
+                    buf.put_slice(&this.rec[pos..pos + n]);
+                    this.pos = Some(pos + n);
+                    return Poll::Ready(Ok(()));
+                }
+                this.rec.clear();
+                this.rec.resize(HEADER, 0);
+                this.filled = 0;
+                this.pos = None;
+            }
+            let mut rb = ReadBuf::new(&mut this.rec[this.filled..]);
+            ready!(Pin::new(&mut *this.inner).poll_read(cx, &mut rb))?;
+            let n = rb.filled().len();
+            if n == 0 {
+                // EOF: clean only between records.
+                return if this.filled == 0 {
+                    Poll::Ready(Ok(()))
+                } else {
+                    Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()))
+                };
+            }
+            this.filled += n;
+            if this.filled == HEADER && this.rec.len() == HEADER {
+                let len = u16::from_be_bytes([this.rec[3], this.rec[4]]) as usize;
+                this.rec.resize(HEADER + len, 0);
+            }
+            if this.filled == this.rec.len() && this.rec.len() > HEADER {
+                (this.on_record)(&mut this.rec)?;
+                this.pos = Some(0);
+            }
+        }
+    }
+}
+
+impl<F: Unpin> AsyncWrite for Tap<'_, F> {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        Pin::new(&mut *self.get_mut().inner).poll_write(cx, buf)
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.get_mut().inner).poll_flush(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// The camouflage handshake with a browser ClientHello. Returns the stream
+/// with any bytes the TLS client read past the handshake put back in front.
+async fn browser_handshake(
+    cfg: &sbr_reality::TlsConfig,
+    mut s: Stream,
+    session_id: Option<&sbr_reality::SessionIdFn>,
+    on_record: impl FnMut(&mut Vec<u8>) -> io::Result<()> + Unpin + Send,
+) -> io::Result<Stream> {
+    let rest = {
+        let tap = Tap::new(&mut s, on_record);
+        let mut tls = sbr_reality::connect_tls_with_session_id(tap, cfg, session_id).await?;
+        let mut rest = tls.take_buffered();
+        let tap = tls.get_mut();
+        if let Some(pos) = tap.pos {
+            rest.extend_from_slice(&tap.rec[pos..]);
+        }
+        rest
+    };
+    Ok(if rest.is_empty() {
+        s
+    } else {
+        Box::new(Prefixed::new(rest, s))
+    })
+}
+
+/// ShadowTLS v3 session id: `random[28] || HMAC(password, ClientHello with
+/// those 4 bytes zeroed)[..4]`, written into `hello` (session id at byte 39).
+fn v3_session_id(key: &hmac::Key, hello: &mut [u8]) {
+    const SID: usize = 39;
+    fill_random(&mut hello[SID..SID + 28]);
+    let tag = hmac::sign(key, hello);
+    hello[SID + 28..SID + 32].copy_from_slice(&tag.as_ref()[..HMAC_LEN]);
+}
+
 impl Outbound for ShadowTls {
     fn tag(&self) -> &str {
         &self.tag
@@ -265,6 +438,9 @@ impl Outbound for ShadowTls {
     fn connect<'a>(&'a self, _dest: &'a Destination) -> BoxFuture<'a, io::Result<Stream>> {
         Box::pin(async move {
             let mut s = self.upstream.connect(&self.server).await?;
+            if let Some(cfg) = &self.tls.browser {
+                return self.connect_browser(cfg, s).await;
+            }
             match self.version {
                 1 => {
                     let mut c =
@@ -297,26 +473,7 @@ impl Outbound for ShadowTls {
                         authorized: false,
                     };
                     handshake(&mut c, &mut s, hello, |rec| st.on_record(rec)).await?;
-                    let (Some(random), true) = (st.server_random, st.authorized) else {
-                        return Err(io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            "shadowtls: traffic hijacked",
-                        ));
-                    };
-                    let tagged = |suffix: &[u8]| {
-                        let mut h = hmac::Context::with_key(&self.key());
-                        h.update(&random);
-                        h.update(suffix);
-                        h
-                    };
-                    Ok(Box::new(Framed::new(
-                        s,
-                        Mode::V3 {
-                            add: tagged(b"C"),
-                            verify: tagged(b"S"),
-                            ignore: st.read_hmac,
-                        },
-                    )) as Stream)
+                    self.v3_framed(s, st)
                 }
             }
         })

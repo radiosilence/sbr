@@ -1,10 +1,16 @@
-//! TLS client on rustls + aws-lc-rs, built from sing-box's outbound `tls`
-//! object (`common/tls/std_client.go`).
+//! TLS client built from sing-box's outbound `tls` object
+//! (`common/tls/std_client.go`, `utls_client.go`).
 //!
-//! `utls` is accepted, but the ClientHello is rustls': we only borrow the
-//! cheap parts of a browser fingerprint (ALPN `h2, http/1.1`, AES-128-GCM
-//! first). `reality` goes through the `sbr-reality` crate, which does carry
-//! browser ClientHellos.
+//! Three handshakes:
+//! - **Browser** (the default): `sbr-reality`'s TLS 1.3 client with a
+//!   browser's ClientHello (`utls.fingerprint`, Chrome when unset) and rustls
+//!   certificate verification. rustls' own ClientHello is distinctive on the
+//!   wire, and a censor can block a fingerprint that few real clients send;
+//!   a browser's is the most common one there is.
+//! - **Rustls**: when `utls.enabled` is explicitly false, or when the config
+//!   needs what the browser client lacks (TLS 1.2 via `max_version`, client
+//!   certificates, ECH). Those are refused instead when `utls` is enabled.
+//! - **REALITY**: `sbr-reality` with the REALITY handshake.
 
 mod conn;
 mod io;
@@ -36,6 +42,118 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 pub enum TlsClient {
     Rustls(Arc<RustlsClient>),
     Reality(Arc<RealityClient>),
+    Browser(Arc<BrowserClient>),
+}
+
+/// The browser fingerprint `t` asks for, or `None` for rustls (see
+/// [`TlsOutbound::browser_fingerprint`]). Errors name the `tls.*` field.
+pub fn browser_fingerprint(t: &TlsOutbound) -> Result<Option<sbr_reality::Fingerprint>, String> {
+    t.browser_fingerprint(true)?
+        .map(|fp| fp.parse().map_err(|e| format!("tls.utls.fingerprint: {e}")))
+        .transpose()
+}
+
+/// `insecure`, pins, a configured CA, or the webpki roots.
+pub fn server_verifier(
+    t: &TlsOutbound,
+    base: Option<&std::path::Path>,
+) -> Result<Arc<dyn rustls::client::danger::ServerCertVerifier>, String> {
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let pinned = !t.certificate_sha256.is_empty() || !t.certificate_public_key_sha256.is_empty();
+    let ca = inline_or_file(&t.certificate, &t.certificate_path, base)?;
+    if pinned && ca.is_some() {
+        return Err(invalid(
+            "tls.certificate_sha256: conflicts with certificate or certificate_path",
+        ));
+    }
+    if t.insecure || pinned {
+        let v = verify::Pinned::new(
+            &t.certificate_sha256,
+            &t.certificate_public_key_sha256,
+            t.insecure && !pinned,
+            &provider,
+        )?;
+        return Ok(Arc::new(v));
+    }
+    let mut roots = RootCertStore::empty();
+    match &ca {
+        Some(pem) => {
+            for c in CertificateDer::pem_slice_iter(pem) {
+                let c = c.map_err(|e| invalid(format!("tls.certificate: {e}")))?;
+                roots.add(c).map_err(|e| invalid(format!("tls.certificate: {e}")))?;
+            }
+            if roots.is_empty() {
+                return Err(invalid("tls.certificate: no certificate found"));
+            }
+        }
+        None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
+    }
+    let v = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
+        .build()
+        .map_err(|e| invalid(format!("tls.certificate: {e}")))?;
+    Ok(v)
+}
+
+fn parse_server_name(t: &TlsOutbound, server: &str) -> Result<ServerName<'static>, String> {
+    let name = t.server_name.clone().unwrap_or_else(|| server.to_owned());
+    let name = name.trim_start_matches('[').trim_end_matches(']').to_owned();
+    ServerName::try_from(name.clone()).map_err(|_| invalid(format!("tls.server_name: invalid name {name:?}")))
+}
+
+/// Ordinary TLS with a browser's ClientHello.
+pub struct BrowserClient {
+    config: sbr_reality::TlsConfig,
+    alpn_configured: bool,
+    handshake_timeout: Duration,
+    fragment: Option<FragmentOptions>,
+}
+
+impl BrowserClient {
+    pub fn new(
+        t: &TlsOutbound,
+        server: &str,
+        base: Option<&std::path::Path>,
+        fingerprint: sbr_reality::Fingerprint,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            config: sbr_reality::TlsConfig {
+                server_name: parse_server_name(t, server)?,
+                sni: !t.disable_sni,
+                fingerprint,
+                alpn: browser_alpn(t.alpn.clone()),
+                post_quantum: true,
+                verifier: server_verifier(t, base)?,
+            },
+            alpn_configured: !t.alpn.is_empty(),
+            handshake_timeout: t
+                .handshake_timeout
+                .filter(|d| !d.is_zero())
+                .unwrap_or(HANDSHAKE_TIMEOUT),
+            fragment: fragment_options(t),
+        })
+    }
+
+    pub fn config(&self) -> &sbr_reality::TlsConfig {
+        &self.config
+    }
+
+    async fn connect(&self, io: Stream, fd: Option<i32>) -> stdio::Result<TlsConn> {
+        let io = TlsIo::new(io, fd, self.fragment);
+        match tokio::time::timeout(self.handshake_timeout, sbr_reality::connect_tls(io, &self.config)).await {
+            Ok(r) => Ok(TlsConn::Browser(Box::new(r?))),
+            Err(_) => Err(stdio::Error::new(stdio::ErrorKind::TimedOut, "TLS handshake timed out")),
+        }
+    }
+}
+
+/// Browsers widen a lone `h2` to `h2, http/1.1`, as sing-box's uTLS client
+/// does; empty keeps the fingerprint's own list.
+fn browser_alpn(alpn: Vec<String>) -> Vec<String> {
+    if alpn == ["h2"] {
+        vec!["h2".into(), "http/1.1".into()]
+    } else {
+        alpn
+    }
 }
 
 pub struct RealityClient {
@@ -74,7 +192,7 @@ impl RealityClient {
     async fn connect(&self, io: Stream, fd: Option<i32>) -> stdio::Result<TlsConn> {
         let io = TlsIo::new(io, fd, self.fragment);
         match tokio::time::timeout(self.handshake_timeout, sbr_reality::connect(io, &self.config)).await {
-            Ok(r) => Ok(TlsConn::Reality(Box::new(r?))),
+            Ok(r) => Ok(TlsConn::Browser(Box::new(r?))),
             Err(_) => Err(stdio::Error::new(
                 stdio::ErrorKind::TimedOut,
                 "REALITY handshake timed out",
@@ -99,7 +217,6 @@ pub struct RustlsClient {
     server_name: ServerName<'static>,
     /// `alpn` as configured (transports may substitute a default).
     alpn_configured: bool,
-    utls: bool,
     handshake_timeout: Duration,
     fragment: Option<FragmentOptions>,
 }
@@ -136,6 +253,9 @@ impl TlsClient {
         if t.reality.as_ref().is_some_and(|r| r.enabled) {
             return Ok(Self::Reality(Arc::new(RealityClient::new(t, server)?)));
         }
+        if let Some(fp) = browser_fingerprint(t)? {
+            return Ok(Self::Browser(Arc::new(BrowserClient::new(t, server, base, fp)?)));
+        }
         Ok(Self::Rustls(Arc::new(RustlsClient::new(t, server, base)?)))
     }
 
@@ -146,12 +266,21 @@ impl TlsClient {
         match self {
             Self::Rustls(c) if !c.alpn_configured => {
                 let mut config = (*c.config).clone();
-                config.alpn_protocols = effective_alpn(alpn.iter().map(|s| s.to_string()).collect(), c.utls);
+                config.alpn_protocols = alpn.iter().map(|a| a.as_bytes().to_vec()).collect();
                 Self::Rustls(Arc::new(RustlsClient {
                     config: Arc::new(config),
                     server_name: c.server_name.clone(),
                     alpn_configured: true,
-                    utls: c.utls,
+                    handshake_timeout: c.handshake_timeout,
+                    fragment: c.fragment,
+                }))
+            }
+            Self::Browser(c) if !c.alpn_configured => {
+                let mut config = c.config.clone();
+                config.alpn = browser_alpn(alpn.iter().map(|s| s.to_string()).collect());
+                Self::Browser(Arc::new(BrowserClient {
+                    config,
+                    alpn_configured: true,
                     handshake_timeout: c.handshake_timeout,
                     fragment: c.fragment,
                 }))
@@ -179,6 +308,11 @@ impl TlsClient {
                 _ => return None,
             }),
             Self::Reality(c) => Some(c.config.server_name.clone()),
+            Self::Browser(c) => Some(match &c.config.server_name {
+                ServerName::DnsName(d) => d.as_ref().to_owned(),
+                ServerName::IpAddress(ip) => std::net::IpAddr::from(*ip).to_string(),
+                _ => return None,
+            }),
         }
     }
 
@@ -188,63 +322,17 @@ impl TlsClient {
         match self {
             Self::Rustls(c) => Ok(TlsConn::Rustls(Box::new(c.connect(io, fd).await?))),
             Self::Reality(c) => c.connect(io, fd).await,
+            Self::Browser(c) => c.connect(io, fd).await,
         }
     }
-}
-
-fn effective_alpn(mut alpn: Vec<String>, utls: bool) -> Vec<Vec<u8>> {
-    // uTLS fingerprints carry `h2, http/1.1` unless told otherwise, and
-    // sing-box widens a lone `h2` the same way.
-    if utls && (alpn.is_empty() || alpn == ["h2"]) {
-        alpn = vec!["h2".into(), "http/1.1".into()];
-    }
-    alpn.into_iter().map(String::into_bytes).collect()
 }
 
 impl RustlsClient {
     fn new(t: &TlsOutbound, server: &str, base: Option<&std::path::Path>) -> Result<Self, String> {
-        let name = t.server_name.clone().unwrap_or_else(|| server.to_owned());
-        let name = name.trim_start_matches('[').trim_end_matches(']').to_owned();
-        let server_name = ServerName::try_from(name.clone())
-            .map_err(|_| invalid(format!("tls.server_name: invalid name {name:?}")))?;
+        let server_name = parse_server_name(t, server)?;
 
-        let utls = match &t.utls {
-            Some(u) if u.enabled => {
-                const KNOWN: &[&str] = &[
-                    "",
-                    "chrome",
-                    "chrome_psk",
-                    "chrome_psk_shuffle",
-                    "chrome_padding_psk_shuffle",
-                    "chrome_pq",
-                    "chrome_pq_psk",
-                    "firefox",
-                    "edge",
-                    "safari",
-                    "360",
-                    "qq",
-                    "ios",
-                    "android",
-                    "random",
-                    "randomized",
-                ];
-                let fp = u.fingerprint.as_deref().unwrap_or_default();
-                if !KNOWN.contains(&fp) {
-                    return Err(invalid(format!("tls.utls.fingerprint: unknown uTLS fingerprint: {fp}")));
-                }
-                true
-            }
-            _ => false,
-        };
-
-        let mut provider = rustls::crypto::aws_lc_rs::default_provider();
-        if utls {
-            // Browsers lead with AES-128-GCM.
-            provider
-                .cipher_suites
-                .sort_by_key(|s| !matches!(s.suite(), rustls::CipherSuite::TLS13_AES_128_GCM_SHA256));
-        }
-        let provider = Arc::new(provider);
+        // `utls` never reaches rustls: it selects the browser client.
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
 
         let versions = versions(t)?;
         let builder = ClientConfig::builder_with_provider(provider.clone());
@@ -271,37 +359,9 @@ impl RustlsClient {
                 .map_err(|e| invalid(format!("tls: {e}")))?,
         };
 
-        let pinned = !t.certificate_sha256.is_empty() || !t.certificate_public_key_sha256.is_empty();
-        let ca = inline_or_file(&t.certificate, &t.certificate_path, base)?;
-        if pinned && ca.is_some() {
-            return Err(invalid(
-                "tls.certificate_sha256: conflicts with certificate or certificate_path",
-            ));
-        }
-        let builder = if t.insecure || pinned {
-            let v = verify::Pinned::new(
-                &t.certificate_sha256,
-                &t.certificate_public_key_sha256,
-                t.insecure && !pinned,
-                &provider,
-            )?;
-            builder.dangerous().with_custom_certificate_verifier(Arc::new(v))
-        } else {
-            let mut roots = RootCertStore::empty();
-            match &ca {
-                Some(pem) => {
-                    for c in CertificateDer::pem_slice_iter(pem) {
-                        let c = c.map_err(|e| invalid(format!("tls.certificate: {e}")))?;
-                        roots.add(c).map_err(|e| invalid(format!("tls.certificate: {e}")))?;
-                    }
-                    if roots.is_empty() {
-                        return Err(invalid("tls.certificate: no certificate found"));
-                    }
-                }
-                None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
-            }
-            builder.with_root_certificates(roots)
-        };
+        let builder = builder
+            .dangerous()
+            .with_custom_certificate_verifier(server_verifier(t, base)?);
 
         let cert = inline_or_file(&t.client_certificate, &t.client_certificate_path, base)?;
         let key = inline_or_file(&t.client_key, &t.client_key_path, base)?;
@@ -323,13 +383,12 @@ impl RustlsClient {
             }
         };
         config.enable_sni = !t.disable_sni;
-        config.alpn_protocols = effective_alpn(t.alpn.clone(), utls);
+        config.alpn_protocols = t.alpn.iter().map(|a| a.as_bytes().to_vec()).collect();
         let fragment = fragment_options(t);
         Ok(Self {
             config: Arc::new(config),
             server_name,
             alpn_configured: !t.alpn.is_empty(),
-            utls,
             handshake_timeout: t
                 .handshake_timeout
                 .filter(|d| !d.is_zero())

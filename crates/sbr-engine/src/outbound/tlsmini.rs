@@ -1,8 +1,11 @@
-//! A minimal rustls client for the protocols that need TLS (ShadowTLS,
-//! AnyTLS) until the shared TLS layer lands. Supports `server_name`,
-//! `disable_sni`, `insecure`, `alpn`, `min_version`/`max_version` and a
-//! pinned `certificate`/`certificate_path`; everything else in `tls` is
+//! A minimal TLS client for the protocols that drive the handshake
+//! themselves (ShadowTLS, AnyTLS). Supports `server_name`, `disable_sni`,
+//! `insecure`, `alpn`, `min_version`/`max_version`, a pinned
+//! `certificate`/`certificate_path` and `utls`; everything else in `tls` is
 //! refused at build time rather than ignored.
+//!
+//! The handshake is a browser's (`sbr-reality`, [`TlsClient::browser`])
+//! unless [`crate::tls::browser_fingerprint`] picks rustls.
 
 use std::cell::RefCell;
 use std::io;
@@ -25,6 +28,8 @@ pub struct TlsClient {
     alpn: Vec<Vec<u8>>,
     enable_sni: bool,
     config: Arc<ClientConfig>,
+    /// Browser-fingerprinted TLS 1.3, when chosen over rustls.
+    pub browser: Option<sbr_reality::TlsConfig>,
 }
 
 fn provider() -> Arc<CryptoProvider> {
@@ -51,9 +56,7 @@ impl TlsClient {
         if t.fragment || t.record_fragment {
             return Err("tls.fragment: not supported by sbr yet".into());
         }
-        if t.utls.as_ref().is_some_and(|u| u.enabled) {
-            tracing::warn!("tls.utls: sbr sends rustls' own ClientHello fingerprint");
-        }
+        let fingerprint = crate::tls::browser_fingerprint(t)?;
         let version = |v: &str| match v {
             "1.3" => 13,
             "1.2" => 12,
@@ -102,6 +105,14 @@ impl TlsClient {
         let alpn: Vec<Vec<u8>> = t.alpn.iter().map(|a| a.as_bytes().to_vec()).collect();
         let enable_sni = !t.disable_sni;
         let config = build(provider(), &versions, &verifier, &alpn, enable_sni)?;
+        let browser = fingerprint.map(|fingerprint| sbr_reality::TlsConfig {
+            server_name: server_name.clone(),
+            sni: enable_sni,
+            fingerprint,
+            alpn: t.alpn.clone(),
+            post_quantum: true,
+            verifier: verifier.clone(),
+        });
         Ok(Self {
             server_name,
             versions,
@@ -109,6 +120,7 @@ impl TlsClient {
             alpn,
             enable_sni,
             config,
+            browser,
         })
     }
 

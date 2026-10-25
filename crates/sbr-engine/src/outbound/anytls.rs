@@ -27,7 +27,6 @@ use sbr_core::{BoxFuture, BoxPacketConn, Destination, Outbound, Stream};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
 use tokio_rustls::TlsConnector;
-use tokio_rustls::client::TlsStream;
 use tracing::debug;
 
 use super::Upstream;
@@ -173,7 +172,7 @@ fn parse_settings(b: &[u8]) -> HashMap<String, String> {
         .collect()
 }
 
-type Tls = TlsStream<Stream>;
+type Tls = Stream;
 
 struct Writer {
     w: WriteHalf<Tls>,
@@ -502,9 +501,14 @@ impl Pool {
 
     async fn new_session(self: &Arc<Self>) -> io::Result<Arc<Session>> {
         let s = self.upstream.connect(&self.server).await?;
-        let tls = TlsConnector::from(self.tls.config())
-            .connect(self.tls.server_name.clone(), s)
-            .await?;
+        let tls: Tls = match &self.tls.browser {
+            Some(cfg) => Box::new(sbr_reality::connect_tls(s, cfg).await?),
+            None => Box::new(
+                TlsConnector::from(self.tls.config())
+                    .connect(self.tls.server_name.clone(), s)
+                    .await?,
+            ),
+        };
         let padding = self.padding.read().unwrap().clone();
         let (r, mut w) = tokio::io::split(tls);
         // Authentication: sha256(password), padding length, zeros.
