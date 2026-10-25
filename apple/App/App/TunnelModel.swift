@@ -20,6 +20,21 @@ final class TunnelModel: ObservableObject {
         }
     }
 
+    /// Connect on demand everywhere except `trustedNetworks` (Wi-Fi SSIDs).
+    @Published var autoConnect = UserDefaults.standard.bool(forKey: "autoConnect") {
+        didSet {
+            UserDefaults.standard.set(autoConnect, forKey: "autoConnect")
+            Task { try? await self.install(onDemand: self.autoConnect) }
+        }
+    }
+
+    @Published var trustedNetworks = UserDefaults.standard.stringArray(forKey: "trustedNetworks") ?? [] {
+        didSet {
+            UserDefaults.standard.set(trustedNetworks, forKey: "trustedNetworks")
+            Task { try? await self.install() }
+        }
+    }
+
     /// Debug-level engine logs in the logs tab, for diagnosing a profile.
     @Published var verbose = UserDefaults.standard.bool(forKey: "verbose") {
         didSet {
@@ -60,16 +75,7 @@ final class TunnelModel: ObservableObject {
         do {
             if manager == nil { try await install() }
             guard let manager else { return }
-            if on {
-                if !manager.isEnabled {
-                    manager.isEnabled = true
-                    try await manager.saveToPreferences()
-                    try await manager.loadFromPreferences()
-                }
-                try manager.connection.startVPNTunnel()
-            } else {
-                manager.connection.stopVPNTunnel()
-            }
+            try await TunnelControl.setOn(on, manager)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -167,11 +173,15 @@ final class TunnelModel: ObservableObject {
         return String(decoding: data, as: UTF8.self)
     }
 
-    private func install() async throws {
+    /// Save the VPN configuration. `onDemand` arms or disarms auto-connect;
+    /// nil keeps whatever a manual connect or disconnect last left it as.
+    private func install(onDemand: Bool? = nil) async throws {
         #if SBR_SYSTEM_EXTENSION
         try await SystemExtensionActivator.activate(identifier: AppConfig.tunnelBundleIdentifier)
         #endif
         let m = manager ?? NETunnelProviderManager()
+        // An intent may have changed it from another process since.
+        if manager != nil { try? await m.loadFromPreferences() }
         let proto = (m.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = AppConfig.tunnelBundleIdentifier
         proto.serverAddress = "sbr"
@@ -181,6 +191,8 @@ final class TunnelModel: ObservableObject {
         m.protocolConfiguration = proto
         m.localizedDescription = "sbr"
         m.isEnabled = true
+        m.onDemandRules = autoConnect ? OnDemand.rules(trusted: trustedNetworks) : nil
+        m.isOnDemandEnabled = autoConnect && (onDemand ?? (manager == nil || m.isOnDemandEnabled))
         try await m.saveToPreferences()
         // A freshly saved manager must be reloaded before it can start.
         try await m.loadFromPreferences()
@@ -198,6 +210,7 @@ final class TunnelModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.status = connection.status
+                TunnelControl.reloadControl()
                 if connection.status != .connected { self.groups = [] }
             }
         }
