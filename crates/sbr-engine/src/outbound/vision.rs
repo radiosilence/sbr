@@ -7,6 +7,10 @@
 //! "direct": the outer TLS is dropped and inner records go raw over TCP,
 //! saving a layer of encryption.
 //!
+//! Padding is capped so a block fits Xray's 8 KiB buffer, as Xray-core's own
+//! `XtlsPadding` does; sing-vmess has no cap. Interop is tested against Xray
+//! (`tests/upstream_servers.rs`) as well as sing-box.
+//!
 //! Differences from sing-vmess that don't touch the wire:
 //! - no 5 ms sleep between the last padded record and the first raw write;
 //! - reads are not forced into 8 KiB chunks after padding ends;
@@ -160,6 +164,8 @@ impl VisionStream {
         } else {
             (rand_u32() % 256) as usize
         };
+        // Xray `XtlsPadding`: a block never exceeds its 8 KiB buffer.
+        let padding = padding.min((8192 - 21usize).saturating_sub(len));
         if self.write_uuid {
             out.extend_from_slice(&self.uuid);
             self.write_uuid = false;
