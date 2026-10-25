@@ -101,7 +101,7 @@ struct ProfilesView: View {
                 #endif
             }
             if let problem {
-                Text(problem).font(.sbr(.fine)).foregroundStyle(Color.sbrBad).textSelection(.enabled)
+                Text(problem).font(.sbr(.fine)).foregroundStyle(Color.sbrBad).sbrSelectable()
             }
         }
     }

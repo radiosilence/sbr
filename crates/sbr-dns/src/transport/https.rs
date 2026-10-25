@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use base64::Engine;
 use bytes::Bytes;
 use hickory_proto::op::Message;
-use http::header::{ACCEPT, CONTENT_TYPE, HeaderName, HeaderValue};
+use http::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
 use http::{HeaderMap, Method, Request, StatusCode, Uri};
 use sbr_core::BoxFuture;
 
@@ -118,7 +118,9 @@ impl Https {
             .body(())
             .map_err(io::Error::other)?;
         if !self.get {
+            // Cloudflare answers 400 to a POST without a length.
             req.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static(MIME));
+            req.headers_mut().insert(CONTENT_LENGTH, HeaderValue::from(raw.len()));
         }
         for (k, v) in &self.headers {
             req.headers_mut().append(k, v.clone());

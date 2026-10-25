@@ -1317,15 +1317,6 @@ impl<T: Serialize> Serialize for Listable<'_, T> {
     }
 }
 
-/// `badoption.Prefixable`: single addresses print without `/32`.
-fn prefix_str(p: &IpNet) -> String {
-    if p.prefix_len() == p.max_prefix_len() {
-        p.addr().to_string()
-    } else {
-        p.to_string()
-    }
-}
-
 impl Serialize for PlainRuleSet {
     fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         let mut m = s.serialize_map(None)?;
@@ -1384,7 +1375,7 @@ impl Serialize for DefaultRule {
                 }
             )*};
         }
-        let cidrs = |v: &[IpNet]| v.iter().map(prefix_str).collect::<Vec<_>>();
+        let cidrs = |v: &[IpNet]| v.iter().map(IpNet::to_string).collect::<Vec<_>>();
         list!(network, domain, domain_suffix, domain_keyword, domain_regex);
         if !self.source_ip_cidr.is_empty() {
             m.serialize_entry("source_ip_cidr", &Listable(&cidrs(&self.source_ip_cidr)))?;

@@ -1,0 +1,219 @@
+name: CI/CD
+
+# CI checks the change and ends in `Checks`, the one status a ruleset needs to
+# require: a skipped job passes it, a failed or cancelled one fails it.
+#
+# CD runs after `Checks` has passed on main: every push uploads the iOS app to
+# TestFlight, built from the xcframework the `Apple` job built and checked.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  pull_request:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# A pull request's newer push cancels its older run. Main is pushed to more
+# often than a full run takes, so cancelling there would leave main never
+# tested and the caches never saved: a newer push waits for the run in
+# progress instead, and replaces any run still waiting, so the newest commit
+# is the one tested next. A manual run is never cancelled.
+concurrency:
+  group: "ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.run_id) || 'main' }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ── CI ──────────────────────────────────────────────────────────────────
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # No Rust cache: formatting compiles nothing.
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # Clippy and the tests on one runner, sharing one target directory and one
+  # cache. Each check runs however an earlier one went, so one push reports
+  # every failure. The interop tests skip here: their reference servers are
+  # installed on macOS only.
+  linux:
+    name: Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - id: cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: linux
+          # A failing check would otherwise leave the cache unsaved.
+          cache-on-failure: true
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        run: cargo test --workspace --no-fail-fast
+
+  # The same on macOS, where the code behind `target_vendor = "apple"` compiles,
+  # and with sing-box, Xray and apernet hysteria2 installed so the interop
+  # tests run against them rather than skipping.
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - id: cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: macos
+          cache-on-failure: true
+      - name: Install the interop servers
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        # Homebrew is updated first: the runner image's formulae lag by months,
+        # and the tests follow current servers (the Xray those formulae held
+        # failed the XHTTP and REALITY tests). Each test suite reads its own
+        # variable; Homebrew's sing-box carries every build tag they need
+        # (with_quic, with_utls).
+        run: |
+          brew update --quiet
+          brew install sing-box xray hysteria
+          bin=$(brew --prefix)/bin
+          {
+            echo "SBR_SING_BOX=$bin/sing-box"
+            echo "SING_BOX=$bin/sing-box"
+            echo "SING_BOX_BIN=$bin/sing-box"
+            echo "SBR_SINGBOX_BIN=$bin/sing-box"
+            echo "SBR_SINGBOX_UTLS_BIN=$bin/sing-box"
+            echo "SBR_XRAY=$bin/xray"
+            echo "SBR_HYSTERIA=$bin/hysteria"
+          } >> "$GITHUB_ENV"
+          "$bin/sing-box" version | head -1
+          "$bin/xray" version | head -1
+          "$bin/hysteria" version | grep -i '^version' || true
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        run: cargo test --workspace --no-fail-fast
+
+  # The xcframework for every Apple platform the app ships on, then the app
+  # against it, unsigned. Main keeps the xcframework for TestFlight, so CD
+  # ships what CI built.
+  apple:
+    name: Apple
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      # The app has no Catalyst target; the slices build for nothing.
+      SBR_SKIP_CATALYST: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # tvOS is tier 3: nightly builds its std from source. Stable last, so it
+      # is the default toolchain the script's other builds use.
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+        with:
+          toolchain: nightly
+          components: rust-src
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin
+      # Seven release builds with fat LTO: the slowest part of the run.
+      # Saved even when the app fails to build, since the Rust built fine.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: apple
+          cache-on-failure: true
+      - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
+        with:
+          install_args: xcodegen
+      - run: apple/build-xcframework.sh
+      - run: mise exec -- xcodegen generate
+        working-directory: apple/App
+      - name: Build the app
+        working-directory: apple/App
+        run: |
+          for spec in Sbr:iOS Sbr:tvOS Sbr:macOS SbrMac:macOS; do
+            scheme=${spec%%:*} platform=${spec##*:}
+            echo "::group::$scheme ($platform)"
+            log="$RUNNER_TEMP/build-$scheme-$platform.log"
+            if xcodebuild build -project Sbr.xcodeproj -scheme "$scheme" \
+              -destination "generic/platform=$platform" \
+              -derivedDataPath "$RUNNER_TEMP/dd" CODE_SIGNING_ALLOWED=NO > "$log" 2>&1; then
+              tail -n 3 "$log"
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              grep -E 'error:' "$log" || tail -n 60 "$log"
+              echo "::error::$scheme failed to build for $platform"
+              exit 1
+            fi
+          done
+      # Tarred: an artifact keeps neither symlinks nor modes.
+      - if: github.event_name != 'pull_request'
+        run: tar czf "$RUNNER_TEMP/SbrCore.xcframework.tar.gz" -C apple SbrCore.xcframework
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: SbrCore.xcframework
+          path: ${{ runner.temp }}/SbrCore.xcframework.tar.gz
+          retention-days: 1
+
+  # Always runs: the workflows are checked wherever the change is, and the
+  # image bundles shellcheck for the `run:` scripts.
+  actionlint:
+    name: Actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+
+  # The one status a ruleset needs to require.
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [actionlint, fmt, linux, macos, apple]
+    if: always()
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          bad=$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | .key')
+          if [ -n "$bad" ]; then
+            echo "::error::not passed: $(echo "$bad" | tr '\n' ' ')"
+            exit 1
+          fi
+
+  # ── CD ──────────────────────────────────────────────────────────────────
+
+  # Every push to main that passes uploads an iOS build: the version stays and
+  # the build number (the time) rises, so testers always have main. A failed
+  # upload is retried alone from ios.yml's manual dispatch.
+  testflight:
+    name: TestFlight
+    needs: checks
+    if: ${{ !cancelled() && needs.checks.result == 'success' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+    uses: ./.github/workflows/ios.yml
+    secrets: inherit

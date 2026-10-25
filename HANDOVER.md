@@ -107,8 +107,10 @@ is the actual target:
 - Known upstream quirks: sing-box's httpupgrade server can eat the first tunnel
   byte (trojan+httpupgrade test excluded); ShadowTLS v2 against a TLS 1.3 camouflage
   server is racy in Go's client too; `shadowsocks` crate 1.25 silently truncates
-  oversized first writes (worked around in `outbound/shadowsocks.rs`, worth reporting
-  upstream).
+  oversized first writes and miscounts a write retried after `Pending` (both worked
+  around by `WriteFix` in `outbound/shadowsocks.rs`, worth reporting upstream).
+- Soak tests (`soak_*`, `#[ignore]`d) push 128 MiB through the user's paths; the
+  command is in `crates/sbr-engine/tests/common/soak.rs`.
 
 ## Map
 

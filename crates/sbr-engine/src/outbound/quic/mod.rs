@@ -51,10 +51,26 @@ pub(crate) struct Tuning {
     pub incoming_uni: u32,
 }
 
+/// Ceiling on a QUIC connection's flow-control windows where the process has
+/// a hard memory limit. Each window lets the peer park that much unread data
+/// in our memory, and the send window holds as much again unacknowledged, so
+/// the protocols' defaults (up to 20 MiB) put a speed test over the iOS
+/// Network Extension's ~50 MB jetsam limit. 4 MiB still covers 1 Gbit/s at
+/// 30 ms.
+const MOBILE_WINDOW_CAP: u64 = if cfg!(any(target_os = "ios", target_os = "tvos", target_os = "visionos")) {
+    4 << 20
+} else {
+    u64::MAX
+};
+
 pub(crate) fn transport(q: &QuicOptions, d: Tuning, cc: Arc<dyn ControllerFactory + Send + Sync>) -> TransportConfig {
     let mut t = TransportConfig::default();
-    let stream = q.stream_receive_window.unwrap_or(d.stream_window);
-    let conn = q.connection_receive_window.unwrap_or(d.conn_window);
+    #[allow(clippy::unnecessary_min_or_max, reason = "the cap is u64::MAX off iOS and tvOS")]
+    let conn = q
+        .connection_receive_window
+        .unwrap_or(d.conn_window)
+        .min(MOBILE_WINDOW_CAP);
+    let stream = q.stream_receive_window.unwrap_or(d.stream_window).min(conn);
     let var = |v: u64| VarInt::from_u64(v).unwrap_or(VarInt::MAX);
     t.stream_receive_window(var(stream))
         .receive_window(var(conn))

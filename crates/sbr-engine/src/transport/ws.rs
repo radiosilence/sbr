@@ -153,6 +153,10 @@ pub struct WsStream<S> {
     waiter: Option<std::task::Waker>,
     wbuf: Vec<u8>,
     wpos: usize,
+    /// The write side is waiting for the socket to take `wbuf`. A socket
+    /// keeps one write wakeup, so the read side must not poll it then: with
+    /// the halves in two tasks, the writer would never be woken.
+    writer_parked: bool,
     rng: u64,
 }
 
@@ -172,6 +176,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
             waiter: None,
             wbuf: Vec::new(),
             wpos: 0,
+            writer_parked: false,
             rng: (u64::from(crate::tls::rand_u32()) << 32 | u64::from(crate::tls::rand_u32())) | 1,
         }
     }
@@ -185,7 +190,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
         (self.rng as u32).to_ne_bytes()
     }
 
-    fn poll_flush_wbuf(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    /// Push out `wbuf`. From the read side this is best effort and yields
+    /// to a parked writer (`Pending` without polling the socket).
+    fn poll_flush_wbuf(&mut self, cx: &mut Context<'_>, side: Side) -> Poll<io::Result<()>> {
+        if side == Side::Read && self.writer_parked {
+            return Poll::Pending;
+        }
+        let r = self.poll_write_wbuf(cx);
+        if side == Side::Write {
+            self.writer_parked = r.is_pending();
+        }
+        r
+    }
+
+    fn poll_write_wbuf(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         while self.wpos < self.wbuf.len() {
             let n = ready!(Pin::new(&mut self.inner).poll_write(cx, &self.wbuf[self.wpos..]))?;
             if n == 0 {
@@ -243,7 +261,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
                     self.state = State::Requested;
                 }
                 State::Requested => {
-                    match self.poll_flush_wbuf(cx) {
+                    match self.poll_flush_wbuf(cx, side) {
                         Poll::Ready(r) => {
                             r?;
                             if let Poll::Ready(Err(e)) = Pin::new(&mut self.inner).poll_flush(cx) {
@@ -322,12 +340,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
 /// XOR with the repeating 4-byte key, eight bytes at a time.
 fn mask(data: &mut [u8], key: [u8; 4]) {
     let k = u64::from_ne_bytes([key[0], key[1], key[2], key[3], key[0], key[1], key[2], key[3]]);
-    let mut chunks = data.chunks_exact_mut(8);
-    for c in &mut chunks {
-        let v = u64::from_ne_bytes((&*c).try_into().unwrap()) ^ k;
-        c.copy_from_slice(&v.to_ne_bytes());
+    let (chunks, rest) = data.as_chunks_mut::<8>();
+    for c in chunks {
+        *c = (u64::from_ne_bytes(*c) ^ k).to_ne_bytes();
     }
-    for (i, b) in chunks.into_remainder().iter_mut().enumerate() {
+    for (i, b) in rest.iter_mut().enumerate() {
         *b ^= key[i & 3];
     }
 }
@@ -338,7 +355,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsStream<S> {
         ready!(this.poll_open(cx, Side::Read))?;
         // Pongs/close replies queued by earlier reads; best effort.
         if this.wpos < this.wbuf.len() {
-            let _ = this.poll_flush_wbuf(cx)?;
+            let _ = this.poll_flush_wbuf(cx, Side::Read)?;
         }
         loop {
             if this.eof {
@@ -443,7 +460,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsStream<S> {
                         _ => {}
                     }
                     if this.wpos < this.wbuf.len() {
-                        let _ = this.poll_flush_wbuf(cx)?;
+                        let _ = this.poll_flush_wbuf(cx, Side::Read)?;
                     }
                 }
                 _ => {
@@ -471,19 +488,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsStream<S> {
             this.state = State::Requested;
             if n > 0 {
                 // The early bytes ride in the request: start sending it, but
-                // leave the response to whoever needs it next.
-                if let Poll::Ready(Err(e)) = this.poll_flush_wbuf(cx) {
+                // leave the response to whoever needs it next. Not parked:
+                // this call returns, so the reader may keep pushing.
+                if let Poll::Ready(Err(e)) = this.poll_write_wbuf(cx) {
                     return Poll::Ready(Err(e));
                 }
                 return Poll::Ready(Ok(n));
             }
         }
         ready!(this.poll_open(cx, Side::Write))?;
-        ready!(this.poll_flush_wbuf(cx))?;
+        ready!(this.poll_flush_wbuf(cx, Side::Write))?;
         let n = buf.len().min(MAX_FRAME);
         this.frame(0x2, &buf[..n]);
-        // Push it out now if the socket takes it; otherwise flush/next write will.
-        if let Poll::Ready(Err(e)) = this.poll_flush_wbuf(cx) {
+        // Push it out now if the socket takes it; otherwise flush, the next
+        // write or the reader will. Not parked: this call returns.
+        if let Poll::Ready(Err(e)) = this.poll_write_wbuf(cx) {
             return Poll::Ready(Err(e));
         }
         Poll::Ready(Ok(n))
@@ -491,8 +510,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsStream<S> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        ready!(this.poll_flush_wbuf(cx))?;
-        Pin::new(&mut this.inner).poll_flush(cx)
+        ready!(this.poll_flush_wbuf(cx, Side::Write))?;
+        let r = Pin::new(&mut this.inner).poll_flush(cx);
+        this.writer_parked = r.is_pending();
+        r
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -500,12 +521,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsStream<S> {
         if matches!(this.state, State::Lazy) {
             return Pin::new(&mut this.inner).poll_shutdown(cx);
         }
-        ready!(this.poll_flush_wbuf(cx))?;
+        ready!(this.poll_flush_wbuf(cx, Side::Write))?;
         if !this.eof && !this.closing {
             // Normal closure; the peer answers with its own close frame.
             this.frame(0x8, &1000u16.to_be_bytes());
             this.closing = true;
-            ready!(this.poll_flush_wbuf(cx))?;
+            ready!(this.poll_flush_wbuf(cx, Side::Write))?;
         }
         Pin::new(&mut this.inner).poll_shutdown(cx)
     }
@@ -526,5 +547,86 @@ mod tests {
         }
         mask(&mut d, key);
         assert_eq!(d, orig);
+    }
+
+    /// Minimal echo server: answer the upgrade, then send every client
+    /// frame's payload back as one unmasked binary frame.
+    async fn echo_server(mut s: tokio::io::DuplexStream) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            head.push(s.read_u8().await.unwrap());
+        }
+        s.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+            .await
+            .unwrap();
+        let (mut r, mut w) = tokio::io::split(s);
+        loop {
+            let Ok(b0) = r.read_u8().await else { return };
+            let b1 = r.read_u8().await.unwrap();
+            let len = match b1 & 0x7f {
+                126 => r.read_u16().await.unwrap() as usize,
+                127 => r.read_u64().await.unwrap() as usize,
+                n => n as usize,
+            };
+            let mut key = [0u8; 4];
+            r.read_exact(&mut key).await.unwrap();
+            let mut p = vec![0u8; len];
+            r.read_exact(&mut p).await.unwrap();
+            mask(&mut p, key);
+            if b0 & 0x0f != 0x2 {
+                continue;
+            }
+            let mut f = vec![0x82];
+            if len < 126 {
+                f.push(len as u8);
+            } else if len < 65536 {
+                f.push(126);
+                f.extend_from_slice(&(len as u16).to_be_bytes());
+            } else {
+                f.push(127);
+                f.extend_from_slice(&(len as u64).to_be_bytes());
+            }
+            f.extend_from_slice(&p);
+            w.write_all(&f).await.unwrap();
+        }
+    }
+
+    /// Split across a reader task and a writer task over a congested
+    /// socket: the reader must never take the write wakeup the writer is
+    /// waiting on, or the writer sleeps forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn split_halves_keep_their_wakeups() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (client, server) = tokio::io::duplex(4096);
+        tokio::spawn(echo_server(server));
+        let params = Arc::new(Params {
+            path: "/".into(),
+            query: None,
+            host: "example.com".into(),
+            headers: Vec::new(),
+            protocol: None,
+            max_early_data: 0,
+            early_header: None,
+        });
+        let mut ws = WsStream::new(client, params);
+        std::future::poll_fn(|cx| ws.poll_open(cx, Side::Read)).await.unwrap();
+        let data: Vec<u8> = (0..2_000_000u32).map(|i| (i % 251) as u8).collect();
+        let (mut r, mut w) = tokio::io::split(ws);
+        let send = data.clone();
+        let writer = tokio::spawn(async move {
+            for c in send.chunks(40_000) {
+                w.write_all(c).await.unwrap();
+            }
+            w.flush().await.unwrap();
+            w
+        });
+        let mut got = vec![0u8; data.len()];
+        tokio::time::timeout(std::time::Duration::from_secs(10), r.read_exact(&mut got))
+            .await
+            .expect("websocket echo stalled")
+            .unwrap();
+        assert!(got == data);
+        drop(writer.await.unwrap());
     }
 }

@@ -20,6 +20,19 @@ final class TunnelModel: ObservableObject {
         }
     }
 
+    /// Debug-level engine logs in the logs tab, for diagnosing a profile.
+    @Published var verbose = UserDefaults.standard.bool(forKey: "verbose") {
+        didSet {
+            UserDefaults.standard.set(verbose, forKey: "verbose")
+            Task {
+                try? await self.install()
+                if self.isConnected, let session = self.session {
+                    _ = try? await session.send(.reload(config: self.installedConfig))
+                }
+            }
+        }
+    }
+
     private var manager: NETunnelProviderManager?
     /// The active profile's config, carried in the VPN configuration.
     private var config: String?
@@ -71,7 +84,7 @@ final class TunnelModel: ObservableObject {
         do {
             try await install()
             if isConnected, let session {
-                groups = try await session.send(.reload(config: config)).groups ?? groups
+                groups = try await session.send(.reload(config: installedConfig)).groups ?? groups
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -104,6 +117,16 @@ final class TunnelModel: ObservableObject {
         testing.remove(group)
     }
 
+    @Published private(set) var logs: [String] = []
+
+    /// Poll the extension's recent logs while the logs tab is visible.
+    func pollLogs() async {
+        while !Task.isCancelled {
+            if let session, let l = try? await session.send(.logs).logs { logs = l }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+    }
+
     /// Poll the tunnel once a second while visible and connected. The
     /// extension only wakes for these messages, so a backgrounded app costs
     /// it nothing.
@@ -131,6 +154,19 @@ final class TunnelModel: ObservableObject {
         }
     }
 
+    /// The profile as the tunnel runs it: with `verbose`, its log level is
+    /// raised to debug.
+    private var installedConfig: String? {
+        guard let config, verbose,
+              var root = (try? JSONSerialization.jsonObject(with: Data(config.utf8))) as? [String: Any]
+        else { return config }
+        var log = root["log"] as? [String: Any] ?? [:]
+        log["level"] = "debug"
+        root["log"] = log
+        guard let data = try? JSONSerialization.data(withJSONObject: root) else { return config }
+        return String(decoding: data, as: UTF8.self)
+    }
+
     private func install() async throws {
         #if SBR_SYSTEM_EXTENSION
         try await SystemExtensionActivator.activate(identifier: AppConfig.tunnelBundleIdentifier)
@@ -139,7 +175,7 @@ final class TunnelModel: ObservableObject {
         let proto = (m.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = AppConfig.tunnelBundleIdentifier
         proto.serverAddress = "sbr"
-        guard let config else { throw SbrError("no profile selected") }
+        guard let config = installedConfig else { throw SbrError("no profile selected") }
         proto.providerConfiguration = [SbrProviderKey.config: config]
         Sbr.applyLeakProtection(to: proto, enabled: strict)
         m.protocolConfiguration = proto

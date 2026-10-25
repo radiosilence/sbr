@@ -179,11 +179,51 @@ apple/build-xcframework.sh          # on macOS with Xcode
   `cargo +nightly build -Zbuild-std=std,panic_unwind`, so you need
   `rustup toolchain install nightly --component rust-src`. `SBR_SKIP_TVOS=1`
   skips it. `SBR_SKIP_CATALYST=1` skips Catalyst.
-- Release builds use fat LTO with one codegen unit. The archives are then stripped
-  (`strip -S -x`), and the script prints each slice's size.
+- Release builds use fat LTO with one codegen unit, and the script prints each
+  slice's size. The archives are not run through `strip`: it corrupts aws-lc's
+  assembly objects and the app then fails to link. Xcode strips the final binary.
 
 From Linux, `apple/check-apple-targets.sh` runs `cargo check` for all of these
 targets, with nightly build-std for tvOS. aws-lc-sys and blake3 build C code
 that needs an Apple SDK, so on Linux the script swaps in a stand-in compiler
 that emits empty objects. The Rust code is fully type-checked; the C code is
 only compiled by the real macOS build.
+
+## TestFlight
+
+```sh
+APPLE_API_KEY_PATH=AuthKey.p8 APPLE_API_KEY_ID=... APPLE_API_ISSUER_ID=... \
+  apple/testflight.sh [build-number]
+```
+
+`testflight.sh` archives the iOS app in Release, exports it with
+`app-store-connect` and uploads it. iOS Release signs manually with the Apple
+Distribution certificate and the "sbr App Store" and "sbr tunnel App Store"
+profiles (`App/project.yml`), so the result does not depend on which Apple ID
+Xcode is signed in with. `tools/fetch-profiles.py` installs those profiles from
+App Store Connect on a machine that lacks them. The build number defaults to the
+UTC time as `YYYYMMDDHHMM`, because App Store Connect accepts only rising build
+numbers within a version. The export runs with the system `PATH`, since
+Homebrew's `rsync` breaks its copy step.
+
+## CI
+
+`.github/workflows/ci-cd.yml` runs on every push and pull request to `main`:
+`cargo fmt`, clippy and the tests on Linux and macOS (macOS also installs
+sing-box, Xray and hysteria from Homebrew so the interop tests run), and the
+`Apple` job, which builds the xcframework (no Catalyst) and the app unsigned
+for iOS, tvOS and macOS. A push to `main` that passes then calls `ios.yml`,
+which archives the app against that xcframework and uploads it to TestFlight; `ios.yml` can also be run
+by hand to retry an upload. A pull request's newer push cancels its older run; on `main` a run always finishes and only the newest waiting commit runs next. Pull requests
+never upload.
+
+The upload uses these repository secrets, the same names kōan uses:
+
+| secret | value |
+|---|---|
+| `APPLE_API_KEY_P8` | base64 of the App Store Connect API key (`.p8`) |
+| `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID` | that key's ID and issuer |
+| `IOS_CERTIFICATE_P12` | base64 of the Apple Distribution certificate (`.p12`) |
+| `IOS_CERTIFICATE_PASSWORD` | its password |
+
+Without the key or the certificate, the TestFlight job is skipped.

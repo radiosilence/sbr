@@ -26,7 +26,7 @@ Which censors and surveillance programmes sbr is designed against, and what it s
 | `sbr` | CLI, flag-compatible with `sing-box run/check/version`. |
 | `sbr-reality` | TLS 1.3 client with browser ClientHellos: REALITY, and the default handshake for every other TCP TLS client. |
 | `sbr-apple` | C ABI (`include/sbr.h`) + `staticlib` for an xcframework: TUN fd adoption, log callback, reload, memory stats, network-change hook. |
-| `apple/` | `SbrKit` Swift package (`Sbr`, `SbrPacketTunnelProvider`), `build-xcframework.sh` (iOS, macOS, Catalyst, tvOS), SwiftUI sample app. See [`apple/README.md`](apple/README.md). **The Swift code is syntax-checked only: written on Linux, not compiled with Xcode yet.** |
+| `apple/` | `SbrKit` Swift package (`Sbr`, `SbrPacketTunnelProvider`), `build-xcframework.sh` (iOS, macOS, Catalyst, tvOS), SwiftUI sample app. See [`apple/README.md`](apple/README.md). CI builds the app for iOS, tvOS and macOS. |
 
 ## Routing semantics
 
@@ -208,6 +208,10 @@ Vision skips sing-box's 5 ms sleep before the first raw write; rustls is fed one
 ## Known upstream issue worked around
 
 `shadowsocks` 1.25 `ProxyClientStream` assumes the first write (address header + payload) fits in one AEAD chunk. A larger first write is reported as fully written while only part of it is sent: a `debug_assert!` in debug builds, silent data loss in release builds. `FirstWriteCap` in `outbound/shadowsocks.rs` caps the first write. This should be reported upstream.
+
+## CI
+
+Every push and pull request to `main` runs `cargo fmt`, clippy and the tests on Linux and macOS, with the interop tests running against sing-box, Xray and hysteria on macOS, and builds the xcframework and the Apple app. Each push to `main` that passes uploads an iOS build to TestFlight. See [`apple/README.md`](apple/README.md#ci).
 
 ## Roadmap (in order of what unblocks the iOS app)
 

@@ -75,6 +75,12 @@ pub type DialerFactory<'a> = &'a dyn Fn(&ServerDial) -> Arc<dyn Outbound>;
 /// Reads a file named in the config (hosts files, CA certificates).
 pub type FileReader<'a> = &'a dyn Fn(&str) -> io::Result<Vec<u8>>;
 
+/// Per-attempt timeout when another upstream server can be tried.
+const FAILOVER_ATTEMPT: Duration = Duration::from_secs(4);
+/// How often a failed upstream server is probed in the background; it is
+/// skipped until a probe succeeds.
+const FAILOVER_COOLDOWN: Duration = Duration::from_secs(60);
+
 pub(crate) fn random_u16() -> u16 {
     use std::hash::BuildHasher;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -133,6 +139,9 @@ impl QueryOpts {
 struct Server {
     tag: Arc<str>,
     transport: Box<dyn Transport>,
+    /// A network resolver (udp/tcp/tls/https): eligible for failover. Never
+    /// `local`, which would send queries outside the tunnel.
+    upstream: bool,
     fakeip: Option<Arc<FakeIp>>,
     /// Legacy server `strategy` and `client_subnet`.
     strategy: Option<DomainStrategy>,
@@ -211,6 +220,8 @@ struct Inner {
     client_subnet: Option<IpNet>,
     fakeips: Vec<Arc<FakeIp>>,
     reverse: Option<Mutex<ReverseMap>>,
+    /// Upstream servers that recently failed, skipped until the instant.
+    failed: Mutex<HashMap<usize, Instant>>,
     weak: Weak<Inner>,
 }
 
@@ -448,6 +459,7 @@ impl DnsRouter {
                 .zip(legacy)
                 .map(|((spec, tag), (strategy, client_subnet))| {
                     let mut fakeip = None;
+                    let upstream = matches!(spec, Spec::Udp(..) | Spec::Stream(..) | Spec::Https(..));
                     let with = |mut r: Remote, res: Option<(usize, QueryOpts)>| {
                         r.resolver = res.map(resolver);
                         r
@@ -471,6 +483,7 @@ impl DnsRouter {
                     Server {
                         tag,
                         transport,
+                        upstream,
                         fakeip,
                         strategy,
                         client_subnet,
@@ -491,6 +504,7 @@ impl DnsRouter {
                 client_subnet: cfg.client_subnet,
                 fakeips,
                 reverse: cfg.reverse_mapping.then(|| Mutex::new(LruCache::new(capacity))),
+                failed: Mutex::new(HashMap::new()),
                 weak: weak.clone(),
             }
         });
@@ -607,13 +621,7 @@ impl Inner {
         }
 
         let timeout = opts.timeout.unwrap_or(self.timeout);
-        let result = match tokio::time::timeout(timeout, server.transport.exchange(send)).await {
-            Ok(r) => r,
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("dns server {}: timed out", server.tag),
-            )),
-        };
+        let result = self.exchange_with_failover(idx, send, timeout).await;
         let mut resp = match result {
             Ok(r) => r,
             Err(e) => {
@@ -639,6 +647,95 @@ impl Inner {
             l.finish(Ok(resp.clone()));
         }
         checked(resp, ttl, check)
+    }
+
+    /// Exchange with `idx`, failing over to the config's other upstream
+    /// servers when it errors, times out, or answers SERVFAIL/REFUSED.
+    /// sing-box never fails over; a profile whose primary resolver is
+    /// unreachable through the current path (e.g. a REALITY server refusing
+    /// loopback destinations) then resolves nothing. A failed server is
+    /// skipped for a minute so later queries don't each wait for it.
+    async fn exchange_with_failover(&self, idx: usize, query: &Message, timeout: Duration) -> io::Result<Message> {
+        let failed = |i: usize| self.failed.lock().unwrap().contains_key(&i);
+        let mut order = vec![idx];
+        if self.servers[idx].upstream {
+            let others = (0..self.servers.len())
+                .filter(|&i| i != idx && self.servers[i].upstream && !failed(i))
+                .collect::<Vec<_>>();
+            order.extend(others);
+            // A failed server goes last, so queries never wait on it while it
+            // is down; a background probe brings it back to the front.
+            if failed(idx) && order.len() > 1 {
+                order.rotate_left(1);
+                self.probe(idx, query);
+            }
+        }
+        // With somewhere to fail over to, don't wait the full timeout first.
+        let attempt = if order.len() > 1 {
+            timeout.min(FAILOVER_ATTEMPT)
+        } else {
+            timeout
+        };
+        let mut last = None;
+        for (n, &i) in order.iter().enumerate() {
+            let server = &self.servers[i];
+            let t = if n + 1 == order.len() { timeout } else { attempt };
+            let r = match tokio::time::timeout(t, server.transport.exchange(query)).await {
+                Ok(r) => r,
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("dns server {}: timed out", server.tag),
+                )),
+            };
+            match r {
+                Ok(resp) if !matches!(msg::rcode(&resp), 2 | 5) || n + 1 == order.len() => {
+                    self.failed.lock().unwrap().remove(&i);
+                    if i != idx {
+                        tracing::debug!(from = %self.servers[idx].tag, to = %server.tag, "dns failover");
+                    }
+                    return Ok(resp);
+                }
+                Ok(resp) => {
+                    tracing::warn!(server = %server.tag, rcode = msg::rcode(&resp), "dns server failed; trying next");
+                    last = Some(Ok(resp));
+                }
+                Err(e) => {
+                    tracing::warn!(server = %server.tag, error = %e, "dns server failed; trying next");
+                    last = Some(Err(e));
+                }
+            }
+            if server.upstream && order.len() > 1 {
+                self.failed
+                    .lock()
+                    .unwrap()
+                    .entry(i)
+                    .or_insert_with(|| Instant::now() + FAILOVER_COOLDOWN);
+            }
+        }
+        last.unwrap_or_else(|| Err(io::Error::other("no dns server")))
+    }
+
+    /// Re-try a failed server off the query path, at most once per cooldown.
+    fn probe(&self, idx: usize, query: &Message) {
+        let now = Instant::now();
+        {
+            let mut failed = self.failed.lock().unwrap();
+            match failed.get_mut(&idx) {
+                Some(next) if *next <= now => *next = now + FAILOVER_COOLDOWN,
+                _ => return,
+            }
+        }
+        let Some(this) = self.arc() else { return };
+        let query = query.clone();
+        tokio::spawn(async move {
+            let server = &this.servers[idx];
+            if let Ok(Ok(resp)) = tokio::time::timeout(this.timeout, server.transport.exchange(&query)).await
+                && !matches!(msg::rcode(&resp), 2 | 5)
+            {
+                tracing::debug!(server = %server.tag, "dns server recovered");
+                this.failed.lock().unwrap().remove(&idx);
+            }
+        });
     }
 
     /// `optimistic`: refresh a stale entry in the background, once per key.
@@ -857,7 +954,7 @@ impl Inner {
                     from = rule.map_or(self.rules.len(), |i| i + 1);
                 }
                 Err(XErr::Io(e)) => {
-                    debug!(%domain, qtype, server = %self.servers[server].tag, error = %e, "dns exchange failed");
+                    tracing::warn!(%domain, qtype, server = %self.servers[server].tag, error = %e, "dns exchange failed");
                     return reply(msg::status(&req, 2));
                 }
             }

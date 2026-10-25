@@ -1,0 +1,126 @@
+name: iOS
+
+# Archives the iOS app, signs it for the App Store and uploads it to
+# TestFlight (apple/testflight.sh).
+#
+# Called by CI/CD on every push to main that passes, with the xcframework its
+# `Apple` job built. Runnable by hand to retry an upload, in which case it
+# builds the iOS slice of the xcframework itself.
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  # Without the App Store Connect key and the distribution certificate there is
+  # nothing to sign with. This answers that on a cheap runner, and the upload
+  # is skipped rather than failed.
+  signable:
+    name: Signing configured
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+      build: ${{ steps.build.outputs.build }}
+    steps:
+      # A build number has to rise with every upload of a version, and the
+      # time always rises. UTC YYYYMMDDHHMM, as builds uploaded from a Mac are
+      # numbered, so the two never collide or go backwards.
+      - id: build
+        run: echo "build=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+      - id: check
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          IOS_CERTIFICATE_P12: ${{ secrets.IOS_CERTIFICATE_P12 }}
+        run: |
+          if [ -n "$APPLE_API_KEY_P8" ] && [ -n "$IOS_CERTIFICATE_P12" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No App Store Connect key or distribution certificate configured; skipping TestFlight."
+          fi
+
+  testflight:
+    name: TestFlight (ios)
+    needs: signable
+    if: needs.signable.outputs.ready == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    # One upload at a time; a pending one replaced by a later push's is the
+    # same version with newer code.
+    concurrency:
+      group: testflight-ios
+      cancel-in-progress: false
+    env:
+      SBR_BUILD: ${{ needs.signable.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Present when called from CI/CD; a manual run has none and builds it.
+      - id: xcframework
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: SbrCore.xcframework
+          path: ${{ runner.temp }}
+      - if: steps.xcframework.outcome == 'success'
+        run: tar xzf "$RUNNER_TEMP/SbrCore.xcframework.tar.gz" -C apple
+      - if: steps.xcframework.outcome != 'success'
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+        with:
+          toolchain: stable
+      - if: steps.xcframework.outcome != 'success'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: apple
+          save-if: false
+      - if: steps.xcframework.outcome != 'success'
+        run: apple/build-xcframework.sh
+        env:
+          SBR_SKIP_TVOS: "1"
+          SBR_SKIP_CATALYST: "1"
+      - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
+        with:
+          install_args: xcodegen
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - name: Stage the App Store Connect key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          key="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$key"
+          echo "APPLE_API_KEY_PATH=$key" >> "$GITHUB_ENV"
+      # Release builds for iOS sign manually (apple/App/project.yml), so the
+      # archive needs the Apple Distribution identity the profiles name, in a
+      # keychain of its own.
+      - name: Import the Apple Distribution certificate
+        env:
+          IOS_CERTIFICATE_P12: ${{ secrets.IOS_CERTIFICATE_P12 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 24)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$IOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$IOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          keychains=("$keychain")
+          while IFS= read -r existing; do keychains+=("$existing"); done \
+            < <(security list-keychains -d user | tr -d '"' | sed 's/^ *//')
+          security list-keychains -d user -s "${keychains[@]}"
+          security find-identity -v -p codesigning "$keychain" | grep -q "Apple Distribution" \
+            || { echo "::error::no Apple Distribution identity in IOS_CERTIFICATE_P12"; exit 1; }
+      - name: Install the provisioning profiles
+        run: uv run apple/tools/fetch-profiles.py "sbr App Store" "sbr tunnel App Store"
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+      - run: apple/testflight.sh "$SBR_BUILD"
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+      - if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true

@@ -108,6 +108,7 @@ async fn socks4_connect(s: &mut Stream, dest: &Destination, user: Option<&str>) 
         req.push(0);
     }
     s.write_all(&req).await?;
+    s.flush().await?;
     let mut rep = [0u8; 8];
     s.read_exact(&mut rep).await?;
     if rep[1] != 90 {

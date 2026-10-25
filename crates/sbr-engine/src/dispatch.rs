@@ -232,7 +232,7 @@ impl Engine {
         };
         match result {
             Ok(ips) => meta.destination_addresses = ips,
-            Err(e) => debug!(%domain, error = %e, "resolve failed"),
+            Err(e) => tracing::warn!(%domain, error = %e, "resolve failed"),
         }
     }
 

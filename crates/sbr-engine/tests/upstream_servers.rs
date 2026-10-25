@@ -573,6 +573,39 @@ async fn xray_vless_reality_vision() {
     assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
 }
 
+/// An engine with a SOCKS inbound in front of `outbound`: soaks go through
+/// the relay, where the real traffic goes.
+async fn relay_to(outbound: Value) -> (sbr_engine::Instance, u16) {
+    let opts = Options::from_value(json!({
+        "inbounds": [{"type": "mixed", "tag": "in", "listen": "127.0.0.1", "listen_port": 0}],
+        "outbounds": [outbound],
+    }))
+    .unwrap();
+    let i = sbr_engine::Instance::start(&opts, Settings::default()).await.unwrap();
+    let port = common::port(&i, "in");
+    (i, port)
+}
+
+/// HTTPS through Vision, which goes direct after the inner handshake: the
+/// phone's main path. See `common/soak.rs` for how to run it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "soak: moves 128 MiB"]
+async fn soak_xray_vless_reality_vision() {
+    let Some(bin) = find_bin("SBR_XRAY", "xray") else {
+        return;
+    };
+    let xray = start_xray(&bin).await;
+    let (_i, proxy) = relay_to(xray.outbound("reality", ADMIN_UUID, SERVER_NAMES[0], "chrome")).await;
+    let inner = rcgen::generate_simple_self_signed(vec!["inner.test".into()]).unwrap();
+    let (cert, key) = (inner.cert.pem(), inner.signing_key.serialize_pem());
+    let s = common::soak::socks5(proxy, inner_tls_echo(&cert, &key).await).await;
+    let tls = rustls_client(&cert)
+        .connect(ServerName::try_from("inner.test").unwrap(), s)
+        .await
+        .unwrap();
+    common::soak::soak_echo("vless+reality+vision", tls, common::soak::soak_bytes(), 3).await;
+}
+
 /// Wrong credentials fail promptly and cleanly, and the guest blackhole
 /// (keyed on the client's `email`) holds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -852,6 +885,19 @@ async fn hysteria2_apernet() {
         }
     }
     assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
+}
+
+/// See `common/soak.rs` for how to run it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "soak: moves 128 MiB"]
+async fn soak_hysteria2_apernet() {
+    let Some(bin) = find_bin("SBR_HYSTERIA", "hysteria") else {
+        return;
+    };
+    let hy = start_hysteria(&bin, 1, true).await;
+    let (_i, proxy) = relay_to(hy.outbound("hy2", hy.ports[0], &hy2_password())).await;
+    let s = common::soak::socks5(proxy, common::echo().await).await;
+    common::soak::soak_echo("hysteria2", s, common::soak::soak_bytes(), 2).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

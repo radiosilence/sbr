@@ -22,6 +22,7 @@ extension Sbr {
     /// it) unless `publicMessages` is set.
     public static func forwardLogs(to logger: Logger, publicMessages: Bool = false) {
         setLogHandler { level, message in
+            SbrRecentLogs.shared.append(level, message)
             let type: OSLogType = switch level {
             case .trace, .debug: .debug
             case .info: .info
@@ -66,5 +67,38 @@ private final class LogRegistry: @unchecked Sendable {
             box = nil
         }
         old?.release()
+    }
+}
+
+/// The last few hundred log lines, in memory only (never written to disk),
+/// so the app can show what the tunnel is doing without a debugger.
+public final class SbrRecentLogs: @unchecked Sendable {
+    public static let shared = SbrRecentLogs()
+    private let lock = NSLock()
+    private var lines: [String] = []
+    private let capacity = 1000
+    private static let time: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    func append(_ level: SbrLogLevel, _ message: String) {
+        let tag = switch level {
+        case .error: "error"
+        case .warn: "warn"
+        default: "info"
+        }
+        let line = "\(Self.time.string(from: Date())) \(tag) \(message)"
+        lock.lock()
+        defer { lock.unlock() }
+        lines.append(line)
+        if lines.count > capacity { lines.removeFirst(lines.count - capacity) }
+    }
+
+    public func snapshot() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return lines
     }
 }

@@ -202,8 +202,18 @@ impl Writer {
         }
     }
 
-    /// `writePacketLocked`: shape one logical packet by the padding scheme.
-    async fn write_packet(&mut self, mut data: &[u8], padding: &Padding) -> io::Result<()> {
+    /// `writePacketLocked`, flushed: tokio-rustls accepts plaintext while the
+    /// socket is full and keeps the sealed records until the next write or
+    /// flush. Nothing else flushes the session (`AnyStream::poll_flush` only
+    /// waits for its own write), so without this the tail of an upload could
+    /// sit in rustls indefinitely.
+    async fn write_packet(&mut self, data: &[u8], padding: &Padding) -> io::Result<()> {
+        self.shape_packet(data, padding).await?;
+        self.w.flush().await
+    }
+
+    /// Shape one logical packet by the padding scheme.
+    async fn shape_packet(&mut self, mut data: &[u8], padding: &Padding) -> io::Result<()> {
         if !self.send_padding {
             return self.w.write_all(data).await;
         }
@@ -837,6 +847,66 @@ impl Drop for AnyStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session write must put everything on the wire by itself: with the
+    /// socket full, tokio-rustls accepts the plaintext and keeps the sealed
+    /// records until someone flushes, and nobody else will.
+    #[tokio::test]
+    async fn session_write_leaves_nothing_in_rustls() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let der = CertificateDer::from(cert.cert.der().to_vec());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let server_cfg = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![der.clone()], key)
+            .unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(der).unwrap();
+        let client_cfg = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+        let (c, s) = tokio::io::duplex(4096);
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
+        let server = tokio::spawn(async move { acceptor.accept(s).await.unwrap() });
+        let tls = TlsConnector::from(Arc::new(client_cfg))
+            .connect(ServerName::try_from("localhost").unwrap(), Box::new(c) as Stream)
+            .await
+            .unwrap();
+        let mut server = server.await.unwrap();
+        let (_r, w) = tokio::io::split(tls);
+        let mut writer = Writer {
+            w,
+            pending: None,
+            send_padding: true,
+            packet_count: 0,
+            record: Vec::new(),
+        };
+        let padding = Padding::parse(DEFAULT_PADDING_SCHEME.as_bytes()).unwrap();
+        let data: Vec<u8> = (0..256 * 1024u32).map(|i| (i % 251) as u8).collect();
+        let len = data.len();
+        let reader = tokio::spawn(async move {
+            let mut got = vec![0u8; len];
+            server.read_exact(&mut got).await.map(|_| got)
+        });
+        for chunk in data.chunks(MAX_FRAME) {
+            writer.write(chunk, &padding).await.unwrap();
+        }
+        // The writer stays open and idle, as a session between streams does.
+        let got = tokio::time::timeout(Duration::from_secs(5), reader)
+            .await
+            .expect("written bytes stuck in rustls")
+            .unwrap()
+            .unwrap();
+        assert!(got == data);
+        drop(writer);
+    }
 
     #[test]
     fn default_scheme() {

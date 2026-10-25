@@ -106,6 +106,7 @@ pub async fn client_command<S: AsyncRead + AsyncWrite + Unpin>(
     let mut buf = Vec::with_capacity(300);
     buf.extend_from_slice(&[VER, 1, if auth.is_some() { USER_PASS } else { NO_AUTH }]);
     s.write_all(&buf).await?;
+    s.flush().await?;
     let mut sel = [0u8; 2];
     s.read_exact(&mut sel).await?;
     if sel[0] != VER {
@@ -121,6 +122,7 @@ pub async fn client_command<S: AsyncRead + AsyncWrite + Unpin>(
                 buf.extend_from_slice(f.as_bytes());
             }
             s.write_all(&buf).await?;
+            s.flush().await?;
             let mut r = [0u8; 2];
             s.read_exact(&mut r).await?;
             if r[1] != 0 {
@@ -141,6 +143,7 @@ pub async fn client_command<S: AsyncRead + AsyncWrite + Unpin>(
     buf.extend_from_slice(&[VER, cmd, 0]);
     write_addr(&mut buf, dest)?;
     s.write_all(&buf).await?;
+    s.flush().await?;
     let mut head = [0u8; 3];
     s.read_exact(&mut head).await?;
     if head[1] != REP_OK {

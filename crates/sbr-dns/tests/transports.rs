@@ -491,3 +491,37 @@ async fn doh_and_dot_client_hellos() {
     );
     assert!(firefox_dot.contains(&0x001c), "{firefox_dot:04x?}");
 }
+
+#[tokio::test]
+async fn fails_over_to_the_next_upstream_and_skips_the_dead_one() {
+    let stats = Arc::new(Stats::default());
+    let good = udp_server(stats.clone()).await;
+    // A server that swallows every query, like a resolver the current path
+    // can't reach.
+    let dead = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dead_port = dead.local_addr().unwrap().port();
+    let r = router(&format!(
+        r#"{{"servers":[
+            {{"type":"udp","tag":"dead","server":"127.0.0.1","server_port":{dead_port}}},
+            {{"type":"local","tag":"local"}},
+            {{"type":"udp","tag":"good","server":"127.0.0.1","server_port":{}}}
+        ],"final":"dead","timeout":"20s"}}"#,
+        good.port()
+    ));
+    let start = std::time::Instant::now();
+    assert_eq!(r.lookup("7.test", None).await.unwrap(), [ip("10.0.0.7")]);
+    let first = start.elapsed();
+    assert!(
+        first < Duration::from_secs(10),
+        "fails over after the short attempt, not the 20 s timeout: {first:?}"
+    );
+    // The dead server is now skipped: the next query goes straight to `good`.
+    let start = std::time::Instant::now();
+    assert_eq!(r.lookup("8.test", None).await.unwrap(), [ip("10.0.0.8")]);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "cooling server skipped: {:?}",
+        start.elapsed()
+    );
+    drop(dead);
+}

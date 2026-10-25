@@ -30,13 +30,17 @@ struct TunnelView: View {
             .padding(.horizontal, Theme.Space.xl)
             .padding(.bottom, Theme.Space.xxl)
         }
+        // Groups, latency and traffic come from the tunnel, polled only while
+        // this tab is on screen.
+        .task { await tunnel.poll() }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: Theme.Space.s) {
             Text("sbr").font(.sbr(.display)).foregroundStyle(Color.sbrStrong)
                 .padding(.top, Theme.Space.xl)
-            Text(profiles.active?.name ?? "no profile").font(.sbr(.meta)).foregroundStyle(Color.sbrMuted)
+            Text("\(profiles.active?.name ?? "no profile") · build \(Self.build)")
+                .font(.sbr(.meta)).foregroundStyle(Color.sbrMuted)
             HStack(alignment: .firstTextBaseline, spacing: Theme.Space.m) {
                 Circle()
                     .fill(tunnel.isConnected ? Color.sbrAccent : Color.sbrRule)
@@ -120,6 +124,8 @@ struct TunnelView: View {
         Dictionary(tunnel.groups.map { ($0.tag, $0) }, uniquingKeysWith: { a, _ in a })
     }
 
+    static let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+
     static func bytes(_ n: Double) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .binary)
     }
@@ -161,6 +167,20 @@ struct GroupSection: View {
         }
     }
 
+    /// Why failover dropped a path, in plain words.
+    static func blocked(_ m: SbrGroup.Member) -> String {
+        let why = switch m.reason {
+        case "frozen": "stalls mid-transfer"
+        case "reset": "reset after connecting"
+        case "closed": "closed before any data"
+        case "no_response": "no response"
+        case "connect": "can't connect"
+        default: "unavailable"
+        }
+        guard let s = m.retryIn else { return "blocked: \(why)" }
+        return "blocked: \(why) · retry in \(s >= 60 ? "\(s / 60)m" : "\(s)s")"
+    }
+
     private var fastest: String? {
         group.members.filter { $0.delay != nil }.min { ($0.delay ?? .max) < ($1.delay ?? .max) }?.tag
     }
@@ -183,11 +203,14 @@ struct GroupSection: View {
                         Text("→ \(inner.now)").font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
                             .lineLimit(1).truncationMode(.middle)
                     }
+                    if m.degraded == true {
+                        Text(Self.blocked(m)).font(.sbr(.fine)).foregroundStyle(Color.sbrBad).lineLimit(1)
+                    }
                 }
                 Spacer()
-                Text(delay.map { "\($0) ms" } ?? "—")
+                Text(m.degraded == true ? "×" : delay.map { "\($0) ms" } ?? "—")
                     .font(.sbr(.meta))
-                    .foregroundStyle(m.tag == fastest ? Color.sbrAccent : Color.sbrMuted)
+                    .foregroundStyle(m.degraded == true ? Color.sbrBad : m.tag == fastest ? Color.sbrAccent : Color.sbrMuted)
             }
             .padding(.vertical, Theme.Space.m)
             .contentShape(Rectangle())

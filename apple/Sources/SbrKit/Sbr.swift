@@ -13,7 +13,17 @@ public struct SbrGroup: Codable, Sendable, Hashable, Identifiable {
         public let type: String
         /// Last measured latency in milliseconds; nil when untested.
         public let delay: Int?
+        /// Set when failover has dropped this member: why (`frozen`, `reset`,
+        /// `closed`, `no_response`, `connect`) and seconds until it is retried.
+        public let degraded: Bool?
+        public let reason: String?
+        public let retryIn: Int?
         public var id: String { tag }
+
+        enum CodingKeys: String, CodingKey {
+            case tag, type, delay, degraded, reason
+            case retryIn = "retry_in"
+        }
         public var isGroup: Bool { type == "selector" || type == "urltest" }
     }
 

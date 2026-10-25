@@ -74,7 +74,7 @@ impl Shadowsocks {
         // The request header goes out with the first payload write, so
         // this costs no extra round trip (same as sing-box).
         let inner = ProxyClientStream::from_stream(self.context.clone(), s, &self.config, to_address(dest));
-        Ok(Box::new(FirstWriteCap { inner, first: true }) as Stream)
+        Ok(Box::new(WriteFix::new(inner)) as Stream)
     }
 }
 
@@ -256,39 +256,71 @@ impl ReplayWindow {
     }
 }
 
-/// `ProxyClientStream` emits the address header together with the first
-/// payload as one AEAD chunk, and assumes that chunk fits. If the first write
-/// is larger than a chunk it reports the whole buffer as written while only
-/// part of it went out (a `debug_assert!` upstream; silent loss in release).
-/// Capping the first write keeps header + payload inside one chunk; later
-/// writes are chunked correctly by the crate.
-struct FirstWriteCap<S> {
+/// Works around two ways the `shadowsocks` 1.25 writer loses bytes.
+///
+/// - `ProxyClientStream` emits the address header together with the first
+///   payload as one AEAD chunk and assumes that chunk fits. A larger first
+///   write is reported as written in full while only part of it went out (a
+///   `debug_assert!` upstream). Capping the first write keeps header and
+///   payload inside one chunk; later writes are chunked by the crate.
+/// - When a write returns `Pending`, the crate keeps the chunk it already
+///   sealed and, once the retry completes, reports the *retry's* `buf.len()`
+///   as written. `tokio::io::copy` reads more while a write is pending and
+///   retries with a longer buffer, so the difference was dropped and the
+///   peer waited forever. Retrying with exactly the length that went
+///   pending keeps the count equal to what was sealed.
+struct WriteFix<S> {
     inner: S,
     first: bool,
+    /// Length of the write that returned `Pending`.
+    pending: Option<usize>,
+}
+
+impl<S> WriteFix<S> {
+    fn new(inner: S) -> Self {
+        Self {
+            inner,
+            first: true,
+            pending: None,
+        }
+    }
 }
 
 /// Comfortably below the smallest chunk limit (AEAD v1: 0x3FFF) after the
 /// largest header (salt + 255-byte domain + 2022 padding).
 const FIRST_WRITE_MAX: usize = 8 * 1024;
 
-impl<S: AsyncRead + Unpin> AsyncRead for FirstWriteCap<S> {
+impl<S: AsyncRead + Unpin> AsyncRead for WriteFix<S> {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }
 
-impl<S: AsyncWrite + Unpin> AsyncWrite for FirstWriteCap<S> {
+impl<S: AsyncWrite + Unpin> AsyncWrite for WriteFix<S> {
     fn poll_write(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let this = &mut *self;
-        if this.first {
-            let n = buf.len().min(FIRST_WRITE_MAX);
-            let r = Pin::new(&mut this.inner).poll_write(cx, &buf[..n]);
-            if matches!(r, Poll::Ready(Ok(_))) {
-                this.first = false;
+        let n = match this.pending {
+            Some(n) if n > buf.len() => {
+                // The sealed chunk holds bytes the caller no longer offers.
+                return Poll::Ready(Err(io::Error::other(
+                    "shadowsocks: write retried with fewer bytes than it offered",
+                )));
             }
-            return r;
+            Some(n) => n,
+            None if this.first => buf.len().min(FIRST_WRITE_MAX),
+            None => buf.len(),
+        };
+        let r = Pin::new(&mut this.inner).poll_write(cx, &buf[..n]);
+        match &r {
+            Poll::Pending => this.pending = Some(n),
+            Poll::Ready(r) => {
+                this.pending = None;
+                if r.is_ok() {
+                    this.first = false;
+                }
+            }
         }
-        Pin::new(&mut this.inner).poll_write(cx, buf)
+        r
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
@@ -297,5 +329,97 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for FirstWriteCap<S> {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shadowsocks::relay::tcprelay::proxy_stream::ProxyServerStream;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// xorshift64*: deterministic sizes without a dependency.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self, below: usize) -> usize {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            (self.0.wrapping_mul(0x2545_f491_4f6c_dd1d) % below as u64) as usize
+        }
+    }
+
+    /// `tokio::io::copy` into a congested shadowsocks stream: writes go
+    /// `Pending` constantly and are retried with more bytes. Every byte must
+    /// arrive, in order.
+    async fn copy_through_congestion(method: &str, key: &str) {
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let config = ServerConfig::new(addr, key, method.parse().unwrap()).unwrap();
+        let data: Vec<u8> = (0..2_000_000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let (client_io, server_io) = tokio::io::duplex(256);
+        let (mut feed, mut source) = tokio::io::duplex(4096);
+        let client = ProxyClientStream::from_stream(
+            Context::new_shared(ServerType::Local),
+            client_io,
+            &config,
+            Address::DomainNameAddress("example.com".into(), 443),
+        );
+        let mut client = WriteFix::new(client);
+        let feeder = {
+            let data = data.clone();
+            tokio::spawn(async move {
+                let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+                let mut rest = &data[..];
+                while !rest.is_empty() {
+                    let n = (rng.next(3000) + 1).min(rest.len());
+                    feed.write_all(&rest[..n]).await.unwrap();
+                    rest = &rest[n..];
+                    if rng.next(8) == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                }
+            })
+        };
+        let writer = tokio::spawn(async move {
+            tokio::io::copy(&mut source, &mut client).await.unwrap();
+            client.shutdown().await.unwrap();
+        });
+        let mut server = ProxyServerStream::from_stream(
+            Context::new_shared(ServerType::Server),
+            server_io,
+            config.method(),
+            config.key(),
+        );
+        let target = server.handshake().await.unwrap();
+        assert_eq!(target.to_string(), "example.com:443");
+        let mut got = Vec::with_capacity(data.len());
+        let mut rng = Rng(42);
+        let mut chunk = vec![0u8; 5000];
+        loop {
+            let n = server.read(&mut chunk[..rng.next(5000) + 1]).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&chunk[..n]);
+            if rng.next(4) == 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+        feeder.await.unwrap();
+        writer.await.unwrap();
+        assert_eq!(got.len(), data.len(), "{method}: bytes lost");
+        assert!(got == data, "{method}: bytes reordered or corrupted");
+    }
+
+    #[tokio::test]
+    async fn congested_writes_lose_nothing_2022() {
+        copy_through_congestion("2022-blake3-aes-128-gcm", "Ixi/xBrzF3Nnrel2vh8Dsg==").await;
+    }
+
+    #[tokio::test]
+    async fn congested_writes_lose_nothing_aead() {
+        copy_through_congestion("chacha20-ietf-poly1305", "password").await;
     }
 }
