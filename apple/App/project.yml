@@ -1,21 +1,21 @@
-# XcodeGen spec: `SBR_TEAM_ID=ABCDE12345 xcodegen generate` (see README.md).
+# XcodeGen spec: `xcodegen generate` (see README.md). SBR_TEAM_ID overrides the team.
 #
 # Targets
-#   SbrDemo                    iOS 15+, macOS 12+, tvOS 17+ app (SwiftUI)
+#   Sbr                        iOS 17+, macOS 14+, tvOS 17+ app (SwiftUI)
 #   SbrTunnel                  its packet tunnel, as an app extension
 #                              (iOS, tvOS, and Mac App Store style on macOS)
-#   SbrDemoMac                 macOS Developer ID flavour of the same app ...
+#   SbrMac                     macOS Developer ID flavour of the same app ...
 #   SbrTunnelSystemExtension   ... shipping the tunnel as a system extension
-name: SbrDemo
+name: Sbr
 
 options:
   createIntermediateGroups: true
 
 settings:
   base:
-    DEVELOPMENT_TEAM: ${SBR_TEAM_ID}
-    # Change to a bundle ID prefix you own; everything else derives from it.
-    SBR_BUNDLE_ID: io.sbr.demo
+    DEVELOPMENT_TEAM: ${SBR_TEAM_ID:-2256Q92VF2}
+    # Everything else derives from this.
+    SBR_BUNDLE_ID: cc.blit.sbr
     # App Groups: "group." IDs on iOS/tvOS, team-prefixed on macOS (which also
     # lets the system extension's Mach service name live under it).
     SBR_APP_GROUP: group.$(SBR_BUNDLE_ID)
@@ -28,16 +28,16 @@ settings:
 
 packages:
   SbrKit:
-    path: ../..
+    path: ..
 
 targets:
-  SbrDemo:
+  Sbr:
     type: application
     platform: auto
     supportedDestinations: [iOS, macOS, tvOS]
     deploymentTarget:
-      iOS: "15.0"
-      macOS: "12.0"
+      iOS: "17.0"
+      macOS: "14.0"
       tvOS: "17.0"
     sources:
       - path: App
@@ -52,12 +52,19 @@ targets:
         CFBundleDisplayName: sbr
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        UILaunchScreen: {}
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        # sing-box remote-profile links, and the same under sbr://.
+        CFBundleURLTypes:
+          - CFBundleURLName: cc.blit.sbr.profile
+            CFBundleURLSchemes: [sing-box, sbr]
         SbrAppGroup: $(SBR_APP_GROUP)
         SbrTunnelBundleIdentifier: $(SBR_BUNDLE_ID).tunnel
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID)
+        PRODUCT_NAME: sbr
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: App/App.entitlements
         "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": App/App-macOS.entitlements
 
@@ -66,8 +73,8 @@ targets:
     platform: auto
     supportedDestinations: [iOS, macOS, tvOS]
     deploymentTarget:
-      iOS: "15.0"
-      macOS: "12.0"
+      iOS: "17.0"
+      macOS: "14.0"
       tvOS: "17.0"
     sources:
       - path: Tunnel
@@ -89,10 +96,10 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Tunnel/Tunnel.entitlements
         "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": Tunnel/Tunnel-macOS.entitlements
 
-  SbrDemoMac:
+  SbrMac:
     type: application
     platform: macOS
-    deploymentTarget: "12.0"
+    deploymentTarget: "14.0"
     sources:
       - path: App
         excludes: ["*.entitlements"]
@@ -118,7 +125,7 @@ targets:
   SbrTunnelSystemExtension:
     type: system-extension
     platform: macOS
-    deploymentTarget: "12.0"
+    deploymentTarget: "14.0"
     sources:
       - Tunnel/PacketTunnelProvider.swift
       - SystemExtension/main.swift

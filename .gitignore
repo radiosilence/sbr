@@ -3,6 +3,7 @@
 .DS_Store
 /.claude/
 /apple/build
-/apple/Examples/SbrDemo/*.xcodeproj
-/apple/Examples/SbrDemo/Support
+/apple/App/*.xcodeproj
+/apple/App/Support
 .swiftpm
+.build/

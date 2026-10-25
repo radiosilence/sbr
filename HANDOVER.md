@@ -44,13 +44,11 @@ is the actual target:
    - `phys_footprint` memory stats; jetsam headroom under load;
    - `NEPacketTunnelNetworkSettings` derived from the tun inbound
      (`sbr_tun_network_settings`).
-2. **IP fragment reassembly in the TUN (correctness, user-visible).**
-   `crates/sbr-tun/src/packet.rs::parse` drops IPv4 fragments and doesn't walk
-   IPv6 extension headers. The user's profile comment says nested UDP VPNs (AWS
-   Client VPN / OpenVPN-UDP) break on sing-box's `system` stack and work on
-   gVisor. With MTU 1280, nested VPN datagrams get fragmented, so sbr will
-   break the same way until UDP fragments are reassembled (bounded table,
-   short timeout, no timers when idle). TCP doesn't need it.
+2. ~~**IP fragment reassembly in the TUN.**~~ Done (`crates/sbr-tun/src/frag.rs`,
+   README "TUN system stack: fragments"). The kernel path is covered by
+   `tun_udp_fragments_at_small_mtu` in `crates/sbr-engine/tests/tun.rs`, which
+   needs root on Linux and has not run yet; test it on a device with a nested
+   UDP VPN.
 3. **Interop against the user's actual servers.** Add Xray (VLESS+REALITY+
    Vision, with fallback) and apernet hysteria2 (salamander, userpass) as test
    servers next to sing-box. Both build from Go source via proxy.golang.org.

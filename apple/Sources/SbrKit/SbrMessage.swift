@@ -5,6 +5,8 @@ import NetworkExtension
 public enum SbrRequest: Codable, Sendable {
     case groups
     case select(group: String, member: String)
+    /// Start a latency test of a group; poll `.groups` for the results.
+    case urlTest(group: String)
     case stats
     /// Re-read the config (App Group / providerConfiguration) and reload.
     case reload

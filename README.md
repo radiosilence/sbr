@@ -13,6 +13,8 @@ sbr check -c config.json
 - **Ecosystem.** Tokio, rustls/aws-lc (hardware AES-GCM on Apple silicon), quinn (QUIC for hysteria2/tuic) and smoltcp all exist and are fast. In Swift, every protocol would be written from scratch on top of Network.framework, and the code would only run on Apple platforms.
 - **One core, everywhere.** The same crate runs as a Linux server, a macOS CLI, and inside a `NEPacketTunnelProvider` behind a C ABI. Swift stays responsible for what only Swift can do: NetworkExtension, UI and Keychain.
 
+Which censors and surveillance programmes sbr is designed against, and what it still lacks, is in [`docs/threat-model.md`](docs/threat-model.md).
+
 ## Layout
 
 | crate | what |
@@ -111,6 +113,12 @@ WireGuard (`cargo run --release -p sbr-engine --example wg_throughput -- /path/t
 No clear winner at this noise level. rustls reads ciphertext 4 KiB at a time and shrinks its buffer whenever it empties, so sbr puts a 20 KiB read-ahead under it (one socket read per record).
 
 sing-box wins plain TCP relay **on Linux** because its `bufio` uses `splice(2)` zero-copy. Darwin has no splice, so on Apple targets that path is copy-vs-copy. sbr wins on encrypted relay. This is a single synthetic loopback test, so treat it as a smoke signal, not a verdict.
+
+## TUN system stack: fragments
+
+A UDP tunnel nested inside sbr's (OpenVPN or AWS Client VPN over UDP, at the usual MTU 1280) sends datagrams larger than the TUN MTU, so the kernel fragments them. sing-box's kernel `system` stack drops these, which is why such profiles use `stack: mixed`. sbr's system stack reassembles IPv4 and IPv6 fragments (`crates/sbr-tun/src/frag.rs`) and fragments its own replies that exceed the MTU, acting as the sending host; that applies to IPv6 too, since sbr is the source of those packets.
+
+The reassembly table holds at most 128 datagrams and 2 MiB, and a datagram not completed within 5 s is discarded. The timeout is checked when fragments arrive rather than by a timer, so an idle table costs no wakeups. Any overlap abandons the datagram (RFC 5722, applied to IPv4 as well); exact duplicates are ignored. TCP fragments, which the kernel does not normally produce at the TUN MTU, are reassembled, translated, and fragmented again under sbr's own IP ID, because every translated flow shares one address pair and the apps' IDs could collide in the kernel's reassembly. IPv6 Hop-by-Hop, Routing (with no segments left) and Destination Options headers are skipped to reach TCP or UDP.
 
 ## TLS and V2Ray transports
 

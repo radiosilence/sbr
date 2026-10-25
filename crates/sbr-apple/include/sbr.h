@@ -90,8 +90,15 @@ void sbr_stop(SbrInstance *instance);
 /* Switch a selector group. Returns 1 on success, 0 if group/member unknown. */
 int32_t sbr_select(SbrInstance *instance, const char *group, const char *member);
 
-/* JSON: [{"tag":"proxy","type":"selector","selected":"a","members":["a","b"]}] */
+/* JSON: [{"tag":"proxy","type":"selector","selected":"auto","now":"hy2-a-443",
+ *         "delay":38,"members":[{"tag":"auto","type":"urltest","delay":38}, ...]}]
+ * `now` is the leaf the group currently resolves to; `delay` is the last
+ * measured latency in ms, or null when untested. */
 char *sbr_groups(SbrInstance *instance);
+
+/* Start a latency test of a urltest group (or of a selector's urltest
+ * members) and return at once; results appear in sbr_groups. 1 = started. */
+int32_t sbr_url_test(SbrInstance *instance, const char *group);
 
 /* Bytes relayed so far (live) and currently open TCP connections. Any
  * out-pointer may be NULL. */
