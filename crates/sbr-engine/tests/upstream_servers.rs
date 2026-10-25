@@ -41,10 +41,9 @@ const OBFS_PASSWORD: &str = "obfs9Kd2Lm7Qx4Rt1Vw8Zy3Bn6Cp5Hs0J";
 const HY2_SNI: &str = "www.bing.com";
 /// Borrowed identities, as in `XrayConfSchema.serverNames`.
 const SERVER_NAMES: [&str; 3] = ["www.microsoft.com", "www.apple.com", "gateway.example.net"];
-/// The fingerprints that offer X25519MLKEM768, which XTLS/REALITY servers
-/// require since 2026-09-08. `ios` (uTLS `HelloIOS_14`) offers only X25519
-/// and is checked to fail cleanly instead.
-const FINGERPRINTS: [&str; 3] = ["chrome", "firefox", "safari"];
+/// Every profile offers X25519MLKEM768, which XTLS/REALITY servers require
+/// since 2026-09-08 (`ios` is Apple's current stack, not uTLS `HelloIOS_14`).
+const FINGERPRINTS: [&str; 4] = ["chrome", "firefox", "safari", "ios"];
 
 /// xray.ts `GUEST_DENY_CIDRS`.
 const GUEST_DENY_CIDRS: [&str; 10] = [
@@ -544,7 +543,6 @@ async fn xray_vless_reality_vision() {
         outbounds.push(xray.outbound(&format!("reality-{fp}"), ADMIN_UUID, sni, fp));
     }
     // XUDP is the default packet encoding; "" is plain VLESS UDP (no flow).
-    outbounds.push(xray.outbound("reality-ios", ADMIN_UUID, SERVER_NAMES[0], "ios"));
     let mut plain_udp = xray.outbound("reality-udp-plain", ADMIN_UUID, SERVER_NAMES[0], "chrome");
     plain_udp["packet_encoding"] = json!("");
     outbounds.push(plain_udp);
@@ -571,11 +569,6 @@ async fn xray_vless_reality_vision() {
     let out = engine.outbound("reality-udp-plain").unwrap().clone();
     if let Err(e) = udp_roundtrip(&out, uecho, &udp_sizes).await {
         failures.push(format!("plain VLESS UDP over a Vision user: {e}"));
-    }
-    let out = engine.outbound("reality-ios").unwrap().clone();
-    match expect_refused(&out, techo).await {
-        Ok(how) => eprintln!("ok   reality ios refused by the server ({how})"),
-        Err(e) => failures.push(format!("reality ios: {e}")),
     }
     assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
 }

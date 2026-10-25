@@ -50,7 +50,9 @@ async fn cover_site(suite: rustls::SupportedCipherSuite) -> SocketAddr {
     let ck = rcgen::generate_simple_self_signed(vec![SNI.into()]).unwrap();
     let cert = CertificateDer::from(ck.cert.der().to_vec());
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(ck.signing_key.serialize_der()));
-    // Prefer the hybrid group so offering it is exercised end to end.
+    // Prefer the hybrid group so offering it is exercised end to end. No
+    // certificate compression: with it (rustls' brotli, which Chrome offers),
+    // sing-box 1.14's REALITY server rejected these handshakes as invalid.
     let kx_groups = vec![
         provider::kx_group::X25519MLKEM768,
         provider::kx_group::X25519,
@@ -68,6 +70,7 @@ async fn cover_site(suite: rustls::SupportedCipherSuite) -> SocketAddr {
         .with_single_cert(vec![cert], key)
         .unwrap();
     cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    cfg.cert_compressors = Vec::new();
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
@@ -269,7 +272,8 @@ async fn sing_box_reality_vless() {
                 .await
                 .unwrap_or_else(|e| panic!("REALITY handshake {fp:?} pq={pq} via cover {i}: {e}"));
             assert_eq!(tls.cipher_suite().id(), u16::from(suites[i].suite()));
-            let hybrid = fp == Fingerprint::Chrome && pq;
+            // Every profile offers X25519MLKEM768 unless post_quantum is off.
+            let hybrid = pq;
             assert_eq!(tls.key_exchange_group(), if hybrid { 0x11ec } else { 0x001d });
             seed = seed.wrapping_add(1);
             vless_round_trip(tls, echo, seed).await;
