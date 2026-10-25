@@ -150,12 +150,14 @@ async fn dest() -> SocketAddr {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     let key = PrivateKeyDer::from_pem_slice(ck.signing_key.serialize_pem().as_bytes()).unwrap();
-    let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+    let mut cfg = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
         .with_safe_default_protocol_versions()
         .unwrap()
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .unwrap();
+    // The REALITY server mirrors dest's handshake; give it a browser's ALPN.
+    cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let a = l.local_addr().unwrap();
