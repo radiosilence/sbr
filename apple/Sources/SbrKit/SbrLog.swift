@@ -76,7 +76,7 @@ public final class SbrRecentLogs: @unchecked Sendable {
     public static let shared = SbrRecentLogs()
     private let lock = NSLock()
     private var lines: [String] = []
-    private let capacity = 300
+    private let capacity = 1000
     private static let time: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"

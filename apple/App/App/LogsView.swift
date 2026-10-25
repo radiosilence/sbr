@@ -11,6 +11,11 @@ struct LogsView: View {
                 Text("logs").font(.sbr(.display)).foregroundStyle(Color.sbrStrong)
                     .padding(.top, Theme.Space.xl)
                     .padding(.bottom, Theme.Space.m)
+                Toggle(isOn: $tunnel.verbose) {
+                    Text("verbose").font(.sbr(.control))
+                }
+                .tint(.sbrAccent)
+                .padding(.bottom, Theme.Space.m)
                 if tunnel.logs.isEmpty {
                     Text(tunnel.isConnected ? "nothing yet." : "connect to see the tunnel's logs.")
                         .font(.sbr(.meta)).foregroundStyle(Color.sbrMuted)
@@ -18,7 +23,7 @@ struct LogsView: View {
                 ForEach(Array(tunnel.logs.reversed().enumerated()), id: \.offset) { _, line in
                     Text(line)
                         .font(.sbr(.fine))
-                        .foregroundStyle(line.contains(" error ") ? Color.sbrBad : line.contains(" warn ") ? Color.sbrInk : Color.sbrMuted)
+                        .foregroundStyle(line.contains("ERROR") || line.contains(" error ") ? Color.sbrBad : line.contains("WARN") || line.contains(" warn ") ? Color.sbrInk : Color.sbrMuted)
                         .textSelection(.enabled)
                         .padding(.vertical, 3)
                         .frame(maxWidth: .infinity, alignment: .leading)

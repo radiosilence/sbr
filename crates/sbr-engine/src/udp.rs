@@ -251,7 +251,7 @@ impl Engine {
                             Ok(resp) => {
                                 let _ = back.write_back(&resp, &dest, source);
                             }
-                            Err(e) => debug!(error = %e, "dns exchange failed"),
+                            Err(e) => tracing::warn!(error = %e, "dns exchange failed"),
                         }
                     });
                 }

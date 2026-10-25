@@ -696,11 +696,11 @@ impl Inner {
                     return Ok(resp);
                 }
                 Ok(resp) => {
-                    tracing::debug!(server = %server.tag, rcode = msg::rcode(&resp), "dns server failed; trying next");
+                    tracing::warn!(server = %server.tag, rcode = msg::rcode(&resp), "dns server failed; trying next");
                     last = Some(Ok(resp));
                 }
                 Err(e) => {
-                    tracing::debug!(server = %server.tag, error = %e, "dns server failed; trying next");
+                    tracing::warn!(server = %server.tag, error = %e, "dns server failed; trying next");
                     last = Some(Err(e));
                 }
             }
@@ -954,7 +954,7 @@ impl Inner {
                     from = rule.map_or(self.rules.len(), |i| i + 1);
                 }
                 Err(XErr::Io(e)) => {
-                    debug!(%domain, qtype, server = %self.servers[server].tag, error = %e, "dns exchange failed");
+                    tracing::warn!(%domain, qtype, server = %self.servers[server].tag, error = %e, "dns exchange failed");
                     return reply(msg::status(&req, 2));
                 }
             }
