@@ -201,6 +201,7 @@ The servers the jaritanet gateway actually runs are tested too (`crates/sbr-engi
 - XTLS/REALITY servers (Xray 26.10) refuse a ClientHello without an X25519MLKEM768 share ahead of X25519. Every sbr profile offers it, `ios` included (Apple's current stack). Xray's and sing-box's own `ios` (uTLS `HelloIOS_14`) has no ML-KEM and is refused by such servers: it reaches `dest` like a probe.
 - Xray 26 `freedom` blackholes private, loopback and CGNAT destinations (`100.64.0.0/10` included) for vless inbounds unless `finalRules` allow them, so a profile that sends DNS to `127.0.0.1` or tailnet traffic over a REALITY leaf is refused by the server; over hy2 the same traffic works.
 - apernet hysteria2 serialises each downlink UDP message, header included, into a 4096-byte buffer, so a reply payload of more than about 4080 bytes is never delivered.
+- With a rustls `dest` that compresses its certificate chain (RFC 8879, which every browser profile offers), sing-box 1.14 and Xray 26.10 REALITY servers never complete the handshake. The tests' handshake targets send uncompressed chains.
 
 Vision skips sing-box's 5 ms sleep before the first raw write; rustls is fed one TLS record per wakeup until the server's switch to direct, so no inner bytes ever reach the outer TLS.
 

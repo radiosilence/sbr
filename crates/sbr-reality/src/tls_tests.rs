@@ -148,16 +148,33 @@ async fn webpki_verified_round_trip_every_profile() {
     }
 }
 
+/// Certificate compressors for the test servers. rustls' own (its `brotli`
+/// and `zlib` features) would be unified into every rustls server in a
+/// workspace test build, and REALITY servers fail when their handshake
+/// target compresses its chain.
 #[derive(Debug)]
-struct Counting(&'static dyn CertCompressor, &'static AtomicUsize);
+struct Compressor(CertificateCompressionAlgorithm, &'static AtomicUsize);
 
-impl CertCompressor for Counting {
-    fn compress(&self, input: Vec<u8>, level: CompressionLevel) -> Result<Vec<u8>, CompressionFailed> {
+impl CertCompressor for Compressor {
+    fn compress(&self, input: Vec<u8>, _: CompressionLevel) -> Result<Vec<u8>, CompressionFailed> {
+        use std::io::Write as _;
         self.1.fetch_add(1, Ordering::Relaxed);
-        self.0.compress(input, level)
+        let mut out = Vec::new();
+        match self.0 {
+            CertificateCompressionAlgorithm::Brotli => {
+                let params = brotli::enc::BrotliEncoderParams::default();
+                brotli::BrotliCompress(&mut &input[..], &mut out, &params).map_err(|_| CompressionFailed)?;
+            }
+            _ => {
+                let mut z = flate2::write::ZlibEncoder::new(&mut out, flate2::Compression::default());
+                z.write_all(&input).map_err(|_| CompressionFailed)?;
+                z.finish().map_err(|_| CompressionFailed)?;
+            }
+        }
+        Ok(out)
     }
     fn algorithm(&self) -> CertificateCompressionAlgorithm {
-        self.0.algorithm()
+        self.0
     }
 }
 
@@ -167,8 +184,8 @@ impl CertCompressor for Counting {
 async fn compressed_certificate_chains_verify() {
     static BROTLI: AtomicUsize = AtomicUsize::new(0);
     static ZLIB: AtomicUsize = AtomicUsize::new(0);
-    static BROTLI_C: Counting = Counting(rustls::compress::BROTLI_COMPRESSOR, &BROTLI);
-    static ZLIB_C: Counting = Counting(rustls::compress::ZLIB_COMPRESSOR, &ZLIB);
+    static BROTLI_C: Compressor = Compressor(CertificateCompressionAlgorithm::Brotli, &BROTLI);
+    static ZLIB_C: Compressor = Compressor(CertificateCompressionAlgorithm::Zlib, &ZLIB);
     let pki = pki();
     for (fp, counter) in [(Fingerprint::Chrome, &BROTLI), (Fingerprint::Safari, &ZLIB)] {
         let mut cfg = server(&pki, vec![provider::kx_group::X25519], &[&rustls::version::TLS13]);

@@ -51,8 +51,8 @@ async fn cover_site(suite: rustls::SupportedCipherSuite) -> SocketAddr {
     let cert = CertificateDer::from(ck.cert.der().to_vec());
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(ck.signing_key.serialize_der()));
     // Prefer the hybrid group so offering it is exercised end to end. No
-    // certificate compression: with it (rustls' brotli, which Chrome offers),
-    // sing-box 1.14's REALITY server rejected these handshakes as invalid.
+    // certificate compression: REALITY servers (sing-box 1.14, Xray 26.10)
+    // fail the handshake when their target compresses its chain.
     let kx_groups = vec![
         provider::kx_group::X25519MLKEM768,
         provider::kx_group::X25519,
