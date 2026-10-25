@@ -432,7 +432,8 @@ async fn chrome_without_post_quantum_and_custom_alpn() {
 
 #[tokio::test]
 async fn apple_and_firefox_fingerprints() {
-    // Apple: fixed order, GREASE first and last; Safari and iOS share the stack.
+    // Apple: fixed order, GREASE first and last, no padding (the hello is
+    // over 512 bytes with ML-KEM); Safari and iOS share the stack.
     for fp in [Fingerprint::Safari, Fingerprint::Ios] {
         let h = capture(&test_config(fp, true)).await;
         let t = h.types();
@@ -458,22 +459,27 @@ async fn apple_and_firefox_fingerprints() {
         );
         assert_eq!(h.ext(0x001b), &[2, 0, 1]);
     }
-    // Without ML-KEM the hello falls into BoringSSL's padding window.
-    let h = capture(&test_config(Fingerprint::Safari, false)).await;
-    assert_eq!(*h.types().last().unwrap(), 0x0015);
-    assert_eq!(h.msg.len(), 512);
 
     let ff = capture(&test_config(Fingerprint::Firefox, true)).await;
     assert_eq!(
         ff.types(),
         vec![
-            0x0000, 0x0017, 0xff01, 0x000a, 0x000b, 0x0023, 0x0010, 0x0005, 0x0022, 0x0033, 0x002b, 0x000d, 0x002d,
-            0x001c, 0xfe0d
+            0x0000, 0x0017, 0xff01, 0x000a, 0x000b, 0x0010, 0x0005, 0x0022, 0x0012, 0x0033, 0x002b, 0x000d, 0x001c,
+            0x001b, 0xfe0d
         ]
     );
     assert!(!ff.suites.iter().any(|&s| is_grease(s)));
-    assert_eq!(key_share_groups(&ff), vec![(0x001d, 32), (0x0017, 65)]);
+    assert_eq!(
+        key_share_groups(&ff),
+        vec![(0x11ec, 1184 + 32), (0x001d, 32), (0x0017, 65)]
+    );
+    // The standalone X25519 share is the hybrid's X25519 half.
+    let ks = ff.ext(0x0033);
+    let hybrid_x = &ks[2 + 4 + 1184..2 + 4 + 1184 + 32];
+    let x = &ks[2 + 4 + 1216 + 4..2 + 4 + 1216 + 4 + 32];
+    assert_eq!(hybrid_x, x);
     assert_eq!(ff.ext(0x001c), &[0x40, 0x01]);
+    assert_eq!(ff.ext(0x001b), &[6, 0, 1, 0, 2, 0, 3]);
 }
 
 #[tokio::test]

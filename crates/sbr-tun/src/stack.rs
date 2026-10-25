@@ -3,7 +3,9 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use bytes::Bytes;
 use tokio::net::{TcpListener, TcpStream};
@@ -11,8 +13,9 @@ use tokio::task::JoinSet;
 use tracing::{debug, trace, warn};
 
 use crate::device::{Device, HEADROOM, RecvBatch};
+use crate::frag::Reassembler;
 use crate::nat::Nat;
-use crate::packet::{self, ACK, PROTO_TCP, PROTO_UDP, SYN};
+use crate::packet::{self, ACK, Ip, PROTO_TCP, PROTO_UDP, Parsed, SYN};
 
 #[derive(Clone, Debug)]
 pub struct StackConfig {
@@ -84,6 +87,9 @@ struct Family {
 
 pub struct Stack {
     device: Arc<Device>,
+    mtu: usize,
+    /// IP identification for fragments sbr originates (IPv4 uses the low 16 bits).
+    ids: Arc<AtomicU32>,
     tasks: JoinSet<()>,
 }
 
@@ -121,26 +127,45 @@ impl Stack {
         if fams.iter().all(Option::is_none) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "tun: no interface address"));
         }
-        tasks.spawn(packet_loop(device.clone(), fams, cfg.mtu, on_udp));
-        Ok(Self { device, tasks })
+        // Seeded so a restart does not reuse IDs the kernel may still be
+        // reassembling.
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let ids = Arc::new(AtomicU32::new(seed));
+        tasks.spawn(packet_loop(device.clone(), fams, cfg.mtu, ids.clone(), on_udp));
+        Ok(Self {
+            device,
+            mtu: cfg.mtu,
+            ids,
+            tasks,
+        })
     }
 
     /// Deliver a datagram to an app: `from` is what the app will see as the
     /// sender. Drops (rather than blocks) when the interface is congested.
+    /// Datagrams larger than the MTU are fragmented, as the sending host
+    /// would; this applies to IPv6 too, since sbr is that source.
     pub fn write_udp(&self, from: SocketAddr, to: SocketAddr, payload: &[u8]) -> io::Result<()> {
         UDP_BUF.with(|b| {
             let mut b = b.borrow_mut();
-            let mut pkt = std::mem::take(&mut *b);
-            packet::build_udp(&mut pkt, from, to, payload);
+            let (pkt, frag) = &mut *b;
+            packet::build_udp(pkt, from, to, payload);
             let len = pkt.len();
+            if len > self.mtu {
+                let mut r = Ok(());
+                let id = self.ids.fetch_add(1, Ordering::Relaxed);
+                if packet::fragment(pkt, self.mtu, id, HEADROOM, frag, |f| {
+                    if r.is_ok() {
+                        r = try_send(&self.device, f);
+                    }
+                }) {
+                    return r;
+                }
+            }
             // Shift right to make headroom; the buffer is reused per thread.
             pkt.splice(0..0, [0u8; HEADROOM]);
-            let r = match self.device.try_send(&mut pkt, len) {
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(()),
-                r => r,
-            };
-            *b = pkt;
-            r
+            try_send(&self.device, pkt)
         })
     }
 
@@ -155,8 +180,17 @@ impl Drop for Stack {
     }
 }
 
+/// Send `buf[HEADROOM..]`, treating a full interface queue as a drop.
+fn try_send(device: &Device, buf: &mut [u8]) -> io::Result<()> {
+    match device.try_send(buf, buf.len() - HEADROOM) {
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(()),
+        r => r,
+    }
+}
+
 thread_local! {
-    static UDP_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// A whole packet, and scratch space for its fragments.
+    static UDP_BUF: std::cell::RefCell<(Vec<u8>, Vec<u8>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
 async fn accept_loop(listener: TcpListener, fam: Arc<Family>, on_tcp: Arc<dyn Fn(Accepted) + Send + Sync>) {
@@ -209,9 +243,12 @@ async fn packet_loop(
     device: Arc<Device>,
     fams: [Option<Arc<Family>>; 2],
     mtu: usize,
+    ids: Arc<AtomicU32>,
     on_udp: impl Fn(UdpIn) + Send + Sync + 'static,
 ) {
     let mut batch = RecvBatch::new(BATCH.0, BATCH.1, mtu.max(1500) + 64);
+    let mut reasm = Reassembler::new(HEADROOM);
+    let mut frag = Vec::new();
     loop {
         let n = match device.recv_batch(&mut batch).await {
             Ok(n) => n,
@@ -225,55 +262,209 @@ async fn packet_loop(
             if len == 0 {
                 continue;
             }
-            if let Some(len) = process(&fams, batch.buf(i), len, &on_udp)
-                && let Err(e) = device.send(batch.buf(i), len).await
-            {
+            let r = match process(&fams, &mut reasm, batch.buf(i), len, &on_udp) {
+                Out::None => continue,
+                Out::InPlace(len) => device.send(batch.buf(i), len).await,
+                Out::Owned(mut pkt) if pkt.len() - HEADROOM > mtu => {
+                    // A reassembled TCP segment. Fragment it again with our
+                    // own ID: the rewritten flows all share one address pair,
+                    // so the app's IDs could collide in the kernel.
+                    let mut r = Ok(());
+                    let id = ids.fetch_add(1, Ordering::Relaxed);
+                    if !packet::fragment(&pkt[HEADROOM..], mtu, id, HEADROOM, &mut frag, |f| {
+                        if r.is_ok() {
+                            r = try_send(&device, f);
+                        }
+                    }) {
+                        r = try_send(&device, &mut pkt);
+                    }
+                    r
+                }
+                Out::Owned(mut pkt) => {
+                    let len = pkt.len() - HEADROOM;
+                    device.send(&mut pkt, len).await
+                }
+            };
+            if let Err(e) = r {
                 debug!(error = %e, "tun write failed");
             }
         }
     }
 }
 
-/// Handle one packet in `buf[HEADROOM..HEADROOM + len]`. Returns the length
-/// to write back into the TUN (TCP rewritten in place), or None if consumed
-/// or dropped.
-fn process(fams: &[Option<Arc<Family>>; 2], buf: &mut [u8], len: usize, on_udp: &impl Fn(UdpIn)) -> Option<usize> {
+#[derive(Debug)]
+enum Out {
+    None,
+    /// Write back `len` bytes of the input buffer.
+    InPlace(usize),
+    /// Write back a reassembled packet at `[HEADROOM..]`.
+    Owned(Vec<u8>),
+}
+
+/// Handle one packet in `buf[HEADROOM..HEADROOM + len]`: TCP is rewritten
+/// for writing back into the TUN, UDP is consumed, anything else dropped.
+fn process(
+    fams: &[Option<Arc<Family>>; 2],
+    reasm: &mut Reassembler,
+    buf: &mut [u8],
+    len: usize,
+    on_udp: &impl Fn(UdpIn),
+) -> Out {
     let pkt = &mut buf[HEADROOM..HEADROOM + len];
-    let h = packet::parse(pkt)?;
-    let fam = fams[h.v6 as usize].as_ref()?;
-    match h.proto {
-        PROTO_TCP => {
-            let flags = packet::tcp_flags(pkt, &h);
-            let rewrite = if h.src.ip() == fam.addr && h.src.port() == fam.port {
-                // Our listener replying: restore the original flow.
-                fam.nat
-                    .lock()
-                    .unwrap()
-                    .inbound(h.dst.port())
-                    .map(|(src, dst)| (dst, src))
-            } else if global_unicast(h.dst.ip()) {
-                let syn_only = flags & SYN != 0 && flags & ACK == 0;
-                let port = fam.nat.lock().unwrap().outbound(h.src, h.dst, syn_only);
-                port.map(|p| (SocketAddr::new(fam.next, p), SocketAddr::new(fam.addr, fam.port)))
-            } else {
-                None
+    match packet::classify(pkt) {
+        Some(Ip::Whole(h)) => {
+            let Some(fam) = fams[h.v6 as usize].as_ref() else {
+                return Out::None;
             };
-            let Some((src, dst)) = rewrite else {
-                trace!(src = %h.src, dst = %h.dst, flags, "tcp: no NAT entry, dropped");
-                return None;
+            match h.proto {
+                PROTO_TCP if nat_tcp(fam, pkt, &h) => Out::InPlace(len),
+                PROTO_UDP if global_unicast(h.dst.ip()) => {
+                    on_udp(UdpIn {
+                        source: h.src,
+                        destination: h.dst,
+                        payload: Bytes::copy_from_slice(&pkt[h.l4 + 8..h.len]),
+                    });
+                    Out::None
+                }
+                _ => Out::None,
+            }
+        }
+        Some(Ip::Fragment(f)) => {
+            if fams[f.v6 as usize].is_none() || (!f.v6 && f.proto != PROTO_TCP && f.proto != PROTO_UDP) {
+                return Out::None;
+            }
+            let Some(mut whole) = reasm.push(pkt, &f, Instant::now()) else {
+                return Out::None;
             };
-            packet::rewrite(pkt, &h, src, dst);
-            Some(len)
+            let Some(h) = packet::parse(&whole[HEADROOM..]) else {
+                return Out::None;
+            };
+            let Some(fam) = fams[h.v6 as usize].as_ref() else {
+                return Out::None;
+            };
+            trace!(src = %h.src, dst = %h.dst, len = h.len, "reassembled");
+            match h.proto {
+                PROTO_TCP if nat_tcp(fam, &mut whole[HEADROOM..], &h) => Out::Owned(whole),
+                PROTO_UDP if global_unicast(h.dst.ip()) => {
+                    on_udp(UdpIn {
+                        source: h.src,
+                        destination: h.dst,
+                        payload: Bytes::from(whole).slice(HEADROOM + h.l4 + 8..HEADROOM + h.len),
+                    });
+                    Out::None
+                }
+                _ => Out::None,
+            }
         }
-        PROTO_UDP if global_unicast(h.dst.ip()) => {
-            let payload = Bytes::copy_from_slice(&pkt[h.l4 + 8..h.len]);
-            on_udp(UdpIn {
-                source: h.src,
-                destination: h.dst,
-                payload,
-            });
-            None
+        None => Out::None,
+    }
+}
+
+/// Apply the NAT to a TCP packet in place. False if it has no entry.
+fn nat_tcp(fam: &Family, pkt: &mut [u8], h: &Parsed) -> bool {
+    let flags = packet::tcp_flags(pkt, h);
+    let rewrite = if h.src.ip() == fam.addr && h.src.port() == fam.port {
+        // Our listener replying: restore the original flow.
+        fam.nat
+            .lock()
+            .unwrap()
+            .inbound(h.dst.port())
+            .map(|(src, dst)| (dst, src))
+    } else if global_unicast(h.dst.ip()) {
+        let syn_only = flags & SYN != 0 && flags & ACK == 0;
+        let port = fam.nat.lock().unwrap().outbound(h.src, h.dst, syn_only);
+        port.map(|p| (SocketAddr::new(fam.next, p), SocketAddr::new(fam.addr, fam.port)))
+    } else {
+        None
+    };
+    let Some((src, dst)) = rewrite else {
+        trace!(src = %h.src, dst = %h.dst, flags, "tcp: no NAT entry, dropped");
+        return false;
+    };
+    packet::rewrite(pkt, h, src, dst);
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::packet::{build_udp, fold, fragment, parse, sum16, verify, wr16};
+
+    fn fams() -> [Option<Arc<Family>>; 2] {
+        [
+            Some(Arc::new(Family {
+                addr: "172.19.0.1".parse().unwrap(),
+                next: "172.19.0.2".parse().unwrap(),
+                port: 8000,
+                nat: Arc::new(Mutex::new(Nat::default())),
+            })),
+            None,
+        ]
+    }
+
+    /// Run fragments of `p` (at `mtu`) through `process`; returns the last result.
+    fn feed(
+        fams: &[Option<Arc<Family>>; 2],
+        reasm: &mut Reassembler,
+        p: &[u8],
+        mtu: usize,
+        on_udp: &impl Fn(UdpIn),
+    ) -> Out {
+        let mut frags = Vec::new();
+        assert!(fragment(p, mtu, 42, HEADROOM, &mut Vec::new(), |f| frags.push(f.to_vec())));
+        assert!(frags.len() > 1);
+        let mut out = Out::None;
+        for mut f in frags {
+            let len = f.len() - HEADROOM;
+            assert!(matches!(out, Out::None), "completed early");
+            out = process(fams, reasm, &mut f, len, on_udp);
         }
-        _ => None,
+        out
+    }
+
+    #[test]
+    fn fragmented_udp_goes_up_whole() {
+        let fams = fams();
+        let mut reasm = Reassembler::new(HEADROOM);
+        let (s, d) = ("172.19.0.1:4500".parse().unwrap(), "52.1.2.3:443".parse().unwrap());
+        let payload: Vec<u8> = (0..1400u32).map(|i| (i % 253) as u8).collect();
+        let mut p = Vec::new();
+        build_udp(&mut p, s, d, &payload);
+        let got = std::cell::RefCell::new(Vec::new());
+        let on_udp = |u: UdpIn| got.borrow_mut().push((u.source, u.destination, u.payload));
+        assert!(matches!(feed(&fams, &mut reasm, &p, 1280, &on_udp), Out::None));
+        assert_eq!(got.borrow()[..], [(s, d, Bytes::from(payload))]);
+        assert_eq!(reasm.pending(), 0);
+    }
+
+    #[test]
+    fn fragmented_tcp_is_reassembled_and_translated() {
+        let fams = fams();
+        let mut reasm = Reassembler::new(HEADROOM);
+        let (s, d): (SocketAddr, SocketAddr) = ("172.19.0.1:51000".parse().unwrap(), "52.1.2.3:443".parse().unwrap());
+        // A SYN carrying 1400 bytes (TCP Fast Open style), built from a UDP packet.
+        let mut p = Vec::new();
+        build_udp(&mut p, s, d, &[7u8; 1412]);
+        p[9] = PROTO_TCP;
+        wr16(&mut p, 10, 0);
+        let ck = !fold(sum16(&p[..20], 0));
+        wr16(&mut p, 10, ck);
+        p[20 + 4..20 + 20].copy_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 5 << 4, SYN, 0xff, 0xff, 0, 0, 0, 0]);
+        let mut pseudo = sum16(&p[12..20], 0) + PROTO_TCP as u32 + (p.len() - 20) as u32;
+        pseudo = sum16(&p[20..], pseudo);
+        wr16(&mut p, 36, !fold(pseudo));
+        assert!(verify(&p));
+
+        let Out::Owned(pkt) = feed(&fams, &mut reasm, &p, 576, &|_| panic!("not UDP")) else {
+            panic!("expected the reassembled segment back")
+        };
+        let q = &pkt[HEADROOM..];
+        assert!(verify(q), "checksums valid after reassembly and NAT");
+        let h = parse(q).unwrap();
+        assert_eq!(h.dst, "172.19.0.1:8000".parse().unwrap());
+        assert_eq!(h.src.ip(), "172.19.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(&q[h.l4 + 20..], &p[40..]);
+        let fam = fams[0].as_ref().unwrap();
+        assert_eq!(fam.nat.lock().unwrap().accept(h.src.port()), Some((s, d)));
     }
 }

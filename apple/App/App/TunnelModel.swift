@@ -9,19 +9,18 @@ final class TunnelModel: ObservableObject {
     @Published private(set) var stats: SbrStats?
     @Published private(set) var uploadRate: Double = 0 // bytes/s
     @Published private(set) var downloadRate: Double = 0
-    @Published private(set) var hasConfig = false
+    @Published private(set) var testing: Set<String> = []
     @Published var errorMessage: String?
 
     private var manager: NETunnelProviderManager?
     private var statusObserver: NSObjectProtocol?
-    private let store = SbrConfigStore(appGroup: AppConfig.appGroup)
 
     private var session: NETunnelProviderSession? { manager?.connection as? NETunnelProviderSession }
 
     var isOn: Bool { [.connected, .connecting, .reasserting].contains(status) }
+    var isConnected: Bool { status == .connected }
 
     func load() async {
-        hasConfig = (try? store.load()) != nil
         do {
             let all = try await NETunnelProviderManager.loadAllFromPreferences()
             manager = all.first {
@@ -29,42 +28,6 @@ final class TunnelModel: ObservableObject {
                     == AppConfig.tunnelBundleIdentifier
             }
             observeStatus()
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    /// Validate with the same parser the tunnel uses, save to the App Group,
-    /// install the VPN profile, and hot-reload a running tunnel.
-    func importConfig(_ text: String) async {
-        if let problem = Sbr.check(config: text) {
-            errorMessage = problem
-            return
-        }
-        do {
-            try store.save(text)
-            hasConfig = true
-            try await install()
-            if status == .connected, let session {
-                groups = try await session.send(.reload).groups ?? []
-            }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    func importConfig(from url: URL) async {
-        do {
-            let text: String
-            if url.isFileURL {
-                let scoped = url.startAccessingSecurityScopedResource()
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                text = try String(contentsOf: url, encoding: .utf8)
-            } else {
-                let (data, _) = try await URLSession.shared.data(from: url)
-                text = String(decoding: data, as: UTF8.self)
-            }
-            await importConfig(text)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -89,6 +52,16 @@ final class TunnelModel: ObservableObject {
         }
     }
 
+    /// The active profile changed on disk: hot-reload a running tunnel.
+    func reload() async {
+        guard isConnected, let session else { return }
+        do {
+            groups = try await session.send(.reload).groups ?? groups
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func select(group: String, member: String) async {
         guard let session else { return }
         do {
@@ -98,13 +71,30 @@ final class TunnelModel: ObservableObject {
         }
     }
 
-    /// Poll the tunnel once a second while this view is alive and connected.
-    /// The extension only wakes for these messages, so a backgrounded app
-    /// costs it nothing.
+    /// Latency-test a group. Results arrive through polling; the spinner
+    /// clears when the group's numbers change or after a few seconds.
+    func urlTest(group: String) async {
+        guard let session, !testing.contains(group) else { return }
+        testing.insert(group)
+        let before = groups.first { $0.tag == group }
+        _ = try? await session.send(.urlTest(group: group))
+        for _ in 0..<20 {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if let g = try? await session.send(.groups).groups {
+                groups = g
+                if g.first(where: { $0.tag == group }) != before { break }
+            }
+        }
+        testing.remove(group)
+    }
+
+    /// Poll the tunnel once a second while visible and connected. The
+    /// extension only wakes for these messages, so a backgrounded app costs
+    /// it nothing.
     func poll() async {
         var last: (stats: SbrStats, at: Date)?
         while !Task.isCancelled {
-            if status == .connected, let session {
+            if isConnected, let session {
                 if let s = try? await session.send(.stats).stats {
                     let now = Date()
                     if let last {
@@ -136,7 +126,7 @@ final class TunnelModel: ObservableObject {
         // The tunnel reads config.json from the App Group container.
         proto.providerConfiguration = [SbrProviderKey.appGroup: AppConfig.appGroup]
         m.protocolConfiguration = proto
-        m.localizedDescription = "sbr demo"
+        m.localizedDescription = "sbr"
         m.isEnabled = true
         try await m.saveToPreferences()
         // A freshly saved manager must be reloaded before it can start.
@@ -164,13 +154,13 @@ final class TunnelModel: ObservableObject {
 extension NEVPNStatus {
     var label: String {
         switch self {
-        case .invalid: "Not installed"
-        case .disconnected: "Disconnected"
-        case .connecting: "Connecting…"
-        case .connected: "Connected"
-        case .reasserting: "Reconnecting…"
-        case .disconnecting: "Disconnecting…"
-        @unknown default: "Unknown"
+        case .invalid: "not installed"
+        case .disconnected: "off"
+        case .connecting: "connecting"
+        case .connected: "on"
+        case .reasserting: "reconnecting"
+        case .disconnecting: "disconnecting"
+        @unknown default: "unknown"
         }
     }
 }

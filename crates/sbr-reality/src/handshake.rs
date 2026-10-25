@@ -15,7 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::RealityConfig;
 use crate::hello::{
-    CERT_COMPRESSION_BROTLI, CERT_COMPRESSION_ZLIB, GROUP_X25519, GROUP_X25519_MLKEM768, Hello, HelloParams, KeyShares,
+    CERT_COMPRESSION_BROTLI, CERT_COMPRESSION_ZLIB, CERT_COMPRESSION_ZSTD, GROUP_X25519, GROUP_X25519_MLKEM768, Hello, HelloParams, KeyShares,
     MLKEM768_CIPHERTEXT_LEN, SESSION_ID_OFFSET, ecdh_alg,
 };
 use crate::keys::{CipherSuite, KeySchedule, RecordKey, finished_verify_data};
@@ -290,6 +290,9 @@ fn decompress_certificate(body: &[u8], hello: &Hello) -> io::Result<Vec<u8>> {
             .take(limit)
             .read_to_end(&mut out),
         CERT_COMPRESSION_ZLIB => flate2::read::ZlibDecoder::new(data).take(limit).read_to_end(&mut out),
+        CERT_COMPRESSION_ZSTD => ruzstd::decoding::StreamingDecoder::new(data)
+            .map_err(io::Error::other)
+            .and_then(|d| d.take(limit).read_to_end(&mut out)),
         _ => return Err(invalid("unsupported certificate compression")),
     };
     if res.is_err() || out.len() != len {
@@ -356,7 +359,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut hello = Hello::new(p)?;
-    let mut keys = KeyShares::generate(&hello.initial_share_groups(), hello.grease_group())?;
+    let mut keys = KeyShares::generate(&hello.initial_share_groups(), hello.grease_group(), hello.reuse_x25519())?;
     let fill_session_id = matches!(
         auth,
         Auth::Reality { .. }
@@ -426,7 +429,7 @@ where
                 if !hello.supports_group(g) || keys.public.iter().any(|s| s.0 == g) {
                     return Err(invalid("HelloRetryRequest selected an invalid group"));
                 }
-                keys = KeyShares::generate(&[g], 0)?;
+                keys = KeyShares::generate(&[g], 0, false)?;
             }
             // A cookie-only retry keeps the shares.
             None if sh.cookie.is_some() => {}

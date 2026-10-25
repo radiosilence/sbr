@@ -114,6 +114,9 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
                 throw SbrError("no member \(member) in group \(group)")
             }
             return SbrResponse(groups: core.groups())
+        case let .urlTest(group):
+            core.urlTest(group: group)
+            return SbrResponse(groups: core.groups())
         case .stats:
             return SbrResponse(stats: core.stats())
         case .reload:

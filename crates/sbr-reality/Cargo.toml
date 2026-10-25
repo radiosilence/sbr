@@ -11,9 +11,10 @@ base64.workspace = true
 tokio = { workspace = true }
 # Certificate verification (the `ServerCertVerifier` trait) and its types.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
-# RFC 8879 certificate decompression: Chrome offers brotli, Apple zlib.
+# RFC 8879 certificate decompression: Chrome offers brotli, Apple zlib, Firefox all three.
 brotli-decompressor = "5"
 flate2.workspace = true
+ruzstd = "0.8"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

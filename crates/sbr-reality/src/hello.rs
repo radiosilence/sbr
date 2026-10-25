@@ -1,22 +1,24 @@
 //! Browser ClientHello fingerprints.
 //!
-//! | name             | profile                                                    |
-//! |------------------|------------------------------------------------------------|
-//! | `chrome`         | Chrome 155 (macOS), captured from the browser               |
-//! | `safari`, `ios`  | Apple Network.framework (macOS 27 URLSession), captured     |
-//! | `firefox`        | Firefox 120, from uTLS `HelloFirefox_120`                   |
+//! | name             | profile                                                       |
+//! |------------------|---------------------------------------------------------------|
+//! | `chrome`         | Chrome 155 (macOS), captured from the browser                  |
+//! | `safari`, `ios`  | Apple Network.framework (macOS 27 URLSession), captured        |
+//! | `firefox`        | Firefox 148, uTLS `HelloFirefox_148` as Xray-core 26.10 uses it |
 //!
 //! Chrome and Apple are transcribed from ClientHellos the real clients sent
-//! (October 2026), not from uTLS: uTLS still parrots Chrome 133 and Safari 16,
-//! and real Chrome has since added GREASE and ML-DSA signature algorithms and
-//! the Trust Anchor IDs extension, while Apple dropped TLS 1.0/1.1 and added
-//! X25519MLKEM768. A frozen uTLS profile increasingly marks a proxy client.
-//! Firefox stays on uTLS's table until it is re-captured.
+//! (October 2026). uTLS (and so sing-box and Xray) still sends Chrome 133;
+//! real Chrome has since added GREASE and ML-DSA signature algorithms and
+//! the Trust Anchor IDs extension, and a frozen profile increasingly marks a
+//! proxy client. The Apple capture matches uTLS `HelloSafari_26_3`. `ios`
+//! is the same stack, not uTLS `HelloIOS_14`: an iOS 14 hello is six years
+//! stale, and XTLS/REALITY servers since 2026-09-08 refuse a ClientHello
+//! without an X25519MLKEM768 key share ahead of any X25519 one, which iOS 14
+//! does not send.
 //!
 //! GREASE values follow BoringSSL (`0x?a?a`, one random value per role, the two
 //! GREASE extensions never equal), Chrome's extension order is a fresh random
-//! permutation per connection with the GREASE extensions pinned first and last,
-//! and Apple uses BoringSSL's padding rule.
+//! permutation per connection with the GREASE extensions pinned first and last.
 
 use std::io;
 
@@ -41,6 +43,7 @@ pub(crate) const SESSION_ID_OFFSET: usize = 39;
 
 pub(crate) const CERT_COMPRESSION_ZLIB: u16 = 1;
 pub(crate) const CERT_COMPRESSION_BROTLI: u16 = 2;
+pub(crate) const CERT_COMPRESSION_ZSTD: u16 = 3;
 
 /// The browser whose ClientHello is imitated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,7 +51,7 @@ pub enum Fingerprint {
     /// Chrome 155.
     #[default]
     Chrome,
-    /// Firefox 120 (uTLS `HelloFirefox_120`).
+    /// Firefox 148 (uTLS `HelloFirefox_148`).
     Firefox,
     /// Safari on macOS 27: Apple's Network.framework TLS stack.
     Safari,
@@ -109,8 +112,6 @@ enum Ext {
     RecordSizeLimit(u16),
     /// draft-ietf-tls-trust-anchor-ids (Chrome's experimental 0xca34), body verbatim.
     TrustAnchors(&'static [u8]),
-    /// BoringSSL padding to 512 bytes; must be last.
-    Padding,
 }
 
 struct Spec {
@@ -118,6 +119,9 @@ struct Spec {
     exts: &'static [Ext],
     /// Chrome-style extension permutation.
     shuffle: bool,
+    /// The X25519 share repeats the X25519 half of the hybrid share
+    /// (NSS; uTLS `ReuseHybridAndClassicalKeyShares`).
+    reuse_x25519: bool,
 }
 
 // Cipher suites.
@@ -151,6 +155,7 @@ const CHROME_GROUPS: &[u16] = &[GREASE, GROUP_X25519_MLKEM768, GROUP_X25519, GRO
 const CHROME_SHARES: &[u16] = &[GREASE, GROUP_X25519_MLKEM768, GROUP_X25519];
 const BORINGSSL_VERSIONS: &[u16] = &[GREASE, 0x0304, 0x0303];
 const FIREFOX_GROUPS: &[u16] = &[
+    GROUP_X25519_MLKEM768,
     GROUP_X25519,
     GROUP_P256,
     GROUP_P384,
@@ -158,7 +163,7 @@ const FIREFOX_GROUPS: &[u16] = &[
     GROUP_FFDHE2048,
     GROUP_FFDHE3072,
 ];
-const FIREFOX_SHARES: &[u16] = &[GROUP_X25519, GROUP_P256];
+const FIREFOX_SHARES: &[u16] = &[GROUP_X25519_MLKEM768, GROUP_X25519, GROUP_P256];
 const FIREFOX_VERSIONS: &[u16] = &[0x0304, 0x0303];
 const APPLE_GROUPS: &[u16] = &[
     GREASE,
@@ -211,6 +216,7 @@ const CHROME: Spec = Spec {
         Ext::Grease2,
     ],
     shuffle: true,
+    reuse_x25519: false,
 };
 
 const FIREFOX: Spec = Spec {
@@ -221,18 +227,19 @@ const FIREFOX: Spec = Spec {
         Ext::RenegotiationInfo,
         Ext::Groups(FIREFOX_GROUPS),
         Ext::PointFormats,
-        Ext::SessionTicket,
         Ext::Alpn,
         Ext::StatusRequest,
         Ext::DelegatedCredentials(FIREFOX_DC_SIGALGS),
+        Ext::Sct,
         Ext::KeyShare(FIREFOX_SHARES),
         Ext::Versions(FIREFOX_VERSIONS),
         Ext::SignatureAlgorithms(FIREFOX_SIGALGS),
-        Ext::PskModes,
         Ext::RecordSizeLimit(0x4001),
+        Ext::CompressCertificate(&[CERT_COMPRESSION_ZLIB, CERT_COMPRESSION_BROTLI, CERT_COMPRESSION_ZSTD]),
         Ext::EchGrease(&[AEAD_AES128GCM, AEAD_CHACHA20POLY1305], &[223]),
     ],
     shuffle: false,
+    reuse_x25519: true,
 };
 
 const APPLE: Spec = Spec {
@@ -253,9 +260,9 @@ const APPLE: Spec = Spec {
         Ext::Versions(BORINGSSL_VERSIONS),
         Ext::CompressCertificate(&[CERT_COMPRESSION_ZLIB]),
         Ext::Grease2,
-        Ext::Padding,
     ],
     shuffle: false,
+    reuse_x25519: false,
 };
 
 fn spec(fp: Fingerprint) -> &'static Spec {
@@ -280,13 +287,18 @@ pub(crate) struct KeyShares {
 
 impl KeyShares {
     /// Generates one share per group (GREASE gets the one-byte placeholder).
-    pub(crate) fn generate(groups: &[u16], grease: u16) -> io::Result<Self> {
+    /// `reuse_x25519`: the X25519 share reuses the hybrid share's X25519 key.
+    pub(crate) fn generate(groups: &[u16], grease: u16, reuse_x25519: bool) -> io::Result<Self> {
         let mut k = Self::default();
+        let mut hybrid_x25519: Option<[u8; 32]> = None;
         for &g in groups {
             match g {
                 GREASE => k.public.push((grease, vec![0])),
                 GROUP_X25519 => {
-                    let (sk, pk) = x25519_key()?;
+                    let (sk, pk) = match &hybrid_x25519 {
+                        Some(secret) if reuse_x25519 => x25519_from(secret)?,
+                        _ => x25519_key()?,
+                    };
                     k.x25519 = Some(sk);
                     k.public.push((g, pk));
                 }
@@ -294,7 +306,9 @@ impl KeyShares {
                     let dk = kem::DecapsulationKey::generate(&kem::ML_KEM_768).map_err(|_| crypto_err())?;
                     let ek = dk.encapsulation_key().map_err(|_| crypto_err())?;
                     let ek = ek.key_bytes().map_err(|_| crypto_err())?;
-                    let (xk, xp) = x25519_key()?;
+                    let secret: [u8; 32] = random_bytes()?;
+                    let (xk, xp) = x25519_from(&secret)?;
+                    hybrid_x25519 = Some(secret);
                     let mut data = Vec::with_capacity(MLKEM768_ENCAPS_LEN + 32);
                     data.extend_from_slice(ek.as_ref());
                     data.extend_from_slice(&xp);
@@ -412,6 +426,12 @@ fn x25519_key() -> io::Result<(agreement::PrivateKey, Vec<u8>)> {
     Ok((k, p))
 }
 
+fn x25519_from(secret: &[u8; 32]) -> io::Result<(agreement::PrivateKey, Vec<u8>)> {
+    let k = agreement::PrivateKey::from_private_key(&agreement::X25519, secret).map_err(|_| crypto_err())?;
+    let p = k.compute_public_key().map_err(|_| crypto_err())?.as_ref().to_vec();
+    Ok((k, p))
+}
+
 const DEFAULT_ALPN: &[&str] = &["h2", "http/1.1"];
 
 /// Everything a connection's ClientHellos share. A HelloRetryRequest is
@@ -521,6 +541,10 @@ impl Hello {
         self.grease.group
     }
 
+    pub(crate) fn reuse_x25519(&self) -> bool {
+        self.spec.reuse_x25519
+    }
+
     /// The handshake message (4-byte header included) carrying `shares` and,
     /// after a HelloRetryRequest, the server's cookie.
     pub(crate) fn encode(&self, shares: &[(u16, Vec<u8>)], cookie: Option<&[u8]>) -> Vec<u8> {
@@ -540,7 +564,6 @@ impl Hello {
 
         let ext_start = m.len();
         m.extend_from_slice(&[0, 0]);
-        let mut pad = false;
         for e in &self.exts {
             match *e {
                 Ext::Grease1 => put_ext(&mut m, g.ext1, |_| {}),
@@ -627,16 +650,6 @@ impl Hello {
                 }),
                 Ext::RecordSizeLimit(l) => put_ext(&mut m, 0x001c, |b| put_u16(b, l)),
                 Ext::TrustAnchors(body) => put_ext(&mut m, 0xca34, |b| b.extend_from_slice(body)),
-                Ext::Padding => pad = true,
-            }
-        }
-        if pad {
-            // BoringSSL: pad hellos of 256..511 bytes up to 512.
-            let unpadded = m.len();
-            if unpadded > 0xff && unpadded < 0x200 {
-                let mut n = 0x200 - unpadded;
-                n = if n >= 5 { n - 4 } else { 1 };
-                put_ext(&mut m, 0x0015, |b| b.resize(b.len() + n, 0));
             }
         }
         let ext_len = (m.len() - ext_start - 2) as u16;
@@ -669,7 +682,7 @@ fn grease_ech(aeads: &[u16], lens: &[u16]) -> io::Result<Vec<u8>> {
 /// Uniform random permutation of everything between the pinned GREASE
 /// extensions (Chrome ≥ 110 permutes its extensions per connection).
 fn shuffle_middle(exts: &mut [Ext]) -> io::Result<()> {
-    let pinned = |e: &Ext| matches!(e, Ext::Grease1 | Ext::Grease2 | Ext::Padding);
+    let pinned = |e: &Ext| matches!(e, Ext::Grease1 | Ext::Grease2);
     let idx: Vec<usize> = (0..exts.len()).filter(|&i| !pinned(&exts[i])).collect();
     let mut rnd = vec![0u8; idx.len() * 4];
     rand::fill(&mut rnd).map_err(|_| crypto_err())?;

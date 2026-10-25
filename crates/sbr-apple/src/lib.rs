@@ -22,6 +22,7 @@ use sbr_engine::sbr_config::Options;
 use sbr_engine::{Engine, Settings};
 
 use runtime::{Flavor, Running};
+use sbr_engine::outbound::group::real_tag;
 
 const MOBILE: bool = cfg!(any(target_os = "ios", target_os = "tvos", target_os = "visionos"));
 
@@ -287,22 +288,90 @@ pub unsafe extern "C" fn sbr_groups(instance: *mut SbrInstance) -> *mut c_char {
         let Some(e) = engine_of(instance) else {
             return ptr::null_mut();
         };
+        let env = e.groups();
+        let delay = |o: &dyn sbr_engine::Outbound| match env.history(&real_tag(o)) {
+            Some(h) => h.delay.to_string(),
+            None => "null".to_owned(),
+        };
         let groups: Vec<String> = e
             .outbounds()
             .iter()
             .filter_map(|o| o.as_group().map(|g| (o, g)))
             .map(|(o, g)| {
-                let members: Vec<String> = g.members().iter().map(|m| json_str(m.tag())).collect();
+                let members: Vec<String> = g
+                    .members()
+                    .iter()
+                    .map(|m| {
+                        format!(
+                            r#"{{"tag":{},"type":{},"delay":{}}}"#,
+                            json_str(m.tag()),
+                            json_str(m.kind()),
+                            delay(m.as_ref())
+                        )
+                    })
+                    .collect();
                 format!(
-                    r#"{{"tag":{},"type":{},"selected":{},"members":[{}]}}"#,
+                    r#"{{"tag":{},"type":{},"selected":{},"now":{},"delay":{},"members":[{}]}}"#,
                     json_str(o.tag()),
                     json_str(o.kind()),
                     json_str(g.selected().tag()),
+                    json_str(&real_tag(o.as_ref())),
+                    delay(o.as_ref()),
                     members.join(",")
                 )
             })
             .collect();
         out_string(format!("[{}]", groups.join(",")))
+    })
+}
+
+/// Start a latency test of `group` (a urltest, or a selector whose urltest
+/// members are tested) and return immediately; poll `sbr_groups` for results.
+/// Returns 1 if a test started, 0 if the group is unknown or has nothing to test.
+///
+/// # Safety
+/// `instance` must be live; `group` NULL or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sbr_url_test(instance: *mut SbrInstance, group: *const c_char) -> i32 {
+    guard(0, || {
+        let Some(tag) = (unsafe { str_arg(group) }) else {
+            return 0;
+        };
+        // SAFETY: caller contract: NULL or a live pointer from sbr_start*.
+        let Some(inst) = (unsafe { instance.as_ref() }) else {
+            return 0;
+        };
+        let Some((engine, handle)) = inst
+            .lock()
+            .running
+            .as_ref()
+            .map(|r| (r.engine.clone(), r.handle.clone()))
+        else {
+            return 0;
+        };
+        let Some(o) = engine.outbound(tag) else { return 0 };
+        let Some(g) = o.as_group() else { return 0 };
+        let mut tags: Vec<String> = vec![tag.to_owned()];
+        tags.extend(
+            g.members()
+                .iter()
+                .filter(|m| m.kind() == "urltest")
+                .map(|m| m.tag().to_owned()),
+        );
+        let env = engine.groups().clone();
+        let mut started = 0;
+        for t in tags {
+            if env.urltest(&t).is_some() {
+                let env = env.clone();
+                handle.spawn(async move {
+                    if let Some(u) = env.urltest(&t) {
+                        u.url_test(true).await;
+                    }
+                });
+                started = 1;
+            }
+        }
+        started
     })
 }
 

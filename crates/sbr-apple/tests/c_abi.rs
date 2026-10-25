@@ -70,6 +70,10 @@ fn c_program_links_and_runs() {
     if cfg!(target_os = "linux") {
         cc.args(["-lpthread", "-ldl", "-lm", "-lrt"]);
     }
+    if cfg!(target_vendor = "apple") {
+        // rustls' platform verifier goes through Security.framework.
+        cc.args(["-framework", "CoreFoundation", "-framework", "Security", "-liconv"]);
+    }
     let st = cc.status().unwrap();
     assert!(st.success(), "cc failed");
     let run = Command::new(&out).output().unwrap();
