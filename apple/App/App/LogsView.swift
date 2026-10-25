@@ -34,6 +34,10 @@ struct LogsView: View {
                 .tint(.sbrAccent)
                 .padding(.bottom, Theme.Space.m)
                 DiagnoseSection()
+                if !tunnel.isConnected, !tunnel.logs.isEmpty {
+                    Text("from the last session.").font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
+                        .padding(.bottom, Theme.Space.s)
+                }
                 if tunnel.logs.isEmpty {
                     Text(tunnel.isConnected ? "nothing yet." : "connect to see the tunnel's logs.")
                         .font(.sbr(.meta)).foregroundStyle(Color.sbrMuted)

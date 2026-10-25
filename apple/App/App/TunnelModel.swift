@@ -144,12 +144,29 @@ final class TunnelModel: ObservableObject {
         testing.remove(group)
     }
 
-    @Published private(set) var logs: [String] = []
+    /// The tunnel's recent log, kept on disk so it survives the tunnel (and
+    /// this app) going away: the lines before a failure are the useful ones.
+    @Published private(set) var logs: [String] = TunnelModel.loadLogs()
+
+    private static var logsURL: URL? {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("tunnel-logs.json")
+    }
+
+    private static func loadLogs() -> [String] {
+        guard let url = logsURL, let data = try? Data(contentsOf: url) else { return [] }
+        return (try? JSONDecoder().decode([String].self, from: data)) ?? []
+    }
 
     /// Poll the extension's recent logs while the logs tab is visible.
     func pollLogs() async {
         while !Task.isCancelled {
-            if let session, let l = try? await session.send(.logs).logs { logs = l }
+            if isConnected, let session, let l = try? await session.send(.logs).logs, l != logs {
+                logs = l
+                if let url = Self.logsURL, let data = try? JSONEncoder().encode(l) {
+                    try? data.write(to: url, options: .atomic)
+                }
+            }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
     }
