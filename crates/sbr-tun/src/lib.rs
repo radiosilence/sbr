@@ -7,9 +7,10 @@
 //! identifies the original flow. Replies are rewritten in reverse. Only
 //! headers are touched, so bulk TCP costs two syscalls and a checksum fix
 //! per packet, with no userspace TCP state machine. UDP is handed to the
-//! engine's NAT as datagrams.
+//! engine's NAT as datagrams. IP fragments are reassembled first (`frag`).
 
 pub mod device;
+pub mod frag;
 pub mod nat;
 pub mod packet;
 pub mod stack;
