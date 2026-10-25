@@ -31,9 +31,16 @@ pub fn install(path: &str) -> io::Result<()> {
             previous(info);
         }));
         for sig in [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGFPE, libc::SIGABRT] {
-            // SAFETY: installing a handler that only calls async-signal-safe
-            // functions (write, signal, raise).
-            unsafe { libc::signal(sig, on_signal as *const () as libc::sighandler_t) };
+            // SA_ONSTACK: a stack overflow can only be reported from the
+            // alternate signal stack Rust sets up for the threads it spawns.
+            // SAFETY: the handler only calls async-signal-safe functions.
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = on_signal as *const () as libc::sighandler_t;
+                action.sa_flags = libc::SA_ONSTACK;
+                libc::sigemptyset(&mut action.sa_mask);
+                libc::sigaction(sig, &action, std::ptr::null_mut());
+            }
         }
     });
     Ok(())

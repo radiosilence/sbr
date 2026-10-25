@@ -41,6 +41,9 @@ impl Flavor {
     }
 }
 
+/// Stack for the engine thread (and the runtime's workers).
+const ENGINE_STACK: usize = 8 << 20;
+
 /// Upper bound on `spawn_blocking` threads (getaddrinfo, file reads). Tokio's
 /// default of 512 would be ~1 GB of stack reservations in a 50 MB extension.
 const MAX_BLOCKING_THREADS: usize = 8;
@@ -62,12 +65,18 @@ impl Running {
         let (stop_tx, stop_rx) = oneshot::channel::<Instance>();
         let thread = std::thread::Builder::new()
             .name("sbr".into())
+            // On iOS every connection is driven from this one thread; deep
+            // TLS/QUIC poll chains outgrew the 2 MiB default. Only the
+            // pages actually touched count against the extension's memory.
+            .stack_size(ENGINE_STACK)
             .spawn(move || {
                 let mut b = match flavor {
                     Flavor::CurrentThread => tokio::runtime::Builder::new_current_thread(),
                     Flavor::MultiThread(n) => {
                         let mut b = tokio::runtime::Builder::new_multi_thread();
-                        b.worker_threads(n).thread_name("sbr-worker");
+                        b.worker_threads(n)
+                            .thread_name("sbr-worker")
+                            .thread_stack_size(ENGINE_STACK);
                         b
                     }
                 };
