@@ -225,10 +225,10 @@ async fn packet_loop(
             if len == 0 {
                 continue;
             }
-            if let Some(len) = process(&fams, batch.buf(i), len, &on_udp) {
-                if let Err(e) = device.send(batch.buf(i), len).await {
-                    debug!(error = %e, "tun write failed");
-                }
+            if let Some(len) = process(&fams, batch.buf(i), len, &on_udp)
+                && let Err(e) = device.send(batch.buf(i), len).await
+            {
+                debug!(error = %e, "tun write failed");
             }
         }
     }
