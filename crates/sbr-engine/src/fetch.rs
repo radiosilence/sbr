@@ -162,6 +162,9 @@ impl HttpClient {
                     .and_then(|l| l.to_str().ok())
                     .and_then(|l| url.join(l))
                     .ok_or_else(|| io::Error::other(format!("bad redirect from {}", r.status)))?;
+                if url.https && !next.https {
+                    return Err(io::Error::other("refusing a redirect from https to http"));
+                }
                 url = next;
                 continue;
             }
