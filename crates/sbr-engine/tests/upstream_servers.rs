@@ -570,6 +570,12 @@ async fn xray_vless_reality_vision() {
     if let Err(e) = udp_roundtrip(&out, uecho, &udp_sizes).await {
         failures.push(format!("plain VLESS UDP over a Vision user: {e}"));
     }
+    // Like Xray's own client, Vision refuses QUIC so clients fall back to TCP.
+    let vision = engine.outbound(&format!("reality-{}", FINGERPRINTS[0])).unwrap().clone();
+    let quic = Destination::from(SocketAddr::new(uecho.ip(), 443));
+    if vision.connect_udp(&quic).await.is_ok() {
+        failures.push("Vision carried UDP/443".into());
+    }
     assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
 }
 
