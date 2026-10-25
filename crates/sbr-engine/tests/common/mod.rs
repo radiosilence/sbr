@@ -42,6 +42,11 @@ pub async fn udp_echo() -> SocketAddr {
 }
 
 pub async fn start(json: &str) -> Instance {
+    if std::env::var_os("SBR_TEST_LOG").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("debug"))
+            .try_init();
+    }
     let o = Options::parse(json).unwrap();
     Instance::start(&o, Settings::default()).await.unwrap()
 }
@@ -238,4 +243,51 @@ pub async fn bulk_echo(s: TcpStream, len: usize) {
         .unwrap();
     let _w = writer.await.unwrap();
     assert!(got == expect, "bulk echo of {len} bytes differs");
+}
+
+/// A self-signed certificate for `localhost`: (cert PEM, key PEM).
+pub fn self_signed() -> (String, String) {
+    let c = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    (c.cert.pem(), c.signing_key.serialize_pem())
+}
+
+/// A TLS server (TLS 1.2 and 1.3) that completes handshakes and then
+/// drains whatever it gets: the camouflage server for ShadowTLS.
+pub async fn tls_sink(cert_pem: &str, key_pem: &str) -> SocketAddr {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let certs = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).unwrap();
+    let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let cfg = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(cfg));
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (s, _) = l.accept().await.unwrap();
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                if let Ok(mut t) = acceptor.accept(s).await {
+                    let mut buf = [0u8; 4096];
+                    while matches!(t.read(&mut buf).await, Ok(n) if n > 0) {}
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// Write `s` to a fresh temp file; returns its path.
+pub fn temp_file(name: &str, s: &str) -> PathBuf {
+    let p = std::env::temp_dir().join(format!("sbr-test-{}-{}-{name}", std::process::id(), free_port()));
+    std::fs::write(&p, s).unwrap();
+    p
 }

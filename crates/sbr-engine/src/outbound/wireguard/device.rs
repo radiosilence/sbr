@@ -86,6 +86,9 @@ impl Device {
         let mut last_traffic = Instant::now() - ACTIVE_WINDOW;
         let mut last_tick = Instant::now();
 
+        let dbg_on = std::env::var_os("SBR_WG_DEBUG").is_some();
+        let mut dbg_stats: (usize, usize, usize, usize, usize, usize) = Default::default();
+        let mut dbg_last = Instant::now();
         loop {
             // 1. Ingress: everything queued on the socket, without blocking.
             let received = io
@@ -117,6 +120,18 @@ impl Device {
 
             // 3. Egress.
             let sent = tx_out.len();
+            // DEBUG-STATS
+            dbg_stats.0 += 1;
+            dbg_stats.1 += received;
+            dbg_stats.2 += sent;
+            if dbg_on && dbg_last.elapsed() >= Duration::from_secs(1) {
+                eprintln!(
+                    "wg: loops {} rx {} tx {} wakes(kick {} sock {} timer {})",
+                    dbg_stats.0, dbg_stats.1, dbg_stats.2, dbg_stats.3, dbg_stats.4, dbg_stats.5
+                );
+                dbg_stats = Default::default();
+                dbg_last = Instant::now();
+            }
             if sent > 0 || received > 0 {
                 let now = Instant::now();
                 if now.duration_since(last_traffic) >= ACTIVE_WINDOW {
@@ -170,9 +185,9 @@ impl Device {
             };
             tokio::select! {
                 biased;
-                _ = shared.kick.notified() => {}
-                r = transport.ready() => if r.is_err() { return },
-                _ = sleep => {}
+                _ = shared.kick.notified() => { dbg_stats.3 += 1; }
+                r = transport.ready() => { dbg_stats.4 += 1; if r.is_err() { return } },
+                _ = sleep => { dbg_stats.5 += 1; }
             }
         }
     }

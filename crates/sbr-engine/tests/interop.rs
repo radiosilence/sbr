@@ -174,3 +174,104 @@ async fn wireguard_vs_sing_box() {
     )
     .await;
 }
+
+/// shadowsocks → detour shadowtls (v1/v2/v3) → sing-box shadowtls → ss.
+#[tokio::test]
+async fn shadowtls_with_shadowsocks_vs_sing_box() {
+    let bin = need_sing_box!();
+    let (cert, key) = self_signed();
+    let camouflage = tls_sink(&cert, &key).await;
+    let method = "2022-blake3-aes-128-gcm";
+    for version in [3, 2, 1] {
+        let p = free_port();
+        let auth = match version {
+            3 => r#""users":[{"name":"u","password":"shadow-pw"}],"#,
+            2 => r#""password":"shadow-pw","#,
+            _ => "",
+        };
+        let server = format!(
+            r#"{{"log":{{"level":"warn"}},
+            "inbounds":[
+                {{"type":"shadowtls","listen":"127.0.0.1","listen_port":{p},"version":{version},{auth}
+                  "handshake":{{"server":"127.0.0.1","server_port":{}}},"detour":"ss-in"}},
+                {{"type":"shadowsocks","tag":"ss-in","listen":"127.0.0.1","method":"{method}","password":"{SS_KEY}"}}
+            ],
+            "outbounds":[{{"type":"direct"}}]}}"#,
+            camouflage.port()
+        );
+        let _sb = SingBox::start(&bin, &server, Some(p)).await;
+        let password = if version == 1 { "" } else { r#","password":"shadow-pw""# };
+        // v2 hashes the camouflage server's whole flight; TLS 1.3 session
+        // tickets sent after Finished race with that (in sing-box too).
+        let max = if version == 2 { r#","max_version":"1.2""# } else { "" };
+        let sbr = start(&format!(
+            r#"{{"inbounds":[{{"type":"mixed","tag":"in","listen":"127.0.0.1","listen_port":0}}],
+            "outbounds":[
+                {{"type":"shadowsocks","tag":"ss","server":"127.0.0.1","server_port":{p},"method":"{method}","password":"{SS_KEY}","detour":"st"}},
+                {{"type":"shadowtls","tag":"st","server":"127.0.0.1","server_port":{p},"version":{version}{password},
+                  "tls":{{"enabled":true,"server_name":"localhost","insecure":true{max}}}}}
+            ]}}"#
+        ))
+        .await;
+        let s = socks_connect(port(&sbr, "in"), echo().await).await;
+        bulk_echo(s, 1 << 20).await;
+        let s = socks_connect(port(&sbr, "in"), echo().await).await;
+        bulk_echo(s, 3000).await;
+    }
+}
+
+#[tokio::test]
+async fn anytls_vs_sing_box() {
+    let bin = need_sing_box!();
+    let (cert, key) = self_signed();
+    let (cert_path, key_path) = (temp_file("cert.pem", &cert), temp_file("key.pem", &key));
+    let p = free_port();
+    let server = format!(
+        r#"{{"log":{{"level":"warn"}},
+        "inbounds":[{{"type":"anytls","listen":"127.0.0.1","listen_port":{p},"users":[{{"name":"u","password":"any-pw"}}],
+            "tls":{{"enabled":true,"certificate_path":{:?},"key_path":{:?}}}}}],
+        "outbounds":[{{"type":"direct"}}]}}"#,
+        cert_path.to_str().unwrap(),
+        key_path.to_str().unwrap()
+    );
+    let _sb = SingBox::start(&bin, &server, Some(p)).await;
+    let cert_json = serde_json_string(&cert);
+    let sbr = start(&format!(
+        r#"{{"inbounds":[{{"type":"mixed","tag":"in","listen":"127.0.0.1","listen_port":0}}],
+        "outbounds":[{{"type":"anytls","tag":"a","server":"127.0.0.1","server_port":{p},"password":"any-pw",
+            "tls":{{"enabled":true,"server_name":"localhost","certificate":{cert_json}}}}}]}}"#
+    ))
+    .await;
+    let target = echo().await;
+    // Sequential streams reuse the idle session; concurrent ones share or add sessions.
+    for _ in 0..3 {
+        let s = socks_connect(port(&sbr, "in"), target).await;
+        bulk_echo(s, 1 << 20).await;
+    }
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        let s = socks_connect(port(&sbr, "in"), target).await;
+        set.spawn(bulk_echo(s, 512 * 1024));
+    }
+    while let Some(r) = set.join_next().await {
+        r.unwrap();
+    }
+    // UDP rides UoT v2 over a stream.
+    let udp = SocksUdp::new(port(&sbr, "in")).await;
+    udp.echo_check(udp_echo().await, &[1, 1400, 8000]).await;
+    let _ = std::fs::remove_file(cert_path);
+    let _ = std::fs::remove_file(key_path);
+}
+
+fn serde_json_string(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '"' => out.push_str("\\\""),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}

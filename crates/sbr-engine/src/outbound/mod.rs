@@ -1,11 +1,14 @@
 //! Outbound registry. Each protocol lives in its own module and registers in
 //! `build_one`; protocol modules only depend on `BuildContext` and `Upstream`.
 
+mod anytls;
 mod direct;
 mod group;
 mod http;
 mod shadowsocks;
+mod shadowtls;
 mod socks;
+mod tlsmini;
 mod uot;
 mod wireguard;
 
@@ -140,9 +143,10 @@ impl Builder<'_> {
             OutboundKind::WireGuard(w) => Arc::new(
                 wireguard::WireGuard::new(tag, w, self.upstream(&w.dial)?, self.ctx.dns.clone()).map_err(invalid)?,
             ),
-            OutboundKind::ShadowTls(_) | OutboundKind::AnyTls(_) => {
-                return Err(invalid("not implemented yet".into()));
+            OutboundKind::ShadowTls(s) => {
+                Arc::new(shadowtls::ShadowTls::new(tag, s, self.upstream(&s.dial)?).map_err(invalid)?)
             }
+            OutboundKind::AnyTls(a) => Arc::new(anytls::AnyTls::new(tag, a, self.upstream(&a.dial)?).map_err(invalid)?),
             OutboundKind::UrlTest(g) => {
                 // No latency probing yet: behaves as a selector pinned to the first member.
                 let members = g.outbounds.iter().map(|t| self.dep(t)).collect::<Result<Vec<_>, _>>()?;

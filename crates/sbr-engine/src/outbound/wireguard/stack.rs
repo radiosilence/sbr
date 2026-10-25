@@ -240,6 +240,7 @@ impl Stack {
             tcp::SocketBuffer::new(vec![0; TCP_BUFFER]),
         );
         s.set_nagle_enabled(false);
+        s.set_congestion_control(tcp::CongestionControl::Cubic);
         // Abort if the peer stops acknowledging (dead tunnel), instead of
         // retransmitting forever.
         s.set_timeout(Some(smoltcp::time::Duration::from_secs(120)));
