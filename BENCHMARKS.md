@@ -100,3 +100,32 @@ runtime (the iOS default) and `t0` the multi-thread default.
   about half sing-box's CPU per byte.
 - iOS keeps the current-thread runtime. One thread sustains about 2 Gbit/s at
   the lowest CPU per byte, more than a phone's uplink. See `apple/README.md`.
+
+## XHTTP against VLESS + REALITY + Vision (macOS)
+
+Run 2026-10-25 on an Apple M1 Pro (8 cores, shared with other builds),
+loopback, one Xray-core 26.10.21 process serving both inbounds over REALITY;
+sbr is the client in-process. 4 streams × 5 s, three rounds back to back,
+min–max. Gbit/s, then client CPU-seconds per GB. Traffic inside the tunnel
+is plain TCP.
+
+| path | up | up CPU/GB | down | down CPU/GB |
+|---|---|---|---|---|
+| vless + reality + vision | 21.0–25.0 | 0.58–0.69 | 21.7–27.1 | 0.51–0.56 |
+| xhttp stream-one (h2) | 9.8–11.4 | 1.19–1.57 | 7.3–14.8 | 0.97–1.12 |
+| xhttp stream-up (h2) | 8.3–12.7 | 1.05–1.17 | 5.0–9.6 | 1.06–1.53 |
+| xhttp packet-up (h2) | 0.99 | 1.10–1.33 | 8.6–9.7 | 1.09–1.35 |
+
+- XHTTP over HTTP/2 moves 40–55% of Vision's bytes per second and costs about
+  twice the client CPU per byte: every byte passes through HTTP/2 framing and
+  flow control on both ends, where Vision, after its padded first packets, is
+  VLESS inside one TLS stream.
+- packet-up upload is capped by the protocol defaults, not by sbr: each
+  connection sends at most one `scMaxEachPostBytes` (1 MB) POST per
+  `scMinPostsIntervalMs` (30 ms), about 33 MB/s, and four streams give 1 Gbit/s.
+  Xray's client has the same cap. Raise the interval or the POST size on both
+  ends where upload speed matters more than looking like ordinary requests.
+- On a phone uplink none of these rates is the limit; the cost that matters is
+  the doubled CPU per byte.
+
+Reproduce: `xhttp_bench <xray> 4 5 3`.
