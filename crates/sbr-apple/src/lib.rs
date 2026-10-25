@@ -438,7 +438,19 @@ pub unsafe extern "C" fn sbr_select(instance: *mut SbrInstance, group: *const c_
         }) else {
             return 0;
         };
-        e.outbound(g).and_then(|o| o.as_group()).is_some_and(|s| s.select(m)) as i32
+        let Some(group) = e.outbound(g).and_then(|o| o.as_group()) else {
+            return 0;
+        };
+        let before = group.selected().tag().to_owned();
+        if !group.select(m) {
+            return 0;
+        }
+        // A choice made by hand should take effect now, not when apps next
+        // open a connection: close what still runs through the old member.
+        if before != m {
+            e.tracker.close_through(g);
+        }
+        1
     })
 }
 

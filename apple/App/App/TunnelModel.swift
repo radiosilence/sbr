@@ -38,9 +38,10 @@ final class TunnelModel: ObservableObject {
     }
 
     /// Debug-level engine logs in the logs tab, for diagnosing a profile.
-    /// Run the tunnel on sbr's userspace TCP stack instead of the kernel's.
-    /// Applied by reconnecting.
-    @Published var userspaceTCP = UserDefaults.standard.bool(forKey: "userspaceTCP") {
+    /// Run the tunnel on sbr's userspace TCP stack (the default) rather than
+    /// the kernel's, which iOS stops under sustained load. Applied by
+    /// reconnecting.
+    @Published var userspaceTCP = UserDefaults.standard.object(forKey: "userspaceTCP") as? Bool ?? true {
         didSet {
             UserDefaults.standard.set(userspaceTCP, forKey: "userspaceTCP")
             Task {
@@ -281,7 +282,7 @@ final class TunnelModel: ObservableObject {
         var pc: [String: Any] = [SbrProviderKey.config: config]
         if let remote { pc[SbrProviderKey.remote] = try JSONEncoder().encode(remote) }
         if let logLevel { pc[SbrProviderKey.logLevel] = logLevel }
-        if userspaceTCP { pc[SbrProviderKey.tunStack] = "gvisor" }
+        pc[SbrProviderKey.tunStack] = userspaceTCP ? "gvisor" : "system"
         proto.providerConfiguration = pc
         Sbr.applyLeakProtection(to: proto, enabled: strict)
         m.protocolConfiguration = proto

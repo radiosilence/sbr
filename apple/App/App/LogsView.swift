@@ -27,7 +27,7 @@ struct LogsView: View {
                 Toggle(isOn: $tunnel.userspaceTCP) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("userspace tcp").font(.sbr(.control))
-                        Text("experimental. sbr's own tcp stack instead of the kernel's; reconnects.")
+                        Text("sbr's own tcp stack. off uses the kernel's, which ios stops under heavy load. reconnects.")
                             .font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
                     }
                 }
