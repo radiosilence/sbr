@@ -145,7 +145,7 @@ impl Apps {
 
     fn send_raw(&self, pkt: &[u8]) {
         let mut b = vec![0u8; AF];
-        if AF > 0 {
+        if cfg!(target_vendor = "apple") {
             b[..4].copy_from_slice(&(libc::AF_INET as u32).to_be_bytes());
         }
         b.extend_from_slice(pkt);
