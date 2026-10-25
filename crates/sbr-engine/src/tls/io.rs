@@ -36,7 +36,7 @@ pub struct TlsIo {
     /// fragmenter wait for ACKs instead of sleeping blindly.
     fd: Option<i32>,
     frag: Option<Fragmenter>,
-    records: Option<RecordReader>,
+    reader: RecordReader,
 }
 
 impl TlsIo {
@@ -45,28 +45,30 @@ impl TlsIo {
             inner,
             fd,
             frag: frag.map(|opts| Fragmenter { opts, plan: None }),
-            records: None,
+            reader: RecordReader::default(),
         }
     }
 
     /// Hand rustls whole TLS records only (see the module docs).
     pub fn limit_to_records(&mut self) {
-        self.records.get_or_insert_with(RecordReader::default);
+        self.reader.limit = true;
     }
 
     /// Stop limiting reads; buffered bytes are still delivered first.
     pub fn unlimit(&mut self) {
-        if let Some(r) = &mut self.records {
-            r.passthrough = true;
-        }
+        self.reader.limit = false;
     }
 
-    /// Bytes read from the wire but not yet handed to rustls.
+    /// Bytes read from the wire but not yet handed to rustls. Reads go
+    /// straight to the wire afterwards.
     pub fn take_raw(&mut self) -> Vec<u8> {
-        match self.records.take() {
-            Some(r) => r.buf[r.pos..].to_vec(),
-            None => Vec::new(),
-        }
+        let r = &mut self.reader;
+        let out = r.buf[r.pos..r.end].to_vec();
+        *r = RecordReader {
+            bypass: true,
+            ..RecordReader::default()
+        };
+        out
     }
 
     /// The dialed stream, bypassing TLS (Vision direct mode).
@@ -78,10 +80,7 @@ impl TlsIo {
 impl AsyncRead for TlsIo {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, out: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        match &mut this.records {
-            None => Pin::new(&mut this.inner).poll_read(cx, out),
-            Some(r) => r.poll_read(&mut this.inner, cx, out),
-        }
+        this.reader.poll_read(&mut this.inner, cx, out)
     }
 }
 
@@ -123,22 +122,32 @@ impl AsyncWrite for TlsIo {
     }
 }
 
+/// Read-ahead under rustls. rustls pulls ciphertext 4 KiB at a time; one
+/// large socket read per TLS record instead of four is a measurable win for
+/// bulk transfers. In `limit` mode it also stops at record boundaries.
 #[derive(Default)]
 struct RecordReader {
-    buf: Vec<u8>,
+    buf: Box<[u8]>,
     pos: usize,
+    end: usize,
     /// Bytes left in the record being handed out; 0 = at a record header.
     left: usize,
-    passthrough: bool,
+    limit: bool,
     /// A record was just completed: report `WouldBlock` once.
     gate: bool,
+    /// Vision went direct: no buffering at all.
+    bypass: bool,
 }
 
-const RECORD_READ: usize = 32 * 1024;
+/// One maximal TLS record (16 KiB + 256 + header) fits.
+const READ_AHEAD: usize = 20 * 1024;
 
 impl RecordReader {
     fn poll_read(&mut self, inner: &mut Stream, cx: &mut Context<'_>, out: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
-        if self.gate && !self.passthrough {
+        if self.bypass {
+            return Pin::new(inner).poll_read(cx, out);
+        }
+        if self.gate && self.limit {
             // One record per wakeup: tokio-rustls keeps calling `read_tls`
             // within one poll, so a record boundary has to look like
             // `WouldBlock` to stop it there. Wake ourselves to continue.
@@ -147,54 +156,53 @@ impl RecordReader {
             return Poll::Pending;
         }
         loop {
-            let avail = self.buf.len() - self.pos;
-            if self.passthrough && avail == 0 {
-                return Pin::new(inner).poll_read(cx, out);
-            }
-            if avail > 0 && (self.passthrough || self.left > 0 || avail >= 5) {
-                if !self.passthrough && self.left == 0 {
-                    let h = &self.buf[self.pos..];
-                    self.left = 5 + u16::from_be_bytes([h[3], h[4]]) as usize;
-                }
+            let avail = self.end - self.pos;
+            if avail > 0 && (!self.limit || self.left > 0 || avail >= 5) {
                 let mut n = avail.min(out.remaining());
-                if !self.passthrough {
+                if self.limit {
+                    if self.left == 0 {
+                        let h = &self.buf[self.pos..];
+                        self.left = 5 + u16::from_be_bytes([h[3], h[4]]) as usize;
+                    }
                     n = n.min(self.left);
                     self.left -= n;
                     self.gate = self.left == 0;
+                } else {
+                    self.left = self.left.saturating_sub(n);
                 }
                 out.put_slice(&self.buf[self.pos..self.pos + n]);
                 self.pos += n;
-                if self.pos == self.buf.len() {
-                    self.buf.clear();
+                if self.pos == self.end {
                     self.pos = 0;
+                    self.end = 0;
                 }
                 return Poll::Ready(Ok(()));
             }
+            if avail == 0 && !self.limit && out.remaining() >= READ_AHEAD {
+                return Pin::new(inner).poll_read(cx, out);
+            }
             // Need more bytes from the wire.
+            if self.buf.is_empty() {
+                self.buf = vec![0u8; READ_AHEAD].into_boxed_slice();
+            }
             if self.pos > 0 {
-                self.buf.drain(..self.pos);
+                self.buf.copy_within(self.pos..self.end, 0);
+                self.end -= self.pos;
                 self.pos = 0;
             }
-            let start = self.buf.len();
-            self.buf.resize(start + RECORD_READ, 0);
-            let mut rb = ReadBuf::new(&mut self.buf[start..]);
-            let r = Pin::new(&mut *inner).poll_read(cx, &mut rb);
+            let mut rb = ReadBuf::new(&mut self.buf[self.end..]);
+            ready!(Pin::new(&mut *inner).poll_read(cx, &mut rb))?;
             let n = rb.filled().len();
-            self.buf.truncate(start + n);
-            match r {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(())) if n == 0 => {
-                    // EOF: hand out whatever is left (rustls will report a
-                    // truncated record if it was mid-record).
-                    if self.buf.len() > self.pos {
-                        self.passthrough = true;
-                        continue;
-                    }
-                    return Poll::Ready(Ok(()));
+            if n == 0 {
+                // EOF: hand out whatever is left (rustls reports a truncated
+                // record if it was mid-record).
+                if self.end > self.pos {
+                    self.limit = false;
+                    continue;
                 }
-                Poll::Ready(Ok(())) => {}
+                return Poll::Ready(Ok(()));
             }
+            self.end += n;
         }
     }
 }
