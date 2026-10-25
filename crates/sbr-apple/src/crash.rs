@@ -33,7 +33,7 @@ pub fn install(path: &str) -> io::Result<()> {
         for sig in [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGFPE, libc::SIGABRT] {
             // SAFETY: installing a handler that only calls async-signal-safe
             // functions (write, signal, raise).
-            unsafe { libc::signal(sig, on_signal as libc::sighandler_t) };
+            unsafe { libc::signal(sig, on_signal as *const () as libc::sighandler_t) };
         }
     });
     Ok(())
