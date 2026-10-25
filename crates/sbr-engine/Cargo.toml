@@ -15,6 +15,7 @@ base64.workspace = true
 bytes.workspace = true
 httparse = "1.10"
 shadowsocks = { version = "1.25", default-features = false, features = ["aead-cipher", "aead-cipher-2022", "aead-cipher-extra"] }
+aws-lc-rs = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

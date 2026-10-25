@@ -6,6 +6,7 @@ mod group;
 mod http;
 mod shadowsocks;
 mod socks;
+mod uot;
 
 use std::collections::HashMap;
 use std::io;
@@ -124,7 +125,9 @@ impl Builder<'_> {
                 Arc::new(direct::Direct::new(tag, d, self.ctx))
             }
             OutboundKind::Block => Arc::new(direct::Block { tag }),
-            OutboundKind::Socks(s) => Arc::new(socks::Socks::new(tag, s, self.upstream(&s.dial)?)),
+            OutboundKind::Socks(s) => {
+                Arc::new(socks::Socks::new(tag, s, self.upstream(&s.dial)?, self.ctx.dns.clone()))
+            }
             OutboundKind::Http(h) => Arc::new(http::HttpConnect::new(tag, h, self.upstream(&h.dial)?)),
             OutboundKind::Shadowsocks(s) => {
                 Arc::new(shadowsocks::Shadowsocks::new(tag, s, self.upstream(&s.dial)?).map_err(invalid)?)
@@ -132,6 +135,9 @@ impl Builder<'_> {
             OutboundKind::Selector(g) => {
                 let members = g.outbounds.iter().map(|t| self.dep(t)).collect::<Result<Vec<_>, _>>()?;
                 Arc::new(Selector::new(tag, "selector", members, g.default.as_deref()))
+            }
+            OutboundKind::ShadowTls(_) | OutboundKind::AnyTls(_) | OutboundKind::WireGuard(_) => {
+                return Err(invalid("not implemented yet".into()));
             }
             OutboundKind::UrlTest(g) => {
                 // No latency probing yet: behaves as a selector pinned to the first member.

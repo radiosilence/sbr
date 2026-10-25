@@ -8,9 +8,11 @@
 //! are accepted and reported in [`Options::warnings`].
 
 mod obj;
+mod proxies;
 mod route;
 mod tls;
 pub mod types;
+mod wireguard;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
@@ -18,8 +20,10 @@ use std::time::Duration;
 use obj::{Diag, Obj};
 use serde_json::Value;
 
+pub use proxies::{AnyTlsOutbound, ShadowTlsOutbound, UdpOverTcp};
 pub use route::*;
 pub use tls::{Ech, Multiplex, Reality, TlsOutbound, Transport, Utls};
+pub use wireguard::{WIREGUARD_DEFAULT_MTU, WireGuardEndpoint, WireGuardPeer};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -137,6 +141,11 @@ pub enum OutboundKind {
     Shadowsocks(ShadowsocksOutbound),
     Selector(Selector),
     UrlTest(UrlTest),
+    ShadowTls(ShadowTlsOutbound),
+    AnyTls(AnyTlsOutbound),
+    /// From `endpoints[]`; endpoints share the outbound tag namespace and
+    /// are appended after the outbounds.
+    WireGuard(Box<WireGuardEndpoint>),
 }
 
 impl OutboundKind {
@@ -149,6 +158,9 @@ impl OutboundKind {
             Self::Shadowsocks(_) => "shadowsocks",
             Self::Selector(_) => "selector",
             Self::UrlTest(_) => "urltest",
+            Self::ShadowTls(_) => "shadowtls",
+            Self::AnyTls(_) => "anytls",
+            Self::WireGuard(_) => "wireguard",
         }
     }
 }
@@ -189,6 +201,9 @@ pub struct SocksOutbound {
     pub version: String,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// `None`: TCP and UDP.
+    pub network: Option<Network>,
+    pub udp_over_tcp: Option<UdpOverTcp>,
 }
 
 #[derive(Debug, Clone)]
@@ -207,7 +222,9 @@ pub struct ShadowsocksOutbound {
     pub dial: Dial,
     pub method: String,
     pub password: String,
+    /// `None`: TCP and UDP.
     pub network: Option<Network>,
+    pub udp_over_tcp: Option<UdpOverTcp>,
 }
 
 #[derive(Debug, Clone)]
@@ -268,7 +285,6 @@ impl Options {
             exp.finish()?;
         }
         for key in [
-            "endpoints",
             "services",
             "certificate",
             "certificate_providers",
@@ -295,6 +311,12 @@ impl Options {
             .map(|(i, v)| parse_outbound(Obj::new(v, format!("outbounds[{i}]"))?, i, &mut diag))
             .collect::<Result<Vec<_>>>()?;
 
+        let endpoints = array(root.raw("endpoints"), "endpoints")?
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| parse_endpoint(Obj::new(v, format!("endpoints[{i}]"))?, i, &mut diag))
+            .collect::<Result<Vec<_>>>()?;
+
         let route = match root.raw("route") {
             Some(v) => route::parse_route(Obj::new(v, "route")?, &mut diag)?,
             None => RouteOptions::default(),
@@ -308,6 +330,9 @@ impl Options {
                 kind: OutboundKind::Direct(Dial::default()),
             });
         }
+        // After the implicit direct: like sing-box, endpoints never become
+        // the default outbound.
+        outbounds.extend(endpoints);
 
         let options = Options {
             log,
@@ -359,6 +384,9 @@ impl Options {
                 OutboundKind::Socks(s) => Some(&s.dial),
                 OutboundKind::Http(s) => Some(&s.dial),
                 OutboundKind::Shadowsocks(s) => Some(&s.dial),
+                OutboundKind::ShadowTls(s) => Some(&s.dial),
+                OutboundKind::AnyTls(s) => Some(&s.dial),
+                OutboundKind::WireGuard(w) => Some(&w.dial),
                 OutboundKind::Selector(g) => {
                     for t in &g.outbounds {
                         need(format!("{path}.outbounds"), t)?;
@@ -535,7 +563,7 @@ fn parse_inbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Inbound> {
     Ok(Inbound { tag, kind })
 }
 
-fn prefixes(o: &mut Obj, key: &str) -> Result<Vec<ipnet::IpNet>> {
+pub(crate) fn prefixes(o: &mut Obj, key: &str) -> Result<Vec<ipnet::IpNet>> {
     let path = o.sub(key);
     o.list::<String>(key)?
         .into_iter()
@@ -698,20 +726,16 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
             if !["4", "4a", "5"].contains(&version.as_str()) {
                 return Err(Error::at(&o.sub("version"), format!("unknown version {version:?}")));
             }
-            if version != "5" {
-                return Err(Error::at(&o.sub("version"), "only SOCKS5 is supported by sbr yet"));
-            }
-            if let Some(n) = o.opt::<String>("network")?
-                && n == "udp"
-            {
-                return Err(Error::at(&o.sub("network"), "UDP not supported by sbr yet"));
-            }
+            let network = proxies::parse_network_list(&mut o, "network")?;
+            let udp_over_tcp = proxies::parse_uot(&mut o, "udp_over_tcp")?;
             OutboundKind::Socks(SocksOutbound {
                 server,
                 dial,
                 version,
                 username: o.string("username")?,
                 password: o.string("password")?,
+                network,
+                udp_over_tcp,
             })
         }
         "http" => {
@@ -742,14 +766,9 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
             let dial = parse_dial(&mut o, diag)?;
             let method: String = o.req("method")?;
             let password = o.string("password")?.unwrap_or_default();
-            let network = match o.string("network")? {
-                None => None,
-                Some(n) => Some(
-                    serde_json::from_value(Value::String(n))
-                        .map_err(|e| Error::at(&o.sub("network"), e.to_string()))?,
-                ),
-            };
-            for k in ["plugin", "plugin_opts", "udp_over_tcp", "multiplex"] {
+            let network = proxies::parse_network_list(&mut o, "network")?;
+            let udp_over_tcp = proxies::parse_uot(&mut o, "udp_over_tcp")?;
+            for k in ["plugin", "plugin_opts", "multiplex"] {
                 if o.has(k) {
                     return Err(Error::at(&o.sub(k), "not supported by sbr yet"));
                 }
@@ -760,7 +779,16 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
                 method,
                 password,
                 network,
+                udp_over_tcp,
             })
+        }
+        "shadowtls" => OutboundKind::ShadowTls(proxies::parse_shadowtls(&mut o, diag)?),
+        "anytls" => OutboundKind::AnyTls(proxies::parse_anytls(&mut o, diag)?),
+        "wireguard" => {
+            return Err(Error::at(
+                &o.sub("type"),
+                "WireGuard outbound is deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0, use WireGuard endpoint instead",
+            ));
         }
         "selector" => OutboundKind::Selector(Selector {
             outbounds: nonempty(o.req("outbounds")?, &o.sub("outbounds"))?,
@@ -799,4 +827,20 @@ fn json_str(v: Value) -> String {
         Value::String(s) => s,
         other => other.to_string(),
     }
+}
+
+fn parse_endpoint(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
+    let ty: String = o.req("type")?;
+    let tag = tag_or_index(&mut o, i)?;
+    let kind = match ty.as_str() {
+        "wireguard" => OutboundKind::WireGuard(Box::new(wireguard::parse_wireguard(&mut o, diag)?)),
+        other => {
+            return Err(Error::at(
+                &o.sub("type"),
+                format!("endpoint type {other:?} not supported by sbr yet"),
+            ));
+        }
+    };
+    o.finish()?;
+    Ok(Outbound { tag, kind })
 }
