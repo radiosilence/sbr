@@ -146,6 +146,21 @@ impl Stack {
     /// sender. Drops (rather than blocks) when the interface is congested.
     /// Datagrams larger than the MTU are fragmented, as the sending host
     /// would; this applies to IPv6 too, since sbr is that source.
+    /// Tell `client` its UDP flow to `remote` can't be carried (ICMP port
+    /// unreachable), so it fails fast instead of timing out.
+    pub fn write_udp_unreachable(&self, remote: SocketAddr, client: SocketAddr) -> io::Result<()> {
+        if remote.is_ipv4() != client.is_ipv4() {
+            return Ok(());
+        }
+        UDP_BUF.with(|b| {
+            let mut b = b.borrow_mut();
+            let pkt = &mut b.0;
+            packet::build_udp_unreachable(pkt, remote, client);
+            pkt.splice(0..0, [0u8; HEADROOM]);
+            try_send(&self.device, pkt)
+        })
+    }
+
     pub fn write_udp(&self, from: SocketAddr, to: SocketAddr, payload: &[u8]) -> io::Result<()> {
         // The IP and UDP length fields are 16 bits; a larger payload (a big
         // DNS answer, a UDP-over-stream frame) would wrap them.

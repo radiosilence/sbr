@@ -65,6 +65,13 @@ impl UdpWriteBack for TunBack {
         }
         stack.write_udp(from, to, payload)
     }
+
+    fn unreachable(&self, from: &Destination, to: SocketAddr) {
+        let (Some(stack), Host::Ip(ip)) = (self.stack.get().and_then(Weak::upgrade), &from.host) else {
+            return;
+        };
+        let _ = stack.write_udp_unreachable(SocketAddr::new(ip.to_canonical(), from.port), to);
+    }
 }
 
 /// Default routes split in halves so they win over the existing default

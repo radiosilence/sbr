@@ -38,6 +38,10 @@ const MAX_DNS_INFLIGHT: usize = 128;
 pub trait UdpWriteBack: Send + Sync + 'static {
     /// Send `payload` to client `to`, appearing to come from `from`.
     fn write_back(&self, payload: &[u8], from: &Destination, to: SocketAddr) -> io::Result<()>;
+
+    /// Tell client `to` that its flow to `from` can't be carried. Packet
+    /// inbounds that can (TUN, via ICMP) make the client fail fast.
+    fn unreachable(&self, _from: &Destination, _to: SocketAddr) {}
 }
 
 pub struct UdpPacket {
@@ -258,10 +262,10 @@ impl Engine {
             }
             Action::Reject { .. } => {
                 debug!(source = %source, dest = %meta.destination, "udp rejected");
-                while tokio::time::timeout(UDP_TIMEOUT, rx.recv())
-                    .await
-                    .is_ok_and(|p| p.is_some())
-                {}
+                back.unreachable(&meta.destination, source);
+                while let Ok(Some(p)) = tokio::time::timeout(UDP_TIMEOUT, rx.recv()).await {
+                    back.unreachable(&p.0, source);
+                }
                 Ok(())
             }
             Action::Route { outbound, options } => {
@@ -273,6 +277,7 @@ impl Engine {
                     Ok(c) => Arc::from(c),
                     Err(e) => {
                         warn!(dest = %first_dest, outbound = out.tag(), error = %e, "udp connect failed");
+                        back.unreachable(&meta.destination, source);
                         return Err(e);
                     }
                 };
