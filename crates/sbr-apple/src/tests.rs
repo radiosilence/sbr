@@ -369,7 +369,9 @@ fn profile_fetch_goes_through_routing_without_identifying_headers() {
     unsafe { sbr_stop(i) };
 }
 
-type Sent = std::sync::mpsc::Sender<(Option<String>, Option<String>)>;
+/// What the fetch callback got: the profile, or the error.
+type Outcome = (Option<String>, Option<String>);
+type Sent = std::sync::mpsc::Sender<Outcome>;
 
 unsafe extern "C" fn fetched(ctx: *mut c_void, profile: *const c_char, error: *const c_char) {
     let tx = unsafe { Box::from_raw(ctx.cast::<Sent>()) };
@@ -377,7 +379,7 @@ unsafe extern "C" fn fetched(ctx: *mut c_void, profile: *const c_char, error: *c
     tx.send((s(profile), s(error))).unwrap();
 }
 
-fn fetch_abi(i: *mut SbrInstance, url: &str) -> (i32, std::sync::mpsc::Receiver<(Option<String>, Option<String>)>) {
+fn fetch_abi(i: *mut SbrInstance, url: &str) -> (i32, std::sync::mpsc::Receiver<Outcome>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
     let started = unsafe { sbr_fetch_profile(i, c(url).as_ptr(), Some(fetched), ctx) };
