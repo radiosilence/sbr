@@ -65,7 +65,7 @@ jobs:
           cache-on-failure: true
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
   # The same on macOS, where the code behind `target_vendor = "apple"` compiles,
   # and with sing-box, Xray and apernet hysteria2 installed so the interop
@@ -109,7 +109,7 @@ jobs:
           "$bin/hysteria" version | grep -i '^version' || true
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
   # The xcframework for every Apple platform the app ships on, then the app
   # against it, unsigned. Main keeps the xcframework for TestFlight, so CD
