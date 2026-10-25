@@ -28,3 +28,36 @@ Takeaways:
 Reproduce: `cargo build --release -p sbr-engine --examples`, then
 `throughput 4 5 <sb>`, `tun_bench 4 5 <sb>` (root), `proxy_bench <sb> 4 5`,
 `quic_throughput <sb> 4 5`, `wg_throughput <sb> 4 5`.
+
+## Against the servers jaritanet runs (macOS)
+
+Run 2026-10-25 on an Apple M1 Pro (8 cores, macOS), loopback, against
+Xray-core 26.10.21 and apernet hysteria 2.13.0 with jaritanet-shaped configs;
+the clients are sbr and Homebrew sing-box 1.14.4 with the same config file.
+4 streams × 5 s, three rounds back to back, min–max. Gbit/s, then client
+CPU-seconds per GB.
+
+| path | sbr | sing-box |
+|---|---|---|
+| REALITY + Vision, plain inner, up / down | 20.0–20.6, 0.52 / 17.5–18.4, 0.99 | refused |
+| REALITY + Vision, TLS inner, up / down | 19.7–23.0, 0.28 / 12.6–15.8, 0.55–0.72 | refused |
+| TLS + Vision, plain inner, up | 20.1–20.5, 0.45 | 18.6–18.9, 0.72 |
+| TLS + Vision, plain inner, down | 20.8–21.5, 0.65 | 16.9–17.7, 1.05 |
+| TLS + Vision, TLS inner, up | 17.4–28.1, 0.27–0.30 | 18.3–22.2, 0.28 |
+| TLS + Vision, TLS inner, down | 11.5–20.5, 0.39–0.54 | 3.4–14.1, 0.74–1.96 |
+| hysteria2 (salamander), up | 0.86–0.88, 12.6–12.8 | 1.25–1.32, 9.6–10.3 |
+| hysteria2 (salamander), down | 0.88–0.92, 15.6–16.3 | 0.94–0.99, 16.3–16.9 |
+
+- sing-box strips X25519MLKEM768 from its REALITY ClientHello, which
+  XTLS/REALITY servers have refused since 2026-09-08, so it cannot use the
+  REALITY inbound at all. The TLS + Vision inbound (same Vision path, pinned
+  certificate) is where the two clients compare.
+- Vision: sbr is ahead or level everywhere and uses 35–40% less CPU per GB
+  on the padded path. The TLS-inner rows (direct copy) vary widely between
+  rounds for both clients on macOS loopback.
+- hysteria2 upload loses: about 32% less throughput and 25% more CPU per GB
+  than sing-box against the apernet server. On Linux against a sing-box
+  server the two were level; this needs profiling on Darwin (no UDP GSO
+  there, so per-datagram send cost and salamander dominate).
+
+Reproduce: `upstream_bench <xray> <hysteria> <sing-box> 4 5 3`.
