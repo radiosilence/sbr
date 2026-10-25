@@ -1,0 +1,140 @@
+# XcodeGen spec: `SBR_TEAM_ID=ABCDE12345 xcodegen generate` (see README.md).
+#
+# Targets
+#   SbrDemo                    iOS 15+, macOS 12+, tvOS 17+ app (SwiftUI)
+#   SbrTunnel                  its packet tunnel, as an app extension
+#                              (iOS, tvOS, and Mac App Store style on macOS)
+#   SbrDemoMac                 macOS Developer ID flavour of the same app ...
+#   SbrTunnelSystemExtension   ... shipping the tunnel as a system extension
+name: SbrDemo
+
+options:
+  createIntermediateGroups: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: ${SBR_TEAM_ID}
+    # Change to a bundle ID prefix you own; everything else derives from it.
+    SBR_BUNDLE_ID: io.sbr.demo
+    # App Groups: "group." IDs on iOS/tvOS, team-prefixed on macOS (which also
+    # lets the system extension's Mach service name live under it).
+    SBR_APP_GROUP: group.$(SBR_BUNDLE_ID)
+    "SBR_APP_GROUP[sdk=macosx*]": $(DEVELOPMENT_TEAM).$(SBR_BUNDLE_ID)
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEAD_CODE_STRIPPING: YES
+    CODE_SIGN_STYLE: Automatic
+
+packages:
+  SbrKit:
+    path: ../..
+
+targets:
+  SbrDemo:
+    type: application
+    platform: auto
+    supportedDestinations: [iOS, macOS, tvOS]
+    deploymentTarget:
+      iOS: "15.0"
+      macOS: "12.0"
+      tvOS: "17.0"
+    sources:
+      - path: App
+        excludes: ["*.entitlements"]
+    dependencies:
+      - package: SbrKit
+      - target: SbrTunnel
+        embed: true
+    info:
+      path: Support/App-Info.plist
+      properties:
+        CFBundleDisplayName: sbr
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        SbrAppGroup: $(SBR_APP_GROUP)
+        SbrTunnelBundleIdentifier: $(SBR_BUNDLE_ID).tunnel
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID)
+        CODE_SIGN_ENTITLEMENTS: App/App.entitlements
+        "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": App/App-macOS.entitlements
+
+  SbrTunnel:
+    type: app-extension
+    platform: auto
+    supportedDestinations: [iOS, macOS, tvOS]
+    deploymentTarget:
+      iOS: "15.0"
+      macOS: "12.0"
+      tvOS: "17.0"
+    sources:
+      - path: Tunnel
+        excludes: ["*.entitlements"]
+    dependencies:
+      - package: SbrKit
+    info:
+      path: Support/Tunnel-Info.plist
+      properties:
+        CFBundleDisplayName: SbrTunnel
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID).tunnel
+        CODE_SIGN_ENTITLEMENTS: Tunnel/Tunnel.entitlements
+        "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": Tunnel/Tunnel-macOS.entitlements
+
+  SbrDemoMac:
+    type: application
+    platform: macOS
+    deploymentTarget: "12.0"
+    sources:
+      - path: App
+        excludes: ["*.entitlements"]
+    dependencies:
+      - package: SbrKit
+      - target: SbrTunnelSystemExtension
+        embed: true
+    info:
+      path: Support/AppMac-Info.plist
+      properties:
+        CFBundleDisplayName: sbr
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        SbrAppGroup: $(SBR_APP_GROUP)
+        SbrTunnelBundleIdentifier: $(SBR_BUNDLE_ID).mac.tunnel
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID).mac
+        CODE_SIGN_ENTITLEMENTS: App/App-macOS-SystemExtension.entitlements
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) SBR_SYSTEM_EXTENSION
+        ENABLE_HARDENED_RUNTIME: YES
+
+  SbrTunnelSystemExtension:
+    type: system-extension
+    platform: macOS
+    deploymentTarget: "12.0"
+    sources:
+      - Tunnel/PacketTunnelProvider.swift
+      - SystemExtension/main.swift
+    dependencies:
+      - package: SbrKit
+    info:
+      path: Support/SystemExtension-Info.plist
+      properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NetworkExtension:
+          NEMachServiceName: $(SBR_APP_GROUP).tunnel
+          NEProviderClasses:
+            com.apple.networkextension.packet-tunnel: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID).mac.tunnel
+        CODE_SIGN_ENTITLEMENTS: SystemExtension/SystemExtension.entitlements
+        ENABLE_HARDENED_RUNTIME: YES

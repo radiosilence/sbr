@@ -53,9 +53,14 @@ pub struct Settings {
     /// DNS implementation; defaults to the OS resolver.
     pub dns: Option<Arc<dyn Dns>>,
     /// Pre-opened TUN file descriptor (Apple Network Extension, Android
-    /// VpnService). When set, the `tun` inbound adopts it instead of creating
-    /// and configuring an interface.
+    /// VpnService). The `tun` inbound adopts it instead of creating an
+    /// interface, and takes ownership: it is closed when the instance stops.
     pub tun_fd: Option<i32>,
+    /// Cap on concurrent TCP connections, and separately on UDP NAT
+    /// sessions; 0 = unlimited. Over the cap, new TCP connections are refused
+    /// and new UDP flows dropped, so a burst can't push a memory-capped host
+    /// (the iOS Network Extension) into jetsam.
+    pub max_connections: usize,
 }
 
 impl Default for Settings {
@@ -65,6 +70,7 @@ impl Default for Settings {
             base_dir: None,
             dns: None,
             tun_fd: None,
+            max_connections: 0,
         }
     }
 }
@@ -77,6 +83,7 @@ pub struct Engine {
     pub traffic: Traffic,
     active: AtomicUsize,
     relay_buffer: usize,
+    pub(crate) max_connections: usize,
 }
 
 impl Engine {
@@ -102,6 +109,7 @@ impl Engine {
             traffic: Traffic::default(),
             active: AtomicUsize::new(0),
             relay_buffer: settings.relay_buffer,
+            max_connections: settings.max_connections,
         })
     }
 
@@ -117,17 +125,44 @@ impl Engine {
         &self.dns
     }
 
+    /// TCP connections the engine is routing, connecting or relaying.
     pub fn active_connections(&self) -> usize {
         self.active.load(Ordering::Relaxed)
+    }
+
+    /// Open UDP NAT sessions.
+    pub fn udp_sessions(&self) -> usize {
+        self.nat.len()
+    }
+
+    /// Take a connection slot, or `None` when `max_connections` is reached.
+    pub(crate) fn admit(&self) -> Option<Slot<'_>> {
+        let n = self.active.fetch_add(1, Ordering::Relaxed);
+        if self.max_connections != 0 && n >= self.max_connections {
+            self.active.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        Some(Slot(&self.active))
+    }
+
+    /// The host's network path changed (Wi-Fi ↔ cellular, VPN reconnect).
+    ///
+    /// Drops state bound to the old path: UDP NAT sessions (their sockets
+    /// were routed over the old interface; QUIC/WebRTC clients re-establish
+    /// on the next packet). In-flight TCP is left alone: it either survives
+    /// (same interface) or fails fast on its own. Pooled upstream state
+    /// (multiplex sessions, QUIC connections, DNS cache) belongs here too as
+    /// it lands, so the next request dials over the new path.
+    pub fn network_changed(&self) {
+        let udp = self.nat.clear();
+        info!(udp_sessions = udp, "network changed: reset path-bound state");
     }
 
     pub(crate) async fn relay<A>(&self, meta: &Metadata, mut client: A, mut remote: Stream) -> io::Result<()>
     where
         A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
-        self.active.fetch_add(1, Ordering::Relaxed);
         let r = relay::relay(&mut client, &mut remote, self.relay_buffer, &self.traffic).await;
-        self.active.fetch_sub(1, Ordering::Relaxed);
         match r {
             Ok((up, down)) => {
                 debug!(dest = %meta.destination, up, down, "closed");
@@ -137,6 +172,15 @@ impl Engine {
             Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe) => Ok(()),
             Err(e) => Err(e),
         }
+    }
+}
+
+/// A held connection slot; released on drop.
+pub(crate) struct Slot<'a>(&'a AtomicUsize);
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -153,6 +197,7 @@ pub struct Instance {
     pub engine: Arc<Engine>,
     pub listening: Vec<(String, SocketAddr)>,
     tasks: JoinSet<()>,
+    tuns: Vec<Arc<sbr_tun::Stack>>,
 }
 
 impl Instance {
@@ -164,11 +209,16 @@ impl Instance {
         let engine = Arc::new(Engine::new(options, &settings)?);
         let mut tasks = JoinSet::new();
         let mut listening = Vec::new();
+        let mut tuns = Vec::new();
         for (i, ib) in options.inbounds.iter().enumerate() {
             let p = match &ib.kind {
                 InboundKind::Mixed(p) | InboundKind::Socks(p) | InboundKind::Http(p) => p,
-                InboundKind::Tun(_) => {
-                    return Err(Error::Inbound(i, ib.tag.clone(), "tun inbound not wired yet".into()));
+                InboundKind::Tun(t) => {
+                    let stack = inbound::tun::start(engine.clone(), &ib.tag, t, &settings)
+                        .await
+                        .map_err(|e| Error::Inbound(i, ib.tag.clone(), e.to_string()))?;
+                    tuns.push(stack);
+                    continue;
                 }
             };
             let addr = SocketAddr::new(p.listen.listen, p.listen.listen_port);
@@ -187,6 +237,7 @@ impl Instance {
             engine,
             listening,
             tasks,
+            tuns,
         })
     }
 
@@ -194,6 +245,7 @@ impl Instance {
     /// with the runtime.
     pub fn shutdown(mut self) {
         self.tasks.abort_all();
+        self.tuns.clear();
     }
 }
 

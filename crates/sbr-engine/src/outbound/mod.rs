@@ -4,10 +4,13 @@
 mod direct;
 mod group;
 mod http;
+mod hysteria2;
 mod proto;
+mod quic;
 mod shadowsocks;
 mod socks;
 mod trojan;
+mod tuic;
 mod vision;
 mod vless;
 mod vmess;
@@ -167,6 +170,10 @@ impl Builder<'_> {
             OutboundKind::Shadowsocks(s) => {
                 Arc::new(shadowsocks::Shadowsocks::new(tag, s, self.upstream(&s.dial)?).map_err(invalid)?)
             }
+            OutboundKind::Hysteria2(h) => {
+                Arc::new(hysteria2::Hysteria2::new(tag, h, self.upstream(&h.dial)?).map_err(invalid)?)
+            }
+            OutboundKind::Tuic(t) => Arc::new(tuic::Tuic::new(tag, t, self.upstream(&t.dial)?).map_err(invalid)?),
             OutboundKind::Selector(g) => {
                 let members = g.outbounds.iter().map(|t| self.dep(t)).collect::<Result<Vec<_>, _>>()?;
                 Arc::new(Selector::new(tag, "selector", members, g.default.as_deref()))
