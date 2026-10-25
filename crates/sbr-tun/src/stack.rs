@@ -304,11 +304,14 @@ async fn accept_loop(listener: TcpListener, fam: Arc<Family>, on_tcp: Arc<dyn Fn
             }
         };
         if peer.ip() != fam.next {
-            continue; // not one of ours
+            warn!(%peer, expected = %fam.next, "tun: dropped a connection from an unexpected peer");
+            continue;
         }
         let Some((source, destination)) = fam.nat.lock().unwrap().accept(peer.port()) else {
+            warn!(%peer, "tun: dropped a connection with no NAT entry");
             continue;
         };
+        debug!(%peer, "tun: accepted");
         let _ = stream.set_nodelay(true);
         on_tcp(Accepted {
             stream,
