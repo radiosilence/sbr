@@ -1,5 +1,8 @@
 //! End-to-end: real sockets, real handshakes, real bytes.
 
+#[path = "common/soak.rs"]
+mod soak;
+
 use std::net::SocketAddr;
 
 use sbr_engine::sbr_config::Options;
@@ -187,20 +190,20 @@ async fn chained_detour_through_socks_and_http() {
     roundtrip(&mut s, b"two hops").await;
 }
 
-#[tokio::test]
-async fn shadowsocks_2022() {
+const SS_KEY: &str = "Ixi/xBrzF3Nnrel2vh8Dsg=="; // 16 bytes, base64
+const SS_METHOD: &str = "2022-blake3-aes-128-gcm";
+
+/// In-process shadowsocks server (the reference crate); returns its port.
+async fn ss_server() -> u16 {
     use shadowsocks::config::{ServerConfig, ServerType};
     use shadowsocks::context::Context;
     use shadowsocks::crypto::CipherKind;
     use shadowsocks::relay::tcprelay::proxy_listener::ProxyListener;
 
-    let target = echo().await;
-    let key = "Ixi/xBrzF3Nnrel2vh8Dsg=="; // 16 bytes, base64
-    let method = "2022-blake3-aes-128-gcm";
     let cfg = ServerConfig::new(
         "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
-        key,
-        method.parse::<CipherKind>().unwrap(),
+        SS_KEY,
+        SS_METHOD.parse::<CipherKind>().unwrap(),
     )
     .unwrap();
     let listener = ProxyListener::bind(Context::new_shared(ServerType::Server), &cfg)
@@ -233,14 +236,23 @@ async fn shadowsocks_2022() {
             });
         }
     });
+    ss_port
+}
 
-    let i = start(&format!(
+async fn ss_client(ss_port: u16) -> Instance {
+    start(&format!(
         r#"{{
         "inbounds":[{{"type":"mixed","tag":"in","listen":"127.0.0.1","listen_port":0}}],
-        "outbounds":[{{"type":"shadowsocks","tag":"ss","server":"127.0.0.1","server_port":{ss_port},"method":"{method}","password":"{key}"}}]
+        "outbounds":[{{"type":"shadowsocks","tag":"ss","server":"127.0.0.1","server_port":{ss_port},"method":"{SS_METHOD}","password":"{SS_KEY}"}}]
     }}"#
     ))
-    .await;
+    .await
+}
+
+#[tokio::test]
+async fn shadowsocks_2022() {
+    let target = echo().await;
+    let i = ss_client(ss_server().await).await;
     let mut s = socks_connect(port(&i, "in"), "127.0.0.1", target.port(), None)
         .await
         .unwrap();
@@ -256,6 +268,16 @@ async fn shadowsocks_2022() {
     };
     let (_, got) = tokio::join!(send, recv);
     assert!(got == big, "1 MB through shadowsocks-2022 must survive intact");
+}
+
+/// See `common/soak.rs` for how to run it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "soak: moves 128 MiB"]
+async fn soak_shadowsocks_2022() {
+    let target = echo().await;
+    let i = ss_client(ss_server().await).await;
+    let s = soak::socks5(port(&i, "in"), target).await;
+    soak::soak_echo("shadowsocks-2022", s, soak::soak_bytes(), 1).await;
 }
 
 #[tokio::test]
