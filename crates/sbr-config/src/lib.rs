@@ -8,6 +8,7 @@
 //! are accepted and reported in [`Options::warnings`].
 
 mod obj;
+mod quic;
 mod route;
 mod tls;
 pub mod types;
@@ -18,6 +19,7 @@ use std::time::Duration;
 use obj::{Diag, Obj};
 use serde_json::Value;
 
+pub use quic::{Hysteria2Outbound, QuicOptions, TuicCongestion, TuicOutbound, TuicUdpRelay};
 pub use route::*;
 pub use tls::{Ech, Multiplex, Reality, TlsOutbound, Transport, Utls};
 
@@ -135,6 +137,8 @@ pub enum OutboundKind {
     Socks(SocksOutbound),
     Http(HttpOutbound),
     Shadowsocks(ShadowsocksOutbound),
+    Hysteria2(Hysteria2Outbound),
+    Tuic(TuicOutbound),
     Selector(Selector),
     UrlTest(UrlTest),
 }
@@ -147,6 +151,8 @@ impl OutboundKind {
             Self::Socks(_) => "socks",
             Self::Http(_) => "http",
             Self::Shadowsocks(_) => "shadowsocks",
+            Self::Hysteria2(_) => "hysteria2",
+            Self::Tuic(_) => "tuic",
             Self::Selector(_) => "selector",
             Self::UrlTest(_) => "urltest",
         }
@@ -359,6 +365,8 @@ impl Options {
                 OutboundKind::Socks(s) => Some(&s.dial),
                 OutboundKind::Http(s) => Some(&s.dial),
                 OutboundKind::Shadowsocks(s) => Some(&s.dial),
+                OutboundKind::Hysteria2(h) => Some(&h.dial),
+                OutboundKind::Tuic(t) => Some(&t.dial),
                 OutboundKind::Selector(g) => {
                     for t in &g.outbounds {
                         need(format!("{path}.outbounds"), t)?;
@@ -762,6 +770,8 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
                 network,
             })
         }
+        "hysteria2" => OutboundKind::Hysteria2(quic::parse_hysteria2(&mut o, diag)?),
+        "tuic" => OutboundKind::Tuic(quic::parse_tuic(&mut o, diag)?),
         "selector" => OutboundKind::Selector(Selector {
             outbounds: nonempty(o.req("outbounds")?, &o.sub("outbounds"))?,
             default: o.string("default")?,
