@@ -214,7 +214,7 @@ sing-box, Xray and hysteria from Homebrew so the interop tests run), and the
 `Apple` job, which builds the xcframework (no Catalyst) and the app unsigned
 for iOS, tvOS and macOS. A push to `main` that passes then calls `ios.yml`,
 which archives the app against that xcframework and uploads it to TestFlight; `ios.yml` can also be run
-by hand to retry an upload. Superseded runs are cancelled, and pull requests
+by hand to retry an upload. A pull request's newer push cancels its older run; on `main` a run always finishes and only the newest waiting commit runs next. Pull requests
 never upload.
 
 The upload uses these repository secrets, the same names kōan uses:
