@@ -53,7 +53,6 @@ public struct SbrPersonalRule: Codable, Sendable, Hashable, Identifiable {
         }) else { return nil }
         return s
     }
-    }
 }
 
 public enum SbrPersonalRules {
