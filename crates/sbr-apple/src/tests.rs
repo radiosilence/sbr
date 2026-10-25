@@ -84,7 +84,7 @@ fn lifecycle_over_the_c_abi() {
         assert_eq!(sbr_select(i, ptr::null(), c("b").as_ptr()), 0);
         assert_eq!(
             take(sbr_groups(i)),
-            r#"[{"tag":"proxy","type":"selector","selected":"b","members":["a","b"]}]"#
+            r#"[{"tag":"proxy","type":"selector","selected":"b","now":"b","delay":null,"members":[{"tag":"a","type":"direct","delay":null},{"tag":"b","type":"direct","delay":null}]}]"#
         );
         let mut active = 99;
         sbr_stats(i, ptr::null_mut(), ptr::null_mut(), &mut active);

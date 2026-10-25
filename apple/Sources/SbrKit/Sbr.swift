@@ -8,11 +8,25 @@ public struct SbrError: Error, LocalizedError, CustomStringConvertible, Sendable
 }
 
 public struct SbrGroup: Codable, Sendable, Hashable, Identifiable {
+    public struct Member: Codable, Sendable, Hashable, Identifiable {
+        public let tag: String
+        public let type: String
+        /// Last measured latency in milliseconds; nil when untested.
+        public let delay: Int?
+        public var id: String { tag }
+        public var isGroup: Bool { type == "selector" || type == "urltest" }
+    }
+
     public let tag: String
+    /// `selector` (picked by hand) or `urltest` (picks the fastest itself).
     public let type: String
     public let selected: String
-    public let members: [String]
+    /// The leaf outbound traffic resolves to through nested groups.
+    public let now: String
+    public let delay: Int?
+    public let members: [Member]
     public var id: String { tag }
+    public var isSelectable: Bool { type == "selector" }
 }
 
 public struct SbrStats: Codable, Sendable, Hashable {
@@ -115,6 +129,12 @@ public final class Sbr: @unchecked Sendable {
     public func groups() -> [SbrGroup] {
         guard let json = try? withHandle({ Self.takeString(sbr_groups($0)) }) ?? nil else { return [] }
         return (try? JSONDecoder().decode([SbrGroup].self, from: Data(json.utf8))) ?? []
+    }
+
+    /// Start a latency test of a group; results show up in `groups()`.
+    @discardableResult
+    public func urlTest(group: String) -> Bool {
+        (try? withHandle { sbr_url_test($0, group) == 1 }) ?? false
     }
 
     public func stats() -> SbrStats {
