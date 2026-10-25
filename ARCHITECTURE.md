@@ -7,7 +7,9 @@ Read this before adding a protocol, inbound or service.
 - `sbr-config`: sing-box JSON → typed options. **Strict**: every field sing-box knows is either parsed, `tolerate`d (accepted with a warning, only when it cannot change where traffic goes), or rejected with its JSON path. Never silently ignore a field. Use `Obj` (`src/obj.rs`): `opt/get/req/list/string/duration/tolerate/finish`. Shared objects: `tls` (`parse_tls`), v2ray `transport` (`parse_transport`), `multiplex` (`parse_multiplex`), dial fields (`parse_dial`), `server`/`server_port` (`parse_server`).
 - `sbr-core`: protocol-free data plane.
   - `Outbound` / `PacketConn` / `Group` traits (`src/outbound.rs`).
-  - `Dns` trait (`src/dns.rs`): `lookup` (for dialing) and `exchange` (raw DNS messages, used by `hijack-dns`). `SystemDns` is the default.
+  - `Dns` trait (`src/dns.rs`): `lookup` (for dialing) and `exchange` (raw DNS messages, used by `hijack-dns`), plus `bind` (a resolver for one dialer's `domain_resolver`), `fakeip_lookup` and `reverse_lookup`. `SystemDns` is used when the config has no `dns` section.
+  - `router::Matcher` / `RuleSets`: rule matching for callers with their own actions (DNS rules); rule-sets are compiled once and shared.
+- `sbr-dns`: the `dns` section as a `Dns` (`DnsRouter`): transports (hickory-proto wire format, rustls/aws-lc-rs, h2), rules, cache, FakeIP. Servers dial through `Arc<dyn Outbound>`s the engine supplies (`detour`, or a direct dialer); `sbr-engine/src/dns.rs` is the glue.
   - `Router` (`src/router`): a stepper. `next(meta, from)` returns the next matching rule; the engine performs sniff/resolve/route-options and continues. sing-box group semantics; see the module docs.
   - `sniff` (`src/sniff.rs`), `dial` (Happy Eyeballs TCP, `bind_udp`), `relay`.
 - `sbr-engine`: runtime.
@@ -15,7 +17,12 @@ Read this before adding a protocol, inbound or service.
   - `udp.rs`: `Engine::handle_udp(inbound, type, UdpPacket, Arc<dyn UdpWriteBack>)`, a full-cone NAT session per client source, routed on the first packet.
   - `outbound/`: one module per protocol, registered in `outbound/mod.rs::Builder::build`. Protocols reach their server through `Upstream` (system dialer with DNS, or a `detour` outbound), so detour chains work for free.
   - `inbound/`: proxy inbounds; `tun` lives in the `sbr-tun` crate plus `inbound/tun.rs`.
-- `sbr-apple`: C ABI + staticlib. `apple/`: Swift package.
+  - `track.rs`: live connection registry (Clash API, `interrupt_exist_connections`). `handle_tcp` and the UDP session register once connected; closing a connection aborts its relay.
+  - `outbound/group.rs`: `selector`, `urltest` and `GroupEnv` (delay history, probes). New protocols with a `server` should be added to `server_of` in `outbound/mod.rs` so URL-less `urltest` can measure them.
+  - `ruleset.rs` (remote rule-sets), `cache.rs` (`cache_file`; other subsystems get namespaced tables via `CacheFile::table`, e.g. `"fakeip"`), `fetch.rs` (HTTP(S) client through an outbound), `clash/` (Clash API).
+- `sbr-config/src/srs.rs`: the binary rule-set codec, byte-compatible with sing-box.
+- `sbr-reality`: standalone REALITY client, `connect(stream, &RealityConfig) -> RealityStream<S>`, generic over the transport. Carries its own minimal TLS 1.3 client because rustls cannot emit browser ClientHellos (uTLS profiles: chrome/firefox/safari/ios). Interop-tested against a sing-box binary built with `-tags with_utls` (`SBR_SING_BOX`).
+- `sbr-apple`: C ABI + staticlib; `include/sbr.h` must match the exports (`tests/c_abi.rs` enforces it). `apple/`: Swift package and sample app; see `apple/README.md` for the power and memory budget.
 
 ## Adding an outbound protocol
 
@@ -30,6 +37,10 @@ Read this before adding a protocol, inbound or service.
 - Relay buffers come from `Settings::relay_buffer` (16 KiB on iOS, 64 KiB elsewhere).
 - Prefer `aws-lc-rs` for crypto (hardware AES and ChaCha on Apple silicon). Use `rustls` with the `aws_lc_rs` provider for TLS.
 - Power: no busy timers. Idle sessions must cost zero wakeups; use deadlines, not polling intervals.
+
+## No third-party endpoints
+
+sbr contacts only endpoints the config names. Never add a built-in default URL (probe targets, downloads, update checks); where sing-box has one, document the deviation in the README.
 
 ## Style
 

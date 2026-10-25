@@ -19,10 +19,12 @@ sbr check -c config.json
 |---|---|
 | `sbr-config` | sing-box JSON model. Strict like sing-box: unknown fields are errors, reported with the exact JSON path. Anything sing-box accepts that sbr hasn't implemented is **rejected**, never silently ignored, unless it can't change where traffic goes. Those cases are reported as warnings. |
 | `sbr-core` | Session metadata, the router (sing-box match semantics, see below), Happy Eyeballs dialer, relay. No protocol code. |
+| `sbr-dns` | The `dns` section: DNS servers and transports, DNS rules, cache, FakeIP. |
 | `sbr-engine` | Inbounds, outbounds, runtime (`Instance`). |
 | `sbr` | CLI, flag-compatible with `sing-box run/check/version`. |
-| `sbr-apple` | C ABI (`include/sbr.h`) + `staticlib` for an xcframework. |
-| `apple/` | `SbrKit` Swift package, `build-xcframework.sh`, example `PacketTunnelProvider`. **Untested: written on Linux, not compiled with Xcode yet.** |
+| `sbr-reality` | REALITY TLS 1.3 client with uTLS-equivalent ClientHello fingerprints (not wired into an outbound yet). |
+| `sbr-apple` | C ABI (`include/sbr.h`) + `staticlib` for an xcframework: TUN fd adoption, log callback, reload, memory stats, network-change hook. |
+| `apple/` | `SbrKit` Swift package (`Sbr`, `SbrPacketTunnelProvider`), `build-xcframework.sh` (iOS, macOS, Catalyst, tvOS), SwiftUI sample app. See [`apple/README.md`](apple/README.md). **The Swift code is syntax-checked only: written on Linux, not compiled with Xcode yet.** |
 
 ## Routing semantics
 
@@ -35,14 +37,43 @@ Lookups are built for large rule-sets: hash sets per label for domains, Aho-Cora
 | | supported | not yet (rejected with a path) |
 |---|---|---|
 | inbounds | `mixed`, `socks` (5), `http`, users/auth | **`tun`**, socks4, UDP associate, TLS on http, everything else |
-| outbounds | `direct`, `block`, `socks` (4/4a/5, UDP associate, UoT), `http` (CONNECT), `shadowsocks` (AEAD + 2022, TCP + UDP, UoT v1/v2), `shadowtls` (v1/v2/v3), `anytls`, `selector`, `urltest`\*, `detour` chains | vmess, vless (+reality), trojan, hysteria2, tuic, naive, ssh, tor, SIP003 plugins, … |
+| outbounds | `direct`, `block`, `socks` (4/4a/5, UDP associate, UoT), `http` (CONNECT), `shadowsocks` (AEAD + 2022, TCP + UDP, UoT v1/v2), `shadowtls` (v1/v2/v3), `anytls`, `hysteria2` (salamander, port hopping, Brutal), `tuic` (v5, all UDP relay modes, 0-RTT), `selector`, `urltest`\*, `detour` chains, `interrupt_exist_connections` | vmess, vless (+reality), trojan, hysteria2 gecko obfs / realm, naive, ssh, tor, SIP003 plugins, … |
 | endpoints | `wireguard` (userspace: boringtun + smoltcp, as an outbound) | `system: true`, flows opened by the peer, tailscale |
-| route | all default-rule fields above, logical and/or, invert, actions `route` / `reject` (default, drop) / `sniff`\*\*, inline + local *source* rule-sets | binary `.srs`, remote rule-sets, `protocol`/sniffing, `process_*`, `wifi_*`, `hijack-dns`, `resolve`, `route-options` |
-| dns | system resolver (warns) | the whole `dns` section |
-| experimental | ignored with warning | clash API, cache file |
+| route | all default-rule fields above, `clash_mode`, logical and/or, invert, actions `route` / `reject` (default, drop) / `sniff`\*\*, inline / local / remote rule-sets, source and binary (`.srs` v1–5) | `protocol`/sniffing, `process_*`, `wifi_*`, `hijack-dns`, `resolve`, `route-options`, rule-set `http_client` |
+| dns | servers `local`, `hosts`, `udp` (TC→TCP), `tcp` (pipelined), `tls`, `https` (HTTP/2, POST/GET), `fakeip`, legacy `address` URLs incl. `rcode://`; `detour`/`domain_resolver` on servers, outbounds and `route.default_domain_resolver`; rules with all route matchers plus `query_type`, `outbound`, `ip_accept_any` and legacy address filtering; actions `route`, `route-options`, `reject`, `predefined`; cache (TTL, `cache_capacity`, `disable_expire`, `optimistic`, coalescing), `strategy`, `client_subnet`, `reverse_mapping` | servers `quic`, `h3`, `dhcp`, `mdns`, `tailscale`, `resolved`; `evaluate`/`respond`/response matching (1.14); uTLS/reality/ECH/pinning on DNS TLS |
+| experimental | `clash_api`, `cache_file` (`v2ray_api`, `debug` ignored with a warning) | |
 
-\* `urltest` doesn't probe yet. It is pinned to the first member.
+\* `urltest` probes like sing-box (`interval`, `tolerance`, `idle_timeout`, nested groups), with one deliberate difference, below.
 \*\* `sniff` is a no-op. The current inbounds already carry the requested domain.
+
+## sbr never phones home
+
+sbr only contacts endpoints your config names. Where sing-box has a built-in third-party default, sbr differs:
+
+- **`urltest` without `url`**: sing-box probes `https://www.gstatic.com/generate_204`. sbr instead measures the TCP handshake to each member's *own server* (through that member's dialer and `detour`); `hysteria2` and `tuic` report their QUIC connection's RTT estimate instead, and a `wireguard` endpoint the round trip of its last handshake (one is made if none completed in the last two minutes). This ranks servers by network distance but doesn't prove the proxy protocol works end to end; set `url` to an endpoint you control (any URL answering `HEAD`, e.g. a `204` route on your own server) for that. Members without a server (`direct`, `block`) aren't measured in that mode.
+- **Clash API delay tests** (`/proxies/{name}/delay`, `/group/{name}/delay`): dashboards send `gstatic.com` by default. sbr only fetches a `url` that the config itself names as some `urltest` group's `url`; otherwise it measures the handshake as above.
+- **`external_ui`**: served from the local directory only. sing-box downloads a GitHub-hosted dashboard when the directory is empty; sbr downloads only if `external_ui_download_url` is set.
+
+Remote rule-sets are explicit config, so they are fetched (over HTTPS with the Mozilla root store, through `download_detour` or `route.final`) and cached: in `experimental.cache_file` when enabled, else in `rule-set-cache/` under the working/base directory. A cached copy is used when offline. To own your rule-sets, compile and host them yourself:
+
+```
+sbr rule-set compile geosite-mine.json            # -> geosite-mine.srs (same format sing-box writes)
+scp geosite-mine.srs me@my.host:/var/www/rules/   # any static web server will do
+```
+
+```json
+{ "type": "remote", "tag": "mine", "url": "https://my.host/rules/geosite-mine.srs", "update_interval": "1d" }
+```
+
+Refreshes send `If-None-Match`, so a server that sets `ETag` (nginx and caddy do for static files) answers with a cheap `304`. `sbr rule-set decompile|match|format` mirror the sing-box subcommands.
+
+## Clash API
+
+`experimental.clash_api` serves what yacd, metacubexd and zashboard use: `/version`, `/configs` (GET, PATCH `mode`), `/proxies[/{name}[/delay]]` (PUT selects), `/group[/{name}[/delay]]`, `/rules`, `/connections` (GET or WebSocket, DELETE all or one), `/traffic`, `/memory`, `/logs?level=` (WebSocket or streamed), `/dns/query` (A/AAAA), `/cache/fakeip/flush`, and `external_ui` under `/ui/`. `secret` is a bearer token (`?token=` for WebSockets); CORS follows `access_control_allow_origin` and `access_control_allow_private_network`. Closing a connection aborts its relay. `memory` is the process footprint (`phys_footprint` on Apple, RSS on Linux).
+
+Connection tracking costs one small allocation per connection and a non-atomic counter update per relayed chunk (each counter has a single writer), so it is always on.
+
+`cache_file` is a `redb` database (not file-compatible with sing-box's bbolt `cache.db`): selector choices, the Clash mode and remote rule-sets persist across restarts, namespaced by `cache_id`.
 
 ## Benchmark
 
@@ -62,6 +93,13 @@ WireGuard (`cargo run --release -p sbr-engine --example wg_throughput -- /path/t
 | 1 | 1.9 / 1.8–2.0 Gbit/s | 2.0–2.1 / 2.3 Gbit/s |
 | 4 | 2.7 / 4.1 Gbit/s | 2.3 / 1.7 Gbit/s |
 
+`cargo run --release -p sbr-engine --example quic_throughput -- /path/to/sing-box 4 5` runs both cores as hysteria2 **clients** (same config file, separate processes) against one sing-box hysteria2 server; CPU is from `/proc/<pid>/stat`. Three runs:
+
+| hysteria2 client, 4 streams upload | throughput | client CPU per GB |
+|---|---|---|
+| sbr (quinn, BBR) | 1.10–2.02 Gbit/s | 3.8–4.3 s |
+| sing-box (quic-go, BBR) | 0.98–1.23 Gbit/s | 4.6–5.2 s |
+
 sing-box wins plain TCP relay **on Linux** because its `bufio` uses `splice(2)` zero-copy. Darwin has no splice, so on Apple targets that path is copy-vs-copy. sbr wins on encrypted relay. This is a single synthetic loopback test, so treat it as a smoke signal, not a verdict.
 
 ## Known upstream issue worked around
@@ -74,12 +112,12 @@ sing-box wins plain TCP relay **on Linux** because its `bufio` uses `splice(2)` 
    - `system`: rewrite TCP SYNs to a local listener and let the kernel run TCP. This is the fast path and works on macOS and iOS.
    - a userspace stack (smoltcp) for when `system` can't be used.
    UDP NAT table, then FakeIP.
-2. **DNS.** The `dns` section: servers (udp/tcp/tls/https/quic), rules, cache, `hijack-dns`, FakeIP.
+2. **DNS.** Done except QUIC-based servers (`quic`, `h3`) and FakeIP persistence in the cache file.
 3. **TLS layer** (rustls + aws-lc-rs, uTLS-style ClientHello fingerprints) → trojan, vless, vmess, http/socks over TLS. Then **reality**.
-4. **QUIC** (quinn) → hysteria2, tuic.
+4. ~~**QUIC** (quinn) → hysteria2, tuic.~~ Done; see `outbound/quic/`.
 5. **wireguard** (boringtun or gotatun).
-6. Binary `.srs` rule-sets and remote rule-sets. Real-world configs depend on these heavily.
-7. `urltest` probing, clash API (dashboards and the iOS app UI use it).
+6. ~~Binary `.srs` rule-sets and remote rule-sets~~ (done).
+7. ~~`urltest` probing, clash API~~ (done).
 8. Linux `splice(2)` fast path for raw TCP↔TCP.
 
 What "drop-in compatible" means here: sing-box is about 174k lines of Go before counting its `sing-*` libraries, so sbr is not trying to clone everything. The target is the protocol and config subset that real iOS/macOS client configs use. Everything outside that subset fails loudly at `check`, never at 2 a.m.

@@ -16,6 +16,7 @@
 use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use boringtun::noise::handshake::parse_handshake_anon;
@@ -141,6 +142,7 @@ struct Batch {
 }
 
 struct Io {
+    shared: Arc<Shared>,
     /// Output buffer for handshakes and the detour path.
     scratch: Vec<u8>,
     /// Reusable packet buffers.
@@ -171,6 +173,7 @@ impl Device {
         };
         let mut rx_bufs: Vec<Vec<u8>> = (0..rx_slots).map(|_| vec![0u8; rx_size]).collect();
         let mut io = Io {
+            shared: shared.clone(),
             scratch: vec![0u8; MAX_DATAGRAM],
             pool: Vec::new(),
             batch: Batch {
@@ -242,6 +245,11 @@ impl Device {
                 io.pool.push(pkt);
             }
             io.flush(&transport).await;
+
+            // An RTT probe asked for a fresh handshake.
+            if shared.want_handshake.swap(false, Ordering::Relaxed) {
+                io.initiate(&transport, &mut peers).await;
+            }
 
             // 4. WireGuard timers.
             let active = last_traffic.elapsed() < ACTIVE_WINDOW;
@@ -394,6 +402,7 @@ impl Io {
             // Reserved bytes (WARP) are ignored on receive, like sing-box.
             data[1..4].fill(0);
         }
+        let mut handshake_response = false;
         let idx = match Tunn::parse_incoming_packet(data) {
             Ok(Packet::HandshakeInit(p)) => hint
                 .or_else(|| {
@@ -405,7 +414,10 @@ impl Io {
                     let half = parse_handshake_anon(private, public, &p).ok()?;
                     peers.iter().position(|peer| peer.public == half.peer_static_public)
                 }),
-            Ok(Packet::HandshakeResponse(p)) => Some((p.receiver_idx >> 8) as usize),
+            Ok(Packet::HandshakeResponse(p)) => {
+                handshake_response = true;
+                Some((p.receiver_idx >> 8) as usize)
+            }
             Ok(Packet::PacketCookieReply(p)) => Some((p.receiver_idx >> 8) as usize),
             Ok(Packet::PacketData(p)) => Some((p.receiver_idx >> 8) as usize),
             Err(_) => None,
@@ -437,6 +449,10 @@ impl Io {
                 return;
             }
         };
+        if handshake_response && let (_, _, _, _, Some(rtt)) = peer.tunn.stats() {
+            let rtt = Duration::from_millis(rtt as u64);
+            self.shared.handshake.send_replace(Some((Instant::now(), rtt)));
+        }
         // Authenticated: follow the peer if it roamed.
         if from.is_some() && peer.endpoint != from {
             peer.endpoint = from;
@@ -525,6 +541,15 @@ impl Io {
         }
         b.buf.clear();
         b.count = 0;
+    }
+
+    async fn initiate(&mut self, transport: &Transport, peers: &mut [PeerSetup]) {
+        for (idx, peer) in peers.iter_mut().enumerate() {
+            if let TunnResult::WriteToNetwork(out) = peer.tunn.format_handshake_initiation(&mut self.scratch, false) {
+                let n = out.len();
+                send_wire(transport, peer, idx, &mut self.scratch[..n]).await;
+            }
+        }
     }
 
     async fn tick(&mut self, transport: &mut Transport, peers: &mut [PeerSetup]) {

@@ -173,6 +173,21 @@ async fn wireguard_vs_sing_box() {
         &[1, 100, 1300],
     )
     .await;
+
+    // URL-less urltest: the endpoint reports its handshake RTT.
+    let o = sbr_config::Options::parse(&wg_client(p)).unwrap();
+    let ctx = sbr_engine::outbound::BuildContext {
+        dns: std::sync::Arc::new(sbr_engine::sbr_core::dns::SystemDns),
+        default_resolver: None,
+        groups: Default::default(),
+    };
+    let outs = sbr_engine::outbound::build_all(&o.outbounds, &ctx).unwrap();
+    let wg = outs.iter().find(|o| o.tag() == "wg").unwrap();
+    let probe = || async { tokio::time::timeout(std::time::Duration::from_secs(5), wg.probe_rtt().unwrap()).await };
+    let rtt = probe().await.expect("handshake completes").unwrap();
+    assert!(rtt < std::time::Duration::from_secs(1), "{rtt:?}");
+    // A recent handshake is reused.
+    assert_eq!(probe().await.unwrap().unwrap(), rtt);
 }
 
 /// shadowsocks → detour shadowtls (v1/v2/v3) → sing-box shadowtls → ss.

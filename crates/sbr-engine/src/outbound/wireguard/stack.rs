@@ -11,7 +11,8 @@ use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::net::IpAddr;
 use std::sync::Mutex;
-use std::time::Instant as StdInstant;
+use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant as StdInstant};
 
 use ipnet::IpNet;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
@@ -19,7 +20,7 @@ use smoltcp::phy::{self, Checksum, ChecksumCapabilities, DeviceCapabilities, Med
 use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 /// TCP receive buffer (the window we advertise). Allocated zeroed, so the OS
 /// commits pages only as the ring is actually used; idle or small flows stay
@@ -152,6 +153,10 @@ pub struct Shared {
     pub stack: Mutex<Stack>,
     /// Kicks the device task: new data to send, window opened, socket added.
     pub kick: Notify,
+    /// Set by `probe_rtt`: initiate a handshake with every peer.
+    pub want_handshake: AtomicBool,
+    /// When the last handshake we initiated completed, and its round trip.
+    pub handshake: watch::Sender<Option<(StdInstant, Duration)>>,
     epoch: StdInstant,
 }
 
@@ -197,6 +202,8 @@ impl Shared {
                 port_seed: seed | 1,
             }),
             kick: Notify::new(),
+            want_handshake: AtomicBool::new(false),
+            handshake: watch::Sender::new(None),
             epoch,
         }
     }

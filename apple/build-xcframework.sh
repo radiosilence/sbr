@@ -1,19 +1,45 @@
 #!/usr/bin/env bash
-# Build SbrCore.xcframework (static) for iOS, iOS Simulator and macOS.
-# Run on macOS with Xcode and rustup installed.
+# Build apple/SbrCore.xcframework (static library + sbr.h module) for:
+#   iOS, iOS Simulator (arm64 + x86_64), macOS (arm64 + x86_64),
+#   Mac Catalyst (arm64 + x86_64), tvOS and tvOS Simulator (arm64 + x86_64).
+#
+# Run on macOS with Xcode and rustup. tvOS targets are Rust tier 3 (no
+# prebuilt std): they build with nightly + -Zbuild-std, so install
+#   rustup toolchain install nightly --component rust-src
+# or skip them with SBR_SKIP_TVOS=1. SBR_SKIP_CATALYST=1 skips Catalyst.
+#
+# Release profile: fat LTO, one codegen unit (workspace Cargo.toml); the
+# archives are then stripped of debug info and local symbols.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TARGETS=(aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin x86_64-apple-darwin)
-rustup target add "${TARGETS[@]}"
-export IPHONEOS_DEPLOYMENT_TARGET=15.0 MACOSX_DEPLOYMENT_TARGET=12.0
-for t in "${TARGETS[@]}"; do
+export IPHONEOS_DEPLOYMENT_TARGET=15.0 MACOSX_DEPLOYMENT_TARGET=12.0 TVOS_DEPLOYMENT_TARGET=17.0
+export CARGO_PROFILE_RELEASE_DEBUG=0
+
+IOS=(aarch64-apple-ios)
+IOS_SIM=(aarch64-apple-ios-sim x86_64-apple-ios)
+MACOS=(aarch64-apple-darwin x86_64-apple-darwin)
+CATALYST=(aarch64-apple-ios-macabi x86_64-apple-ios-macabi)
+TVOS=(aarch64-apple-tvos)
+TVOS_SIM=(aarch64-apple-tvos-sim x86_64-apple-tvos)
+
+STABLE=("${IOS[@]}" "${IOS_SIM[@]}" "${MACOS[@]}")
+[ "${SBR_SKIP_CATALYST:-0}" = 1 ] || STABLE+=("${CATALYST[@]}")
+
+rustup target add "${STABLE[@]}"
+for t in "${STABLE[@]}"; do
   cargo build --release -p sbr-apple --target "$t"
 done
+if [ "${SBR_SKIP_TVOS:-0}" != 1 ]; then
+  for t in "${TVOS[@]}" "${TVOS_SIM[@]}"; do
+    cargo +nightly build --release -p sbr-apple --target "$t" -Zbuild-std=std,panic_unwind
+  done
+fi
 
+lib=libsbr_apple.a
 OUT=apple/build
 rm -rf "$OUT" apple/SbrCore.xcframework
-mkdir -p "$OUT/ios-sim" "$OUT/macos" "$OUT/headers"
+mkdir -p "$OUT/headers"
 cp crates/sbr-apple/include/sbr.h "$OUT/headers/"
 cat > "$OUT/headers/module.modulemap" <<'MAP'
 module SbrCore {
@@ -21,13 +47,40 @@ module SbrCore {
     export *
 }
 MAP
-lib=libsbr_apple.a
-lipo -create target/aarch64-apple-ios-sim/release/$lib target/x86_64-apple-ios/release/$lib -output "$OUT/ios-sim/$lib"
-lipo -create target/aarch64-apple-darwin/release/$lib target/x86_64-apple-darwin/release/$lib -output "$OUT/macos/$lib"
 
-xcodebuild -create-xcframework \
-  -library target/aarch64-apple-ios/release/$lib -headers "$OUT/headers" \
-  -library "$OUT/ios-sim/$lib" -headers "$OUT/headers" \
-  -library "$OUT/macos/$lib" -headers "$OUT/headers" \
-  -output apple/SbrCore.xcframework
+# One (fat, stripped) archive per xcframework slice.
+slice() {
+  local name=$1; shift
+  mkdir -p "$OUT/$name"
+  local inputs=()
+  for t in "$@"; do inputs+=("target/$t/release/$lib"); done
+  if [ $# -gt 1 ]; then
+    lipo -create "${inputs[@]}" -output "$OUT/$name/$lib"
+  else
+    cp "${inputs[0]}" "$OUT/$name/$lib"
+  fi
+  # -S: debug info, -x: local symbols. Global symbols stay: it's a static
+  # library and the app's linker still needs them.
+  xcrun strip -S -x "$OUT/$name/$lib" 2>/dev/null || strip -S -x "$OUT/$name/$lib"
+  XCF_ARGS+=(-library "$OUT/$name/$lib" -headers "$OUT/headers")
+}
+
+XCF_ARGS=()
+slice ios "${IOS[@]}"
+slice ios-simulator "${IOS_SIM[@]}"
+slice macos "${MACOS[@]}"
+[ "${SBR_SKIP_CATALYST:-0}" = 1 ] || slice maccatalyst "${CATALYST[@]}"
+if [ "${SBR_SKIP_TVOS:-0}" != 1 ]; then
+  slice tvos "${TVOS[@]}"
+  slice tvos-simulator "${TVOS_SIM[@]}"
+fi
+
+xcodebuild -create-xcframework "${XCF_ARGS[@]}" -output apple/SbrCore.xcframework
+
+echo
+echo "slice sizes (stripped static archives; the linked app adds far less after dead-stripping):"
+for d in "$OUT"/*/; do
+  [ -f "$d$lib" ] && printf '  %-16s %s\n' "$(basename "$d")" "$(du -h "$d$lib" | cut -f1)"
+done
+printf '  %-16s %s\n' xcframework "$(du -sh apple/SbrCore.xcframework | cut -f1)"
 echo "built apple/SbrCore.xcframework"

@@ -15,6 +15,7 @@ mod stack;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use boringtun::noise::Tunn;
@@ -31,6 +32,10 @@ use self::conn::{WgPacketConn, WgTcp, WgUdp};
 use self::device::{Device, PeerSetup, Transport};
 use self::stack::Shared;
 use super::Upstream;
+
+/// Handshakes older than this are redone for an RTT probe (sessions are
+/// rekeyed after 120 s of use).
+const FRESH_HANDSHAKE: Duration = Duration::from_secs(120);
 
 pub struct WireGuard {
     tag: String,
@@ -218,6 +223,31 @@ impl Outbound for WireGuard {
     }
     fn kind(&self) -> &'static str {
         "wireguard"
+    }
+
+    /// The round trip of the last handshake (boringtun times it): a real
+    /// measurement to the peer at the cost of one handshake. A recent one is
+    /// reused, so probing an active endpoint sends nothing.
+    fn probe_rtt(&self) -> Option<BoxFuture<'_, io::Result<Duration>>> {
+        Some(Box::pin(async move {
+            let shared = self.running().await?;
+            let mut rx = shared.handshake.subscribe();
+            if let Some((at, rtt)) = *rx.borrow_and_update()
+                && at.elapsed() < FRESH_HANDSHAKE
+            {
+                return Ok(rtt);
+            }
+            shared.want_handshake.store(true, Ordering::Relaxed);
+            shared.kick.notify_one();
+            loop {
+                rx.changed()
+                    .await
+                    .map_err(|_| io::Error::other("wireguard: device stopped"))?;
+                if let Some((_, rtt)) = *rx.borrow_and_update() {
+                    return Ok(rtt);
+                }
+            }
+        }))
     }
 
     fn connect<'a>(&'a self, dest: &'a Destination) -> BoxFuture<'a, io::Result<Stream>> {

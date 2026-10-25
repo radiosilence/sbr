@@ -54,6 +54,20 @@ fn now_ms(epoch: Instant) -> u64 {
     epoch.elapsed().as_millis() as u64
 }
 
+impl Nat {
+    pub(crate) fn len(&self) -> usize {
+        self.sessions.lock().unwrap().len()
+    }
+
+    /// Drop every session; their tasks exit when the queue closes.
+    pub(crate) fn clear(&self) -> usize {
+        let mut s = self.sessions.lock().unwrap();
+        let n = s.len();
+        s.clear();
+        n
+    }
+}
+
 impl Engine {
     /// Feed one client datagram. Never blocks: a full session queue drops
     /// the packet, which is what UDP promised anyway.
@@ -74,6 +88,10 @@ impl Engine {
                     return self.spawn_session(&mut sessions, key, inbound_type, p.0, p.1, back);
                 }
             }
+        }
+        if self.max_connections != 0 && sessions.len() >= self.max_connections {
+            debug!(source = %pkt.source, limit = self.max_connections, "udp session limit reached");
+            return;
         }
         self.spawn_session(&mut sessions, key, inbound_type, pkt.destination, pkt.payload, back);
     }
@@ -110,8 +128,14 @@ impl Engine {
         back: Arc<dyn UdpWriteBack>,
     ) -> io::Result<()> {
         let source = meta.source;
+        // DNS: FakeIP destination → domain before routing; replies must
+        // still appear to come from the fake address.
+        let fake_origin = Some(meta.destination.clone());
+        self.restore_domain(&mut meta)?;
+        let fake_origin = fake_origin.filter(|o| *o != meta.destination);
         let mut opts = RouteOptions::default();
         let mut i = 0;
+        let mut matched = None;
         let action = loop {
             let Some((idx, action)) = self.router.next(&meta, i) else {
                 break Action::Route {
@@ -130,15 +154,19 @@ impl Engine {
                     }
                 }
                 Action::RouteOptions(o) => opts.merge(o),
-                Action::Resolve { strategy, .. } => self.resolve(&mut meta, *strategy).await,
+                Action::Resolve { server, strategy } => self.resolve(&mut meta, server.as_deref(), *strategy).await,
                 Action::Route { outbound, options } => {
                     opts.merge(options);
+                    matched = Some(idx);
                     break Action::Route {
                         outbound: *outbound,
                         options: opts,
                     };
                 }
-                a => break a.clone(),
+                a => {
+                    matched = Some(idx);
+                    break a.clone();
+                }
             }
         };
 
@@ -177,6 +205,7 @@ impl Engine {
             Action::Route { outbound, options } => {
                 let out = self.outbounds[outbound].clone();
                 let first_dest = options.apply(&meta.destination);
+                let first_dest_c = first_dest.clone();
                 debug!(source = %source, dest = %meta.destination, outbound = out.tag(), "udp route");
                 let conn: Arc<dyn sbr_core::PacketConn> = match out.connect_udp(&first_dest).await {
                     Ok(c) => Arc::from(c),
@@ -194,14 +223,25 @@ impl Engine {
                 });
                 let epoch = Instant::now();
                 let last = Arc::new(AtomicU64::new(0));
+                let (reg, cancelled) = self.tracker.register(meta.clone(), self.chain(outbound), matched);
 
-                // Remote → client.
-                let unmap = match (&meta.destination.host, options.udp_disable_domain_unmapping) {
-                    (Host::Domain(_), false) => Some(meta.destination.clone()),
-                    _ => None,
+                // Remote → client. Replies are reported from the address the
+                // client sent to: the FakeIP it used, the address before
+                // `override_address`/`override_port`, or the domain it named
+                // (SOCKS5 clients sending to a name).
+                let original = fake_origin.clone().unwrap_or_else(|| meta.destination.clone());
+                let unmap_domain = fake_origin.is_some()
+                    || (matches!(meta.destination.host, Host::Domain(_)) && !options.udp_disable_domain_unmapping);
+                let unmap = move |from: Destination| -> Destination {
+                    if from == first_dest_c || (unmap_domain && from.port == original.port) {
+                        original.clone()
+                    } else {
+                        from
+                    }
                 };
                 let reader = {
                     let (conn, back, last) = (conn.clone(), back.clone(), last.clone());
+                    let tracked = reg.conn.clone();
                     tokio::spawn(async move {
                         let mut buf = vec![0u8; 65535];
                         loop {
@@ -210,12 +250,10 @@ impl Engine {
                                 Err(_) => return,
                             };
                             last.store(now_ms(epoch), Ordering::Relaxed);
+                            tracked.add_down(n);
                             // Report replies from the address the client asked for, so
                             // SOCKS5 clients that sent to a domain recognise them.
-                            let from = match &unmap {
-                                Some(d) if d.port == from.port => d.clone(),
-                                _ => from,
-                            };
+                            let from = unmap(from);
                             if back.write_back(&buf[..n], &from, source).is_err() {
                                 return;
                             }
@@ -225,31 +263,40 @@ impl Engine {
 
                 // Client → remote.
                 let mut pending = Some((meta.destination.clone(), first));
-                let result = loop {
-                    let (dest, payload) = match pending.take() {
-                        Some(p) => p,
-                        None => {
-                            let idle_for =
-                                Duration::from_millis(now_ms(epoch).saturating_sub(last.load(Ordering::Relaxed)));
-                            let Some(remaining) = timeout.checked_sub(idle_for) else {
-                                break Ok(());
-                            };
-                            match tokio::time::timeout(remaining, rx.recv()).await {
-                                Ok(Some(p)) => p,
-                                Ok(None) => break Ok(()),
-                                Err(_) => continue, // re-check: the reader may have kept it alive
+                let forward = async {
+                    loop {
+                        let (dest, payload) = match pending.take() {
+                            Some(p) => p,
+                            None => {
+                                let idle_for =
+                                    Duration::from_millis(now_ms(epoch).saturating_sub(last.load(Ordering::Relaxed)));
+                                let Some(remaining) = timeout.checked_sub(idle_for) else {
+                                    break Ok(());
+                                };
+                                match tokio::time::timeout(remaining, rx.recv()).await {
+                                    Ok(Some(p)) => p,
+                                    Ok(None) => break Ok(()),
+                                    Err(_) => continue, // re-check: the reader may have kept it alive
+                                }
                             }
+                        };
+                        last.store(now_ms(epoch), Ordering::Relaxed);
+                        let dest = self.unfake(dest); // FakeIP
+                        let target = if options.udp_connect {
+                            first_dest.clone()
+                        } else {
+                            options.apply(&dest)
+                        };
+                        reg.conn.add_up(payload.len());
+                        if let Err(e) = conn.send_to(&payload, &target).await {
+                            debug!(dest = %target, error = %e, "udp send failed");
                         }
-                    };
-                    last.store(now_ms(epoch), Ordering::Relaxed);
-                    let target = if options.udp_connect {
-                        first_dest.clone()
-                    } else {
-                        options.apply(&dest)
-                    };
-                    if let Err(e) = conn.send_to(&payload, &target).await {
-                        debug!(dest = %target, error = %e, "udp send failed");
                     }
+                };
+                let result = tokio::select! {
+                    biased;
+                    r = forward => r,
+                    _ = cancelled.wait() => Ok(()),
                 };
                 reader.abort();
                 result

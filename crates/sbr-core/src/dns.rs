@@ -3,8 +3,9 @@
 
 use std::io;
 use std::net::IpAddr;
+use std::sync::Arc;
 
-use sbr_config::DomainStrategy;
+use sbr_config::{DomainResolver, DomainStrategy};
 
 use crate::{BoxFuture, Metadata};
 
@@ -16,7 +17,48 @@ pub trait Dns: Send + Sync {
         strategy: Option<DomainStrategy>,
     ) -> BoxFuture<'a, io::Result<Vec<IpAddr>>>;
     /// Answer a raw DNS query (hijack-dns). `meta` is the hijacked flow.
+    /// An error means "no answer" (the client sees a drop).
     fn exchange<'a>(&'a self, query: &'a [u8], meta: &'a Metadata) -> BoxFuture<'a, io::Result<Vec<u8>>>;
+
+    /// `lookup` on behalf of a connection (the `resolve` route action), so DNS
+    /// rules can match its inbound, user and so on.
+    fn lookup_for<'a>(
+        &'a self,
+        domain: &'a str,
+        strategy: Option<DomainStrategy>,
+        meta: &'a Metadata,
+    ) -> BoxFuture<'a, io::Result<Vec<IpAddr>>> {
+        let _ = meta;
+        self.lookup(domain, strategy)
+    }
+
+    /// A resolver for one dialer: a `domain_resolver` (server plus query
+    /// options), and/or the outbound tag DNS rules' `outbound` item matches.
+    /// `None` means "use `self` as is".
+    fn bind(&self, spec: &ResolverSpec<'_>) -> Option<Arc<dyn Dns>> {
+        let _ = spec;
+        None
+    }
+
+    /// FakeIP: the domain a fake address stands for. `Some(None)` is an
+    /// address inside a FakeIP range with no (or no longer a) mapping.
+    fn fakeip_lookup(&self, ip: IpAddr) -> Option<Option<Arc<str>>> {
+        let _ = ip;
+        None
+    }
+
+    /// `reverse_mapping`: the domain an address was last returned for.
+    fn reverse_lookup(&self, ip: IpAddr) -> Option<Arc<str>> {
+        let _ = ip;
+        None
+    }
+}
+
+/// See [`Dns::bind`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResolverSpec<'a> {
+    pub resolver: Option<&'a DomainResolver>,
+    pub outbound: Option<&'a str>,
 }
 
 pub fn apply_strategy(addrs: Vec<IpAddr>, strategy: Option<DomainStrategy>) -> Vec<IpAddr> {
