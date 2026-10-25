@@ -216,6 +216,11 @@ public final class Sbr: @unchecked Sendable {
         sbr_set_default_interface(name)
     }
 
+    /// Record panics and fatal signals to `url`, appended.
+    public static func setCrashFile(_ url: URL) {
+        _ = sbr_set_crash_file(url.path)
+    }
+
     /// The default network path changed: drop state bound to the old one.
     public func networkChanged() {
         try? withHandle { sbr_network_changed($0) }
