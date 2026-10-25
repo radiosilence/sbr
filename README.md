@@ -48,7 +48,14 @@ Lookups are built for large rule-sets: hash sets per label for domains, Aho-Cora
 \* `urltest` probes like sing-box (`interval`, `tolerance`, `idle_timeout`, nested groups), with one deliberate difference, below.
 \*\* `sniff` is a no-op. The current inbounds already carry the requested domain.
 
-## sbr never phones home
+## QUIC ClientHello scrambling
+
+The GFW and Russia's TSPU decrypt QUIC v1 Initial packets, whose keys anyone can derive from the connection ID, and block on the TLS SNI; neither reassembles CRYPTO data across datagrams. `hysteria2` without Salamander and `tuic` therefore scramble the ClientHello by default, as quic-go 0.52+ (and so sing-box, Xray and Hysteria) do: the SNI is cut in half and its two halves travel in different Initial packets. rustls' default key shares make the ClientHello longer than one packet, which is what lets the halves land in separate datagrams; a ClientHello that fits in one packet only gets its CRYPTO frames reordered.
+
+quinn builds Initials itself, so the rewrite is a socket wrapper under quinn (`outbound/quic/initial.rs`) that decrypts the Initials carrying the ClientHello, moves bytes between their CRYPTO frames and re-encrypts them, keeping packet numbers and sizes. quinn is unpatched. `"disable_client_hello_scrambling": true` on the outbound (an sbr extension, named after quic-go's `QUIC_GO_DISABLE_CLIENTHELLO_SCRAMBLING`) turns it off. With Salamander it never runs, because Salamander already hides the whole packet.
+
+The Initial does not resemble Chrome's: 1200-byte datagrams (Chrome sends 1250), a 20-byte destination and 8-byte source connection ID (Chrome: 8 and 0), rustls' ClientHello and quinn's transport parameters, and no Chrome-style interleaving of PING and PADDING frames between CRYPTO frames. Like the hysteria and quic-go clients it imitates, it is fingerprintable as a non-browser QUIC stack.
+
 
 sbr only contacts endpoints your config names. Where sing-box has a built-in third-party default, sbr differs:
 

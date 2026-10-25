@@ -21,6 +21,10 @@ pub struct QuicOptions {
     pub max_concurrent_streams: u32,
     pub initial_packet_size: u16,
     pub disable_path_mtu_discovery: bool,
+    /// sbr extension, named after quic-go's
+    /// `QUIC_GO_DISABLE_CLIENTHELLO_SCRAMBLING`: send the ClientHello in
+    /// the Initial packets unsplit.
+    pub disable_client_hello_scrambling: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +90,7 @@ fn parse_quic(o: &mut Obj) -> Result<QuicOptions> {
         max_concurrent_streams: o.get("max_concurrent_streams")?,
         initial_packet_size: o.get("initial_packet_size")?,
         disable_path_mtu_discovery: o.bool("disable_path_mtu_discovery")?,
+        disable_client_hello_scrambling: o.bool("disable_client_hello_scrambling")?,
     };
     if q.initial_packet_size != 0 && q.initial_packet_size < 1200 {
         return Err(Error::at(
