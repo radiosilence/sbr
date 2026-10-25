@@ -376,15 +376,23 @@ pub fn rfc3339(t: SystemTime) -> String {
 }
 
 fn proxy_info(api: &ApiState, o: &Arc<dyn Outbound>) -> Value {
-    let history = match api.engine.groups.history(&real_tag(o.as_ref())) {
+    let leaf = real_tag(o.as_ref());
+    let history = match api.engine.groups.history(&leaf) {
         Some(h) => json!([{ "time": rfc3339(h.time), "delay": h.delay }]),
         None => json!([]),
     };
+    // `alive` as in mihomo; the rest are sbr's: why the path was dropped
+    // and when it is next tried (see `crate::health`).
+    let degraded = api.engine.groups.degraded(&leaf);
     let mut v = json!({
         "type": display_type(o.kind()),
         "name": o.tag(),
         "udp": true,
         "history": history,
+        "alive": degraded.is_none(),
+        "degraded": degraded.is_some(),
+        "reason": degraded.map(|d| d.reason.as_str()),
+        "retry_in": degraded.map(|d| d.until.saturating_duration_since(std::time::Instant::now()).as_secs()),
     });
     if let Some(g) = o.as_group() {
         v["now"] = json!(g.selected().tag());

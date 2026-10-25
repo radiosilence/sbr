@@ -91,9 +91,26 @@ void sbr_stop(SbrInstance *instance);
 int32_t sbr_select(SbrInstance *instance, const char *group, const char *member);
 
 /* JSON: [{"tag":"proxy","type":"selector","selected":"auto","now":"hy2-a-443",
- *         "delay":38,"members":[{"tag":"auto","type":"urltest","delay":38}, ...]}]
+ *         "delay":38,"members":[{"tag":"auto","type":"urltest","delay":38,
+ *         "degraded":false,"reason":null,"retry_in":null}, ...]}]
  * `now` is the leaf the group currently resolves to; `delay` is the last
- * measured latency in ms, or null when untested. */
+ * measured latency in ms, or null when untested.
+ *
+ * Per member, for the leaf it resolves to:
+ * - `degraded`: the path completed handshakes but stopped carrying data,
+ *   so urltest groups skip it (unless no healthy member is left).
+ * - `reason`: why, or null when healthy:
+ *     "frozen"      a data probe stopped receiving mid-transfer (the TSPU
+ *                   16-20 KB freeze);
+ *     "reset"       connections or a data probe were reset right after the
+ *                   handshake;
+ *     "closed"      connections were closed before any data came back;
+ *     "no_response" requests went unanswered with nothing received;
+ *     "connect"     connections failed to open.
+ *   The last four degrade only when several destinations fail at once.
+ * - `retry_in`: seconds until the path is probed again (0: waiting for its
+ *   group's next probe), or null when healthy. The exclusion starts at
+ *   120 s and doubles on each relapse, up to 30 min. */
 char *sbr_groups(SbrInstance *instance);
 
 /* Start a latency test of a urltest group (or of a selector's urltest
