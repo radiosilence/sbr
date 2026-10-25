@@ -31,11 +31,11 @@ struct ProfileLink {
             guard link.host == "import-remote-profile",
                   let raw = URLComponents(url: link, resolvingAgainstBaseURL: false)?
                   .queryItems?.first(where: { $0.name == "url" })?.value,
-                  let url = URL(string: raw), url.scheme?.hasPrefix("http") == true
+                  let url = URL(string: raw), url.scheme?.lowercased() == "https"
             else { return nil }
             self.url = url
             self.name = link.fragment?.removingPercentEncoding
-        case "http", "https":
+        case "https":
             self.url = link
             self.name = link.fragment?.removingPercentEncoding
         default:
@@ -149,11 +149,19 @@ final class ProfileStore: ObservableObject {
         return activeChanged
     }
 
+    /// No disk cache (the response carries credentials), no cookies, and no
+    /// client-identifying User-Agent beyond the system default.
+    private static let session: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.urlCache = nil
+        c.httpCookieStorage = nil
+        c.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        return URLSession(configuration: c)
+    }()
+
     private func fetch(_ url: URL) async throws -> String {
-        var request = URLRequest(url: url)
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("sbr/\(Sbr.version)", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        guard url.scheme?.lowercased() == "https" else { throw SbrError("profile links must use https") }
+        let (data, response) = try await Self.session.data(from: url)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw SbrError("download failed: HTTP \(http.statusCode)")
         }
@@ -163,7 +171,7 @@ final class ProfileStore: ObservableObject {
     private func write(_ profile: Profile, text: String) throws {
         guard let dir, let url = file(profile.id) else { throw SbrError("no storage directory") }
         if let problem = Sbr.check(config: text) { throw SbrError(problem) }
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Self.prepare(dir)
         try Data(text.utf8).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         if let i = profiles.firstIndex(where: { $0.id == profile.id }) {
             profiles[i] = profile
@@ -175,9 +183,19 @@ final class ProfileStore: ObservableObject {
 
     private func saveIndex() throws {
         guard let dir, let indexURL else { return }
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Self.prepare(dir)
         let data = try JSONEncoder().encode(Index(profiles: profiles, active: activeID))
         try data.write(to: indexURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    /// Profiles hold server credentials: keep them out of iCloud and
+    /// computer backups.
+    private static func prepare(_ dir: URL) throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var d = dir
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try d.setResourceValues(values)
     }
 
     private func file(_ id: UUID) -> URL? { dir?.appendingPathComponent("\(id.uuidString).json") }
