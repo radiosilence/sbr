@@ -63,7 +63,7 @@ fn parses_typical_config() {
         panic!()
     };
     assert_eq!(ss.dial.connect_timeout, Some(std::time::Duration::from_secs(5)));
-    assert!(o.warnings.iter().any(|w| w.starts_with("dns")));
+    assert!(matches!(o.dns.as_ref().unwrap().servers[0].kind, DnsServerKind::Local));
     assert!(o.warnings.iter().any(|w| w.contains("auto_detect_interface")));
 }
 

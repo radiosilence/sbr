@@ -93,6 +93,16 @@ pub async fn client_connect<S: AsyncRead + AsyncWrite + Unpin>(
     dest: &Destination,
     auth: Option<(&str, &str)>,
 ) -> io::Result<()> {
+    client_command(s, CMD_CONNECT, dest, auth).await.map(drop)
+}
+
+/// Client side: greeting, optional auth, then `cmd`. Returns the bound address.
+pub async fn client_command<S: AsyncRead + AsyncWrite + Unpin>(
+    s: &mut S,
+    cmd: u8,
+    dest: &Destination,
+    auth: Option<(&str, &str)>,
+) -> io::Result<Destination> {
     let mut buf = Vec::with_capacity(300);
     buf.extend_from_slice(&[VER, 1, if auth.is_some() { USER_PASS } else { NO_AUTH }]);
     s.write_all(&buf).await?;
@@ -128,7 +138,7 @@ pub async fn client_connect<S: AsyncRead + AsyncWrite + Unpin>(
         }
     }
     buf.clear();
-    buf.extend_from_slice(&[VER, CMD_CONNECT, 0]);
+    buf.extend_from_slice(&[VER, cmd, 0]);
     write_addr(&mut buf, dest)?;
     s.write_all(&buf).await?;
     let mut head = [0u8; 3];
@@ -139,8 +149,7 @@ pub async fn client_connect<S: AsyncRead + AsyncWrite + Unpin>(
             format!("SOCKS5 server replied {}", head[1]),
         ));
     }
-    read_addr(s).await?; // bound address, unused
-    Ok(())
+    read_addr(s).await
 }
 
 fn rep_kind(rep: u8) -> io::ErrorKind {

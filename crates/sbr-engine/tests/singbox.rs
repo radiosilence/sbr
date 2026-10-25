@@ -3,8 +3,9 @@
 //! Every case pushes 1 MiB through a TCP echo and back, byte-exact, and
 //! (where the protocol carries UDP) a set of datagrams through a UDP echo.
 //!
-//! Needs a sing-box binary: `$SBR_SINGBOX_BIN`, else the path below. Without
-//! one the tests print a note and pass.
+//! Needs a sing-box binary: `$SBR_SINGBOX_BIN` or `$SBR_SING_BOX`, else the
+//! path below (REALITY needs one built with `with_utls`). Without one the
+//! tests print a note and pass.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -31,6 +32,7 @@ const MIB: usize = 1024 * 1024;
 
 fn singbox() -> Option<PathBuf> {
     let p = std::env::var_os("SBR_SINGBOX_BIN")
+        .or_else(|| std::env::var_os("SBR_SING_BOX"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BIN));
     if p.exists() {
@@ -134,6 +136,14 @@ fn free_port() -> u16 {
 }
 
 async fn start_singbox(bin: &Path, dir: &Path, inbounds: Vec<Value>) -> SingBox {
+    try_start_singbox(bin, dir, inbounds)
+        .await
+        .expect("sing-box failed to start")
+}
+
+/// `None` if sing-box exits or doesn't listen (e.g. a port picked by
+/// `free_port` was taken by a parallel test in the meantime).
+async fn try_start_singbox(bin: &Path, dir: &Path, inbounds: Vec<Value>) -> Option<SingBox> {
     let ports: Vec<u16> = inbounds
         .iter()
         .map(|i| i["listen_port"].as_u64().unwrap() as u16)
@@ -152,19 +162,26 @@ async fn start_singbox(bin: &Path, dir: &Path, inbounds: Vec<Value>) -> SingBox 
         .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
-    let sb = SingBox(child);
+    let mut sb = SingBox(child);
     for p in ports {
         let mut ok = false;
         for _ in 0..200 {
+            if sb.0.try_wait().ok().flatten().is_some() {
+                return None;
+            }
             if tokio::net::TcpStream::connect(("127.0.0.1", p)).await.is_ok() {
                 ok = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        assert!(ok, "sing-box did not listen on {p}");
+        if !ok {
+            return None;
+        }
     }
-    sb
+    // Still running: it owns the ports, not some other process.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    sb.0.try_wait().ok().flatten().is_none().then_some(sb)
 }
 
 async fn tcp_echo() -> SocketAddr {
@@ -279,19 +296,27 @@ async fn run(name: &str, build: impl FnOnce(&Pki) -> Vec<Case>) {
     let Some(bin) = singbox() else { return };
     let pki = pki(name);
     let mut cases = build(&pki);
-    let mut inbounds = Vec::new();
     let mut outbounds = Vec::new();
-    for c in &mut cases {
-        let port = free_port();
-        c.inbound["listen"] = json!("127.0.0.1");
-        c.inbound["listen_port"] = json!(port);
-        c.outbound["tag"] = json!(c.name);
-        c.outbound["server"] = json!("127.0.0.1");
-        c.outbound["server_port"] = json!(port);
-        inbounds.push(c.inbound.clone());
-        outbounds.push(c.outbound.clone());
+    let mut sb = None;
+    for _attempt in 0..3 {
+        let mut inbounds = Vec::new();
+        outbounds.clear();
+        for c in &mut cases {
+            let port = free_port();
+            c.inbound["listen"] = json!("127.0.0.1");
+            c.inbound["listen_port"] = json!(port);
+            c.outbound["tag"] = json!(c.name);
+            c.outbound["server"] = json!("127.0.0.1");
+            c.outbound["server_port"] = json!(port);
+            inbounds.push(c.inbound.clone());
+            outbounds.push(c.outbound.clone());
+        }
+        sb = try_start_singbox(&bin, &pki.dir, inbounds).await;
+        if sb.is_some() {
+            break;
+        }
     }
-    let _sb = start_singbox(&bin, &pki.dir, inbounds).await;
+    let _sb = sb.expect("sing-box failed to start");
     let opts = Options::from_value(json!({ "outbounds": outbounds })).unwrap();
     let engine = Engine::new(&opts, &Settings::default()).unwrap();
     let (techo, uecho) = (tcp_echo().await, udp_echo().await);
@@ -561,6 +586,7 @@ async fn inner_tls_roundtrips(out: &Arc<dyn Outbound>, pki: &Pki) {
 
 fn singbox_utls() -> Option<PathBuf> {
     let p = std::env::var_os("SBR_SINGBOX_UTLS_BIN")
+        .or_else(|| std::env::var_os("SBR_SING_BOX"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_UTLS_BIN));
     if p.exists() {

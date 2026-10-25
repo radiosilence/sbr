@@ -1,0 +1,31 @@
+[package]
+name = "sbr-dns"
+description = "sing-box compatible DNS router for sbr: servers, rules, cache, FakeIP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sbr-config.workspace = true
+sbr-core.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+ipnet.workspace = true
+bytes.workspace = true
+base64.workspace = true
+hickory-proto = { version = "0.26", default-features = false, features = ["std"] }
+lru = { version = "0.16", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
+webpki-roots = "1"
+h2 = "0.4"
+http = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+rcgen = "0.14"
+serde_json.workspace = true
+hyper = { version = "1", features = ["server", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"

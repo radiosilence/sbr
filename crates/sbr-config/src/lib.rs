@@ -7,12 +7,17 @@
 //! only exceptions are knobs that cannot change *where* traffic goes; those
 //! are accepted and reported in [`Options::warnings`].
 
+mod dns;
+mod experimental;
 mod obj;
+mod proxies;
 mod proxy;
 mod quic;
 mod route;
+pub mod srs;
 mod tls;
 pub mod types;
+mod wireguard;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
@@ -20,10 +25,15 @@ use std::time::Duration;
 use obj::{Diag, Obj};
 use serde_json::Value;
 
+pub use dns::*;
+pub use experimental::{CacheFileOptions, ClashApiOptions, Experimental, split_host_port};
+pub use proxies::{AnyTlsOutbound, ShadowTlsOutbound, UdpOverTcp};
 pub use proxy::{PacketEncoding, TrojanOutbound, V2rayCommon, VlessOutbound, VmessOutbound};
 pub use quic::{Hysteria2Outbound, QuicOptions, TuicCongestion, TuicOutbound, TuicUdpRelay};
 pub use route::*;
+pub use srs::parse_rule_set;
 pub use tls::{Ech, Multiplex, Reality, TlsOutbound, Transport, Utls};
+pub use wireguard::{WIREGUARD_DEFAULT_MTU, WireGuardEndpoint, WireGuardPeer};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -50,6 +60,10 @@ pub struct Options {
     pub inbounds: Vec<Inbound>,
     pub outbounds: Vec<Outbound>,
     pub route: RouteOptions,
+    /// The `dns` section; `None` means the system resolver.
+    pub dns: Option<DnsOptions>,
+    /// `experimental`: clash API and cache file.
+    pub experimental: Experimental,
     /// Non-fatal notes about accepted-but-ignored settings.
     pub warnings: Vec<String>,
 }
@@ -146,6 +160,11 @@ pub enum OutboundKind {
     Tuic(TuicOutbound),
     Selector(Selector),
     UrlTest(UrlTest),
+    ShadowTls(ShadowTlsOutbound),
+    AnyTls(AnyTlsOutbound),
+    /// From `endpoints[]`; endpoints share the outbound tag namespace and
+    /// are appended after the outbounds.
+    WireGuard(Box<WireGuardEndpoint>),
 }
 
 impl OutboundKind {
@@ -163,6 +182,9 @@ impl OutboundKind {
             Self::Tuic(_) => "tuic",
             Self::Selector(_) => "selector",
             Self::UrlTest(_) => "urltest",
+            Self::ShadowTls(_) => "shadowtls",
+            Self::AnyTls(_) => "anytls",
+            Self::WireGuard(_) => "wireguard",
         }
     }
 }
@@ -177,6 +199,9 @@ pub struct Dial {
     pub disable_tcp_keep_alive: bool,
     pub bind_interface: Option<String>,
     pub domain_strategy: Option<DomainStrategy>,
+    /// DNS server (and query options) for resolving the domains this dialer
+    /// connects to.
+    pub domain_resolver: Option<DomainResolver>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -203,6 +228,9 @@ pub struct SocksOutbound {
     pub version: String,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// `None`: TCP and UDP.
+    pub network: Option<Network>,
+    pub udp_over_tcp: Option<UdpOverTcp>,
 }
 
 #[derive(Debug, Clone)]
@@ -222,7 +250,9 @@ pub struct ShadowsocksOutbound {
     pub dial: Dial,
     pub method: String,
     pub password: String,
+    /// `None`: TCP and UDP.
     pub network: Option<Network>,
+    pub udp_over_tcp: Option<UdpOverTcp>,
 }
 
 #[derive(Debug, Clone)]
@@ -267,23 +297,19 @@ impl Options {
             None => LogOptions::default(),
         };
 
-        // Sections that exist in sing-box but that sbr doesn't run yet. DNS is
-        // the big one: we fall back to the system resolver, which is what
-        // sing-box itself does with an empty `dns` block.
-        if root.raw("dns").is_some() {
-            diag.warnings
-                .push("dns: not implemented yet, using the system resolver".into());
-        }
+        let dns = match root.raw("dns") {
+            Some(v) => Some(dns::parse_dns(Obj::new(v, "dns")?, &mut diag)?),
+            None => None,
+        };
+        // Sections that exist in sing-box but that sbr doesn't run yet.
         if root.raw("ntp").is_some() {
             diag.warnings.push("ntp: ignored by sbr".into());
         }
-        if let Some(exp) = root.raw("experimental") {
-            let mut exp = Obj::new(exp, "experimental")?;
-            exp.tolerate(&mut diag, &["cache_file", "clash_api", "v2ray_api", "debug"]);
-            exp.finish()?;
-        }
+        let experimental = match root.raw("experimental") {
+            Some(v) => experimental::parse(Obj::new(v, "experimental")?, &mut diag)?,
+            None => Experimental::default(),
+        };
         for key in [
-            "endpoints",
             "services",
             "certificate",
             "certificate_providers",
@@ -310,6 +336,12 @@ impl Options {
             .map(|(i, v)| parse_outbound(Obj::new(v, format!("outbounds[{i}]"))?, i, &mut diag))
             .collect::<Result<Vec<_>>>()?;
 
+        let endpoints = array(root.raw("endpoints"), "endpoints")?
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| parse_endpoint(Obj::new(v, format!("endpoints[{i}]"))?, i, &mut diag))
+            .collect::<Result<Vec<_>>>()?;
+
         let route = match root.raw("route") {
             Some(v) => route::parse_route(Obj::new(v, "route")?, &mut diag)?,
             None => RouteOptions::default(),
@@ -323,12 +355,17 @@ impl Options {
                 kind: OutboundKind::Direct(Dial::default()),
             });
         }
+        // After the implicit direct: like sing-box, endpoints never become
+        // the default outbound.
+        outbounds.extend(endpoints);
 
         let options = Options {
             log,
             inbounds,
             outbounds,
             route,
+            dns,
+            experimental,
             warnings: diag.warnings,
         };
         options.check_references()?;
@@ -379,6 +416,9 @@ impl Options {
                 OutboundKind::Vmess(s) => Some(&s.common.dial),
                 OutboundKind::Hysteria2(h) => Some(&h.dial),
                 OutboundKind::Tuic(t) => Some(&t.dial),
+                OutboundKind::ShadowTls(s) => Some(&s.dial),
+                OutboundKind::AnyTls(s) => Some(&s.dial),
+                OutboundKind::WireGuard(w) => Some(&w.dial),
                 OutboundKind::Selector(g) => {
                     for t in &g.outbounds {
                         need(format!("{path}.outbounds"), t)?;
@@ -407,9 +447,33 @@ impl Options {
                 }
                 need(format!("{path}.detour"), det)?;
             }
+            if let Some(r) = dial.and_then(|d| d.domain_resolver.as_ref()) {
+                self.need_dns_server(&format!("{path}.domain_resolver"), &r.server)?;
+            }
+        }
+        if let Some(r) = &self.route.default_domain_resolver {
+            self.need_dns_server("route.default_domain_resolver", &r.server)?;
+        }
+        if let Some(dns) = &self.dns {
+            self.check_dns(dns, &tags, &in_tags)?;
         }
         if let Some(f) = &self.route.final_outbound {
             need("route.final".into(), f)?;
+        }
+        for rs in &self.route.rule_sets {
+            if let RuleSetSource::Remote(r) = &rs.source
+                && let Some(d) = &r.download_detour
+            {
+                need(format!("route.rule_set[{}].download_detour", rs.tag), d)?;
+            }
+        }
+        if let Some(d) = self
+            .experimental
+            .clash_api
+            .as_ref()
+            .and_then(|c| c.external_ui_download_detour.as_deref())
+        {
+            need("experimental.clash_api.external_ui_download_detour".into(), d)?;
         }
         let mut stack: Vec<(&Rule, String)> = self
             .route
@@ -421,6 +485,9 @@ impl Options {
         while let Some((rule, path)) = stack.pop() {
             if let RuleAction::Route { outbound, .. } = &rule.action {
                 need(format!("{path}.outbound"), outbound)?;
+            }
+            if let RuleAction::Resolve { server: Some(s), .. } = &rule.action {
+                self.need_dns_server(&format!("{path}.server"), s)?;
             }
             if let RuleKind::Logical { rules, .. } = &rule.kind {
                 stack.extend(rules.iter().enumerate().map(|(i, r)| (r, format!("{path}.rules[{i}]"))));
@@ -437,6 +504,93 @@ impl Options {
                             &format!("{path}.rule_set"),
                             format!("rule-set not found: {rs}"),
                         ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Options {
+    fn need_dns_server(&self, path: &str, tag: &str) -> Result<()> {
+        if self
+            .dns
+            .as_ref()
+            .is_some_and(|d| d.servers.iter().any(|s| s.tag == tag))
+        {
+            Ok(())
+        } else {
+            Err(Error::at(path, format!("DNS server not found: {tag}")))
+        }
+    }
+
+    fn check_dns(
+        &self,
+        dns: &DnsOptions,
+        outbounds: &std::collections::HashSet<&str>,
+        inbounds: &std::collections::HashSet<&str>,
+    ) -> Result<()> {
+        let mut tags = std::collections::HashSet::new();
+        for (i, s) in dns.servers.iter().enumerate() {
+            let path = format!("dns.servers[{i}]");
+            if !tags.insert(s.tag.as_str()) {
+                return Err(Error::at(&format!("{path}.tag"), format!("duplicate tag {:?}", s.tag)));
+            }
+            if let Some(d) = &s.dial.detour
+                && !outbounds.contains(d.as_str())
+            {
+                return Err(Error::at(&format!("{path}.detour"), format!("outbound not found: {d}")));
+            }
+            if let Some(r) = &s.dial.domain_resolver {
+                let rpath = if s.legacy.is_some() {
+                    format!("{path}.address_resolver")
+                } else {
+                    format!("{path}.domain_resolver")
+                };
+                if r.server == s.tag {
+                    return Err(Error::at(&rpath, "resolver is the server itself"));
+                }
+                self.need_dns_server(&rpath, &r.server)?;
+            }
+        }
+        if let Some(f) = &dns.final_server {
+            self.need_dns_server("dns.final", f)?;
+        }
+        let mut stack: Vec<(&Rule, String)> = Vec::new();
+        for (i, r) in dns.rules.iter().enumerate() {
+            let path = format!("dns.rules[{i}]");
+            if let DnsRuleAction::Route { server, .. } = &r.action {
+                self.need_dns_server(&format!("{path}.server"), server)?;
+            }
+            stack.push((&r.rule, path));
+        }
+        while let Some((rule, path)) = stack.pop() {
+            match &rule.kind {
+                RuleKind::Logical { rules, .. } => {
+                    stack.extend(rules.iter().enumerate().map(|(i, r)| (r, format!("{path}.rules[{i}]"))));
+                }
+                RuleKind::Default(m) => {
+                    for i in &m.inbound {
+                        if !inbounds.contains(i.as_str()) {
+                            return Err(Error::at(&format!("{path}.inbound"), format!("inbound not found: {i}")));
+                        }
+                    }
+                    for o in &m.outbound {
+                        if o != "any" && !outbounds.contains(o.as_str()) {
+                            return Err(Error::at(
+                                &format!("{path}.outbound"),
+                                format!("outbound not found: {o}"),
+                            ));
+                        }
+                    }
+                    for rs in &m.rule_set {
+                        if !self.route.rule_sets.iter().any(|r| &r.tag == rs) {
+                            return Err(Error::at(
+                                &format!("{path}.rule_set"),
+                                format!("rule-set not found: {rs}"),
+                            ));
+                        }
                     }
                 }
             }
@@ -555,7 +709,7 @@ fn parse_inbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Inbound> {
     Ok(Inbound { tag, kind })
 }
 
-fn prefixes(o: &mut Obj, key: &str) -> Result<Vec<ipnet::IpNet>> {
+pub(crate) fn prefixes(o: &mut Obj, key: &str) -> Result<Vec<ipnet::IpNet>> {
     let path = o.sub(key);
     o.list::<String>(key)?
         .into_iter()
@@ -671,6 +825,7 @@ pub(crate) fn parse_dial(o: &mut Obj, diag: &mut Diag) -> Result<Dial> {
         disable_tcp_keep_alive: o.bool("disable_tcp_keep_alive")?,
         bind_interface: o.string("bind_interface")?,
         domain_strategy: o.opt("domain_strategy")?,
+        domain_resolver: dns::parse_domain_resolver(o, "domain_resolver")?,
     };
     o.tolerate(
         diag,
@@ -718,33 +873,22 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
             if !["4", "4a", "5"].contains(&version.as_str()) {
                 return Err(Error::at(&o.sub("version"), format!("unknown version {version:?}")));
             }
-            if version != "5" {
-                return Err(Error::at(&o.sub("version"), "only SOCKS5 is supported by sbr yet"));
-            }
-            if let Some(n) = o.opt::<String>("network")?
-                && n == "udp"
-            {
-                return Err(Error::at(&o.sub("network"), "UDP not supported by sbr yet"));
-            }
+            let network = proxies::parse_network_list(&mut o, "network")?;
+            let udp_over_tcp = proxies::parse_uot(&mut o, "udp_over_tcp")?;
             OutboundKind::Socks(SocksOutbound {
                 server,
                 dial,
                 version,
                 username: o.string("username")?,
                 password: o.string("password")?,
+                network,
+                udp_over_tcp,
             })
         }
         "http" => {
             let server = parse_server(&mut o)?;
             let dial = parse_dial(&mut o, diag)?;
-            let headers = o
-                .get::<serde_json::Map<String, Value>>("headers")?
-                .into_iter()
-                .flat_map(|(k, v)| match v {
-                    Value::Array(vs) => vs.into_iter().map(|v| (k.clone(), json_str(v))).collect::<Vec<_>>(),
-                    v => vec![(k, json_str(v))],
-                })
-                .collect();
+            let headers = parse_headers(&mut o, "headers")?;
             let tls = tls::parse_tls(&mut o, "tls", diag)?;
             // sing-box 1.13 negotiates HTTP/2 CONNECT by default when TLS
             // offers it and falls back to HTTP/1.1; sbr always speaks
@@ -777,14 +921,9 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
             let dial = parse_dial(&mut o, diag)?;
             let method: String = o.req("method")?;
             let password = o.string("password")?.unwrap_or_default();
-            let network = match o.string("network")? {
-                None => None,
-                Some(n) => Some(
-                    serde_json::from_value(Value::String(n))
-                        .map_err(|e| Error::at(&o.sub("network"), e.to_string()))?,
-                ),
-            };
-            for k in ["plugin", "plugin_opts", "udp_over_tcp", "multiplex"] {
+            let network = proxies::parse_network_list(&mut o, "network")?;
+            let udp_over_tcp = proxies::parse_uot(&mut o, "udp_over_tcp")?;
+            for k in ["plugin", "plugin_opts", "multiplex"] {
                 if o.has(k) {
                     return Err(Error::at(&o.sub(k), "not supported by sbr yet"));
                 }
@@ -795,6 +934,7 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
                 method,
                 password,
                 network,
+                udp_over_tcp,
             })
         }
         "trojan" => OutboundKind::Trojan(proxy::parse_trojan(&mut o, diag)?),
@@ -802,6 +942,14 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
         "vmess" => OutboundKind::Vmess(proxy::parse_vmess(&mut o, diag)?),
         "hysteria2" => OutboundKind::Hysteria2(quic::parse_hysteria2(&mut o, diag)?),
         "tuic" => OutboundKind::Tuic(quic::parse_tuic(&mut o, diag)?),
+        "shadowtls" => OutboundKind::ShadowTls(proxies::parse_shadowtls(&mut o, diag)?),
+        "anytls" => OutboundKind::AnyTls(proxies::parse_anytls(&mut o, diag)?),
+        "wireguard" => {
+            return Err(Error::at(
+                &o.sub("type"),
+                "WireGuard outbound is deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0, use WireGuard endpoint instead",
+            ));
+        }
         "selector" => OutboundKind::Selector(Selector {
             outbounds: nonempty(o.req("outbounds")?, &o.sub("outbounds"))?,
             default: o.string("default")?,
@@ -834,9 +982,36 @@ fn nonempty(v: Vec<String>, path: &str) -> Result<Vec<String>> {
     }
 }
 
+/// sing-box `HTTPHeader`: `{"Name": "v"}` or `{"Name": ["v1", "v2"]}`.
+pub(crate) fn parse_headers(o: &mut Obj, key: &str) -> Result<Vec<(String, String)>> {
+    Ok(o.get::<serde_json::Map<String, Value>>(key)?
+        .into_iter()
+        .flat_map(|(k, v)| match v {
+            Value::Array(vs) => vs.into_iter().map(|v| (k.clone(), json_str(v))).collect::<Vec<_>>(),
+            v => vec![(k, json_str(v))],
+        })
+        .collect())
+}
+
 fn json_str(v: Value) -> String {
     match v {
         Value::String(s) => s,
         other => other.to_string(),
     }
+}
+
+fn parse_endpoint(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
+    let ty: String = o.req("type")?;
+    let tag = tag_or_index(&mut o, i)?;
+    let kind = match ty.as_str() {
+        "wireguard" => OutboundKind::WireGuard(Box::new(wireguard::parse_wireguard(&mut o, diag)?)),
+        other => {
+            return Err(Error::at(
+                &o.sub("type"),
+                format!("endpoint type {other:?} not supported by sbr yet"),
+            ));
+        }
+    };
+    o.finish()?;
+    Ok(Outbound { tag, kind })
 }

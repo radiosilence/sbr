@@ -1,0 +1,37 @@
+{
+  "version": 3,
+  "rules": [
+    {
+      "query_type": ["A", "HTTPS", 64],
+      "network": "tcp",
+      "domain": ["example.com", "Ünïcode.example"],
+      "domain_suffix": ["google.com", ".cn", "co.uk"],
+      "domain_keyword": "ads",
+      "domain_regex": ["^stun\\.", "^t\\d+\\.example\\.net$"],
+      "source_ip_cidr": ["10.0.0.0/8", "10.1.0.0/16", "192.168.0.1"],
+      "ip_cidr": ["1.0.0.0/24", "1.0.1.0/24", "8.8.8.8", "2001:db8::/32", "::1"],
+      "source_port": [1234, 5678],
+      "source_port_range": "1000:2000",
+      "port": 443,
+      "port_range": [":80", "8000:"],
+      "process_name": "curl",
+      "process_path": "/usr/bin/curl",
+      "process_path_regex": "^/opt/",
+      "package_name": "com.example",
+      "network_type": ["wifi", "ethernet"],
+      "network_is_expensive": true,
+      "network_is_constrained": true,
+      "wifi_ssid": "home",
+      "wifi_bssid": "00:11:22:33:44:55",
+      "invert": true
+    },
+    {
+      "type": "logical",
+      "mode": "or",
+      "rules": [
+        { "port": 53 },
+        { "type": "logical", "mode": "and", "rules": [{ "network": "udp" }, { "domain_suffix": "lan" }], "invert": true }
+      ]
+    }
+  ]
+}

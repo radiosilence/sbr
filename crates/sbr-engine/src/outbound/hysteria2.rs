@@ -235,6 +235,12 @@ impl Outbound for Hysteria2 {
         "hysteria2"
     }
 
+    /// The QUIC connection's smoothed RTT: a real round-trip measurement to
+    /// the server that costs no extra traffic once the session exists.
+    fn probe_rtt(&self) -> Option<BoxFuture<'_, io::Result<std::time::Duration>>> {
+        Some(Box::pin(async move { Ok(self.dial().await?.conn.rtt()) }))
+    }
+
     fn connect<'a>(&'a self, dest: &'a Destination) -> BoxFuture<'a, io::Result<Stream>> {
         Box::pin(async move {
             if self.network == Some(Network::Udp) {

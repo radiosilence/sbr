@@ -36,6 +36,12 @@ pub trait Outbound: Send + Sync {
     fn as_group(&self) -> Option<&dyn Group> {
         None
     }
+    /// Round-trip time to the protocol's server, measured without contacting
+    /// anything else (e.g. a QUIC connection's RTT estimate). `urltest` uses
+    /// it when no `url` is configured. `None`: not supported.
+    fn probe_rtt(&self) -> Option<BoxFuture<'_, io::Result<std::time::Duration>>> {
+        None
+    }
 }
 
 /// `selector` / `urltest`.

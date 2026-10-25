@@ -140,6 +140,8 @@ fn outbound(json: &str) -> Arc<dyn Outbound> {
     let ctx = BuildContext {
         dns: Arc::new(SystemDns),
         base_dir: None,
+        default_resolver: None,
+        groups: Arc::default(),
     };
     build_all(&o.outbounds, &ctx).unwrap().remove(0)
 }
@@ -245,6 +247,9 @@ async fn hysteria2_tcp_and_udp() {
     udp_roundtrip(out.as_ref()).await;
     // A second stream reuses the connection.
     tcp_roundtrip(out.as_ref()).await;
+    // URL-less urltest uses the QUIC connection's RTT estimate.
+    let rtt = out.probe_rtt().expect("hysteria2 measures RTT").await.unwrap();
+    assert!(rtt < std::time::Duration::from_secs(1), "{rtt:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -319,6 +324,7 @@ async fn tuic_relay_modes() {
         ));
         tcp_roundtrip(out.as_ref()).await;
         udp_roundtrip(out.as_ref()).await;
+        assert!(out.probe_rtt().expect("tuic measures RTT").await.is_ok());
     }
 }
 

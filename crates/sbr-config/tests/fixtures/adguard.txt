@@ -1,0 +1,4 @@
+||ads.example^
+|exact.example^
+||track*.net^
+banner
