@@ -10,7 +10,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 use tracing::{debug, trace, warn};
 
-use crate::device::{Device, HEADROOM};
+use crate::device::{Device, HEADROOM, RecvBatch};
 use crate::nat::Nat;
 use crate::packet::{self, ACK, PROTO_TCP, PROTO_UDP, SYN};
 
@@ -200,63 +200,80 @@ fn global_unicast(ip: IpAddr) -> bool {
     }
 }
 
+#[cfg(any(target_os = "ios", target_os = "tvos", target_os = "watchos", target_os = "visionos"))]
+const BATCH: (usize, usize) = (4, 32);
+#[cfg(not(any(target_os = "ios", target_os = "tvos", target_os = "watchos", target_os = "visionos")))]
+const BATCH: (usize, usize) = (8, 64);
+
 async fn packet_loop(
     device: Arc<Device>,
     fams: [Option<Arc<Family>>; 2],
     mtu: usize,
     on_udp: impl Fn(UdpIn) + Send + Sync + 'static,
 ) {
-    let mut buf = vec![0u8; HEADROOM + mtu.max(1500) + 64];
+    let mut batch = RecvBatch::new(BATCH.0, BATCH.1, mtu.max(1500) + 64);
     loop {
-        let n = match device.recv(&mut buf).await {
-            Ok(0) => continue,
+        let n = match device.recv_batch(&mut batch).await {
             Ok(n) => n,
             Err(e) => {
                 warn!(error = %e, "tun read failed; stopping");
                 return;
             }
         };
-        let pkt = &mut buf[HEADROOM..HEADROOM + n];
-        let Some(h) = packet::parse(pkt) else { continue };
-        let Some(fam) = &fams[h.v6 as usize] else { continue };
-        match h.proto {
-            PROTO_TCP => {
-                let flags = packet::tcp_flags(pkt, &h);
-                let rewrite = if h.src.ip() == fam.addr && h.src.port() == fam.port {
-                    // Our listener replying: restore the original flow.
-                    fam.nat
-                        .lock()
-                        .unwrap()
-                        .inbound(h.dst.port())
-                        .map(|(src, dst)| (dst, src))
-                } else if global_unicast(h.dst.ip()) {
-                    let syn_only = flags & SYN != 0 && flags & ACK == 0;
-                    let port = fam.nat.lock().unwrap().outbound(h.src, h.dst, syn_only);
-                    port.map(|p| (SocketAddr::new(fam.next, p), SocketAddr::new(fam.addr, fam.port)))
-                } else {
-                    None
-                };
-                let Some((src, dst)) = rewrite else {
-                    trace!(src = %h.src, dst = %h.dst, flags, "tcp: no NAT entry, dropped");
-                    continue;
-                };
-                packet::rewrite(pkt, &h, src, dst);
-                if let Err(e) = device.send(&mut buf, n).await {
+        for i in 0..n {
+            let len = batch.len(i);
+            if len == 0 {
+                continue;
+            }
+            if let Some(len) = process(&fams, batch.buf(i), len, &on_udp) {
+                if let Err(e) = device.send(batch.buf(i), len).await {
                     debug!(error = %e, "tun write failed");
                 }
             }
-            PROTO_UDP => {
-                if !global_unicast(h.dst.ip()) {
-                    continue;
-                }
-                let payload = Bytes::copy_from_slice(&pkt[h.l4 + 8..h.len]);
-                on_udp(UdpIn {
-                    source: h.src,
-                    destination: h.dst,
-                    payload,
-                });
-            }
-            _ => {}
         }
+    }
+}
+
+/// Handle one packet in `buf[HEADROOM..HEADROOM + len]`. Returns the length
+/// to write back into the TUN (TCP rewritten in place), or None if consumed
+/// or dropped.
+fn process(fams: &[Option<Arc<Family>>; 2], buf: &mut [u8], len: usize, on_udp: &impl Fn(UdpIn)) -> Option<usize> {
+    let pkt = &mut buf[HEADROOM..HEADROOM + len];
+    let h = packet::parse(pkt)?;
+    let fam = fams[h.v6 as usize].as_ref()?;
+    match h.proto {
+        PROTO_TCP => {
+            let flags = packet::tcp_flags(pkt, &h);
+            let rewrite = if h.src.ip() == fam.addr && h.src.port() == fam.port {
+                // Our listener replying: restore the original flow.
+                fam.nat
+                    .lock()
+                    .unwrap()
+                    .inbound(h.dst.port())
+                    .map(|(src, dst)| (dst, src))
+            } else if global_unicast(h.dst.ip()) {
+                let syn_only = flags & SYN != 0 && flags & ACK == 0;
+                let port = fam.nat.lock().unwrap().outbound(h.src, h.dst, syn_only);
+                port.map(|p| (SocketAddr::new(fam.next, p), SocketAddr::new(fam.addr, fam.port)))
+            } else {
+                None
+            };
+            let Some((src, dst)) = rewrite else {
+                trace!(src = %h.src, dst = %h.dst, flags, "tcp: no NAT entry, dropped");
+                return None;
+            };
+            packet::rewrite(pkt, &h, src, dst);
+            Some(len)
+        }
+        PROTO_UDP if global_unicast(h.dst.ip()) => {
+            let payload = Bytes::copy_from_slice(&pkt[h.l4 + 8..h.len]);
+            on_udp(UdpIn {
+                source: h.src,
+                destination: h.dst,
+                payload,
+            });
+            None
+        }
+        _ => None,
     }
 }

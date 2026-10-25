@@ -53,6 +53,7 @@ impl Device {
     pub fn create(cfg: &DeviceConfig) -> io::Result<Self> {
         let (fd, name) = platform::create(cfg)?;
         set_nonblocking(fd.as_raw_fd())?;
+        platform::tune(fd.as_raw_fd());
         Ok(Self {
             af_header: cfg!(target_vendor = "apple"),
             fd: register(fd)?,
@@ -62,6 +63,40 @@ impl Device {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Receive up to `batch.target()` packets in one wakeup. Each lands at
+    /// `batch.packet(i)`. On Darwin this is a single `recvmsg_x`; elsewhere
+    /// it drains the fd until `EAGAIN`. Fewer wakeups = less CPU and power.
+    pub async fn recv_batch(&self, batch: &mut RecvBatch) -> io::Result<usize> {
+        let off = if self.af_header { 0 } else { HEADROOM };
+        loop {
+            let mut guard = self.fd.readable().await?;
+            let fd = self.fd.as_raw_fd();
+            #[cfg(target_vendor = "apple")]
+            let r = platform::recv_batch_x(fd, batch);
+            #[cfg(not(target_vendor = "apple"))]
+            let r = recv_batch_read(fd, batch, off);
+            match r {
+                Ok(0) => {
+                    guard.clear_ready();
+                    continue;
+                }
+                Ok(n) => {
+                    for i in 0..n {
+                        batch.lens[i] = batch.lens[i].saturating_sub(if self.af_header { HEADROOM } else { 0 });
+                    }
+                    let _ = off;
+                    batch.adapt(n);
+                    return Ok(n);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    guard.clear_ready();
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Receive one packet into `buf[HEADROOM..]`; returns its length.
@@ -125,6 +160,69 @@ impl Device {
         buf[..HEADROOM].copy_from_slice(&family.to_be_bytes());
         0
     }
+}
+
+/// Reusable receive buffers for `Device::recv_batch`.
+pub struct RecvBatch {
+    bufs: Vec<Vec<u8>>,
+    lens: Vec<usize>,
+    target: usize,
+    min: usize,
+}
+
+impl RecvBatch {
+    /// `max` buffers of `HEADROOM + mtu` bytes; the batch size adapts
+    /// between `min` and `max` with load (recvmsg_x walks every slot it is
+    /// given, so oversizing it costs CPU when idle-ish).
+    pub fn new(min: usize, max: usize, mtu: usize) -> Self {
+        Self {
+            bufs: (0..max).map(|_| vec![0u8; HEADROOM + mtu]).collect(),
+            lens: vec![0; max],
+            target: min,
+            min,
+        }
+    }
+
+    pub fn target(&self) -> usize {
+        self.target
+    }
+
+    /// The i-th received packet's buffer (packet at `[HEADROOM..HEADROOM + len(i)]`).
+    pub fn buf(&mut self, i: usize) -> &mut [u8] {
+        &mut self.bufs[i]
+    }
+
+    pub fn len(&self, i: usize) -> usize {
+        self.lens[i]
+    }
+
+    fn adapt(&mut self, got: usize) {
+        if got >= self.target {
+            self.target = (self.target * 2).min(self.bufs.len());
+        } else if got * 2 < self.target {
+            self.target = (self.target / 2).max(self.min);
+        }
+    }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn recv_batch_read(fd: RawFd, batch: &mut RecvBatch, off: usize) -> io::Result<usize> {
+    let mut n = 0;
+    while n < batch.target {
+        let buf = &mut batch.bufs[n][off..];
+        // SAFETY: reading into a valid, sized buffer.
+        let r = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if r < 0 {
+            let e = io::Error::last_os_error();
+            if n > 0 && e.kind() == io::ErrorKind::WouldBlock {
+                break; // readiness stays set; the next call sees EAGAIN and clears it
+            }
+            return Err(e);
+        }
+        batch.lens[n] = r as usize;
+        n += 1;
+    }
+    Ok(n)
 }
 
 /// `AF_INET6` on Darwin (not Linux's 10).
@@ -226,6 +324,8 @@ mod platform {
         a.sin_addr.s_addr = u32::from(ip).to_be();
         a
     }
+
+    pub fn tune(_fd: RawFd) {}
 
     pub fn fd_name(fd: RawFd) -> Option<String> {
         let mut req = IfReqFlags {
@@ -465,6 +565,102 @@ mod platform {
         sc_reserved: [u32; 5],
     }
 
+    const UTUN_OPT_MAX_PENDING_PACKETS: libc::c_int = 16;
+    const SYS_RECVMSG_X: libc::c_int = 480;
+
+    /// Raise the control socket's receive buffer, then let utun queue as
+    /// many packets as that buffer holds (capped at 64) so bursts don't
+    /// pause the interface. Values follow sing-tun's measurements.
+    pub fn tune(fd: RawFd) {
+        let mut size: libc::c_int = 8 << 20;
+        while size >= 1 << 20 {
+            // SAFETY: setsockopt with an int.
+            let r = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    (&size as *const libc::c_int).cast(),
+                    4,
+                )
+            };
+            if r == 0 {
+                break;
+            }
+            size /= 2;
+        }
+        let mut cur: libc::c_int = 0;
+        let mut len: libc::socklen_t = 4;
+        // SAFETY: getsockopt into an int.
+        let ok = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&mut cur as *mut libc::c_int).cast(),
+                &mut len,
+            )
+        } == 0;
+        let rcvbuf = if ok && cur > 0 { cur } else { 512 << 10 };
+        let pending: libc::c_int = (rcvbuf / 8 * 7 / (65535 + 4)).clamp(1, 64);
+        // SAFETY: as above. Failure (old kernels) just keeps the default.
+        unsafe {
+            libc::setsockopt(
+                fd,
+                SYSPROTO_CONTROL,
+                UTUN_OPT_MAX_PENDING_PACKETS,
+                (&pending as *const libc::c_int).cast(),
+                4,
+            );
+        }
+    }
+
+    /// `struct msghdr_x` (<sys/socket.h>, private).
+    #[repr(C)]
+    struct MsgHdrX {
+        msg: libc::msghdr,
+        datalen: libc::size_t,
+    }
+
+    /// One `recvmsg_x` for up to `batch.target` packets.
+    pub fn recv_batch_x(fd: RawFd, batch: &mut super::RecvBatch) -> io::Result<usize> {
+        let n = batch.target;
+        let mut iov: [libc::iovec; 64] = unsafe { std::mem::zeroed() };
+        let mut hdrs: [MsgHdrX; 64] = unsafe { std::mem::zeroed() };
+        for i in 0..n {
+            iov[i] = libc::iovec {
+                iov_base: batch.bufs[i].as_mut_ptr().cast(),
+                iov_len: batch.bufs[i].len(),
+            };
+            // Older kernels validate the whole header, so it must be zeroed (it is).
+            hdrs[i].msg.msg_iov = &mut iov[i];
+            hdrs[i].msg.msg_iovlen = 1;
+        }
+        // SAFETY: recvmsg_x(fd, msghdr_x *, count, flags); arrays outlive the call.
+        #[allow(deprecated)]
+        let r = unsafe {
+            libc::syscall(
+                SYS_RECVMSG_X,
+                fd,
+                hdrs.as_mut_ptr(),
+                n as libc::c_uint,
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if r < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let got = r as usize;
+        for i in 0..got {
+            batch.lens[i] = if hdrs[i].msg.msg_flags & libc::MSG_TRUNC != 0 {
+                0
+            } else {
+                hdrs[i].datalen
+            };
+        }
+        Ok(got)
+    }
+
     pub fn fd_name(fd: RawFd) -> Option<String> {
         let mut buf = [0u8; libc::IFNAMSIZ];
         let mut len = buf.len() as libc::socklen_t;
@@ -626,6 +822,7 @@ mod platform {
 
     use super::{DefaultRoute, DeviceConfig};
 
+    pub fn tune(_: RawFd) {}
     pub fn fd_name(_: RawFd) -> Option<String> {
         None
     }
