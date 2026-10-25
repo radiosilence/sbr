@@ -6,3 +6,4 @@
 /apple/App/*.xcodeproj
 /apple/App/Support
 .swiftpm
+.build/
