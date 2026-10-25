@@ -12,7 +12,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::*;
-use crate::handshake::Options;
 use crate::hello::{GREASE, SESSION_ID_OFFSET};
 use crate::keys::{hkdf_expand, hkdf_extract};
 
@@ -121,10 +120,7 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(tls: RealityStream<S>, da
 async fn run(fp: Fingerprint, pq: bool, suite: SupportedCipherSuite, group: &'static dyn SupportedKxGroup) {
     let addr = rustls_echo(server_config(suite, group), Some(300_000)).await;
     let tcp = TcpStream::connect(addr).await.unwrap();
-    let opts = Options {
-        skip_reality_verify: true,
-    };
-    let mut tls = handshake::handshake(tcp, &test_config(fp, pq), opts).await.unwrap();
+    let mut tls = reality_handshake(tcp, &test_config(fp, pq), true).await.unwrap();
     assert_eq!(tls.cipher_suite().id(), u16::from(suite.suite()));
     assert_eq!(tls.alpn_protocol(), Some(&b"h2"[..]));
     assert_eq!(tls.key_exchange_group(), u16::from(group.name()));
@@ -183,10 +179,7 @@ async fn server_close_notify_reads_as_eof() {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     });
     let tcp = TcpStream::connect(addr).await.unwrap();
-    let opts = Options {
-        skip_reality_verify: true,
-    };
-    let mut tls = handshake::handshake(tcp, &test_config(Fingerprint::Chrome, true), opts)
+    let mut tls = reality_handshake(tcp, &test_config(Fingerprint::Chrome, true), true)
         .await
         .unwrap();
     let mut got = Vec::new();
@@ -225,10 +218,7 @@ async fn bulk_throughput() {
             }
         });
         let tcp = TcpStream::connect(addr).await.unwrap();
-        let opts = Options {
-            skip_reality_verify: true,
-        };
-        let mut tls = handshake::handshake(tcp, &test_config(Fingerprint::Chrome, false), opts)
+        let mut tls = reality_handshake(tcp, &test_config(Fingerprint::Chrome, false), true)
             .await
             .unwrap();
         let mut buf = vec![0u8; 64 * 1024];
@@ -356,7 +346,7 @@ async fn chrome_fingerprint() {
     assert_eq!(h.record_version, 0x0301);
     assert_eq!(h.session_id.len(), 32);
 
-    // Cipher suites: GREASE then Chrome 133's list.
+    // Cipher suites: GREASE then Chrome's list.
     assert!(is_grease(h.suites[0]));
     assert_eq!(
         &h.suites[1..],
@@ -377,11 +367,11 @@ async fn chrome_fingerprint() {
     middle.sort_unstable();
     let mut expected = vec![
         0x0000, 0x0017, 0xff01, 0x000a, 0x000b, 0x0023, 0x0010, 0x0005, 0x000d, 0x0012, 0x0033, 0x002d, 0x002b, 0x001b,
-        0x44cd, 0xfe0d,
+        0x44cd, 0xca34, 0xfe0d,
     ];
     expected.sort_unstable();
     assert_eq!(middle, expected);
-    assert!(!types.contains(&0x0015), "Chrome 133 sends no padding");
+    assert!(!types.contains(&0x0015), "Chrome sends no padding");
 
     // Groups and key shares: the group GREASE is shared by both.
     let groups = u16s(&h.ext(0x000a)[2..]);
@@ -393,7 +383,10 @@ async fn chrome_fingerprint() {
     let versions = u16s(&h.ext(0x002b)[1..]);
     assert!(is_grease(versions[0]));
     assert_eq!(&versions[1..], &[0x0304, 0x0303]);
-    assert_eq!(u16s(&h.ext(0x000d)[2..]), CHROME_SIGALGS_EXPECTED);
+    let sigalgs = u16s(&h.ext(0x000d)[2..]);
+    assert!(is_grease(sigalgs[0]));
+    assert_eq!(&sigalgs[1..], CHROME_SIGALGS_EXPECTED);
+    assert_eq!(h.ext(0xca34).len(), 186);
     assert_eq!(h.ext(0x0010), b"\x00\x0c\x02h2\x08http/1.1");
     assert_eq!(h.ext(0x44cd), b"\x00\x03\x02h2");
     assert_eq!(h.ext(0x001b), &[2, 0, 2]);
@@ -424,7 +417,9 @@ async fn chrome_fingerprint() {
     assert!(orders.len() > 1, "extension order is not randomized");
 }
 
-const CHROME_SIGALGS_EXPECTED: &[u16] = &[0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601];
+const CHROME_SIGALGS_EXPECTED: &[u16] = &[
+    0x0904, 0x0905, 0x0906, 0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
+];
 
 #[tokio::test]
 async fn chrome_without_post_quantum_and_custom_alpn() {
@@ -441,39 +436,33 @@ async fn chrome_without_post_quantum_and_custom_alpn() {
 
 #[tokio::test]
 async fn apple_and_firefox_fingerprints() {
-    // Fixed order: GREASE, ..., GREASE, padding.
-    let ios = capture(&test_config(Fingerprint::Ios, true)).await;
-    let t = ios.types();
-    assert!(is_grease(t[0]) && is_grease(t[13]));
-    assert_eq!(
-        &t[1..13],
-        &[
-            0x0000, 0x0017, 0xff01, 0x000a, 0x000b, 0x0010, 0x0005, 0x000d, 0x0012, 0x0033, 0x002d, 0x002b
-        ]
-    );
-    // BoringSSL padding brings a 256..511-byte hello to exactly 512.
-    if t.len() == 15 {
-        assert_eq!(t[14], 0x0015);
-        assert_eq!(ios.msg.len(), 512);
+    // Apple: fixed order, GREASE first and last, no padding (the hello is
+    // over 512 bytes with ML-KEM); Safari and iOS share the stack.
+    for fp in [Fingerprint::Safari, Fingerprint::Ios] {
+        let h = capture(&test_config(fp, true)).await;
+        let t = h.types();
+        assert_eq!(t.len(), 15);
+        assert!(is_grease(t[0]) && is_grease(t[14]));
+        assert_eq!(
+            &t[1..14],
+            &[
+                0x0000, 0x0017, 0xff01, 0x000a, 0x000b, 0x0010, 0x0005, 0x000d, 0x0012, 0x0033, 0x002d, 0x002b, 0x001b
+            ]
+        );
+        assert!(is_grease(h.suites[0]));
+        assert_eq!(&h.suites[1..4], &[0x1302, 0x1303, 0x1301]);
+        assert_eq!(h.suites.len(), 21);
+        assert_eq!(u16s(&h.ext(0x002b)[1..])[1..], [0x0304, 0x0303]);
+        assert_eq!(
+            &u16s(&h.ext(0x000a)[2..])[1..],
+            &[0x11ec, 0x001d, 0x0017, 0x0018, 0x0019]
+        );
+        assert_eq!(
+            key_share_groups(&h).iter().skip(1).copied().collect::<Vec<_>>(),
+            vec![(0x11ec, 1216), (0x001d, 32)]
+        );
+        assert_eq!(h.ext(0x001b), &[2, 0, 1]);
     }
-    assert_eq!(ios.suites.len(), 27);
-    assert!(is_grease(ios.suites[0]));
-    assert_eq!(u16s(&ios.ext(0x002b)[1..])[1..], [0x0304, 0x0303, 0x0302, 0x0301]);
-
-    let safari = capture(&test_config(Fingerprint::Safari, true)).await;
-    let t = safari.types();
-    assert_eq!(
-        &t[1..14],
-        &[
-            0x0000, 0x0017, 0xff01, 0x000a, 0x000b, 0x0010, 0x0005, 0x000d, 0x0012, 0x0033, 0x002d, 0x002b, 0x001b
-        ]
-    );
-    assert!(is_grease(t[14]) && t.len() == 15, "Safari 26.3 sends no padding");
-    assert_eq!(safari.ext(0x001b), &[2, 0, 1]);
-    assert_eq!(&safari.suites[1..4], &[0x1302, 0x1303, 0x1301]);
-    let shares = key_share_groups(&safari);
-    assert_eq!(&shares[1..], &[(0x11ec, 1184 + 32), (0x001d, 32)]);
-    assert_eq!(u16s(&safari.ext(0x002b)[1..])[1..], [0x0304, 0x0303]);
 
     let ff = capture(&test_config(Fingerprint::Firefox, true)).await;
     assert_eq!(

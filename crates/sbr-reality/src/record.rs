@@ -15,8 +15,13 @@ pub(crate) const HEADER_LEN: usize = 5;
 pub(crate) const MAX_PLAINTEXT: usize = 1 << 14;
 /// RFC 8446 §5.2: ciphertext may exceed the plaintext limit by at most 256.
 pub(crate) const MAX_CIPHERTEXT: usize = MAX_PLAINTEXT + 256;
-/// Two full records: a read normally pulls in more than one record, and the
-/// partial tail only has to be moved when it would not fit.
+/// Several full records: a bulk download costs one socket read (and, with
+/// draining reads, one caller write) per ~64 KiB, and the partial tail only
+/// has to be moved when it would not fit. Apple's tunnel extensions have a
+/// tight memory budget, so they hold two.
+#[cfg(not(any(target_os = "ios", target_os = "tvos")))]
+const READ_BUF_LEN: usize = 4 * (HEADER_LEN + MAX_CIPHERTEXT);
+#[cfg(any(target_os = "ios", target_os = "tvos"))]
 const READ_BUF_LEN: usize = 2 * (HEADER_LEN + MAX_CIPHERTEXT);
 /// The largest record this client writes.
 pub(crate) const MAX_WRITE_RECORD: usize = HEADER_LEN + MAX_PLAINTEXT + 1 + TAG_LEN;

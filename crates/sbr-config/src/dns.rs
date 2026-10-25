@@ -414,12 +414,12 @@ fn server_addr(o: &mut Obj, default_port: u16) -> Result<ServerAddr> {
     Ok(ServerAddr { server, server_port })
 }
 
-/// The DNS transports run their own rustls client; refuse what it can't honour.
+/// The DNS transports run their own TLS client (rustls or a browser
+/// fingerprint); refuse what it can't honour.
 fn dns_tls(o: &mut Obj, diag: &mut Diag) -> Result<TlsOutbound> {
     let path = o.sub("tls");
     let tls = crate::tls::parse_tls(o, "tls", diag)?.unwrap_or_default();
     let unsupported = [
-        ("utls", tls.utls.as_ref().is_some_and(|u| u.enabled)),
         ("reality", tls.reality.as_ref().is_some_and(|r| r.enabled)),
         ("ech", tls.ech.as_ref().is_some_and(|e| e.enabled)),
         ("fragment", tls.fragment),

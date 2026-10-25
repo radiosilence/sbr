@@ -9,26 +9,27 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf as TokioReadBuf};
 
 use crate::keys::{CipherSuite, RecordKey, TAG_LEN};
 use crate::record::{
-    CT_ALERT, CT_APPLICATION_DATA, CT_HANDSHAKE, HEADER_LEN, HandshakeBuf, MAX_PLAINTEXT, MAX_WRITE_RECORD, ReadBuf,
-    alert_error, invalid, seal_record,
+    CT_ALERT, CT_APPLICATION_DATA, CT_HANDSHAKE, HEADER_LEN, HandshakeBuf, MAX_WRITE_RECORD, ReadBuf, alert_error,
+    invalid, seal_record,
 };
 
 const HS_NEW_SESSION_TICKET: u8 = 4;
 const HS_KEY_UPDATE: u8 = 24;
 
-/// Write at most this much ciphertext per underlying write: two full records
-/// halve the syscalls for large writes without holding much memory.
-const MAX_WRITE_BATCH: usize = 2 * MAX_WRITE_RECORD;
+/// Write at most this much ciphertext per underlying write: a 64 KiB relay
+/// write goes out in one syscall. The buffer only grows this large when the
+/// caller writes this much at once (iOS relays 16 KiB).
+const MAX_WRITE_BATCH: usize = 4 * MAX_WRITE_RECORD;
 
 /// Rotate AES-GCM write keys well before the RFC 8446 §5.5 limit (2^24.5 records).
 const REKEY_AFTER_RECORDS: u64 = 1 << 23;
 
-/// A REALITY/TLS 1.3 client connection over `S`.
+/// A TLS 1.3 client connection over `S` (REALITY or browser-fingerprinted TLS).
 ///
 /// Reads decrypt in place in one fixed buffer; writes encrypt into one reused
 /// buffer. Writes return as soon as data is encrypted; `poll_flush` pushes it
 /// out. KeyUpdate and NewSessionTicket are handled internally.
-pub struct RealityStream<S> {
+pub struct TlsStream<S> {
     io: S,
     rb: ReadBuf,
     read_key: RecordKey,
@@ -42,12 +43,20 @@ pub struct RealityStream<S> {
     /// KeyUpdate to send before the next application data: Some(request_update).
     key_update: Option<bool>,
     read_closed: bool,
+    /// An error met while handing out further buffered records, reported
+    /// on the next read.
+    read_error: Option<io::Error>,
+    /// Decrypt one record per read (XTLS Vision may leave TLS after any record).
+    one_record: bool,
     write_closed: bool,
     alpn: Option<Vec<u8>>,
     group: u16,
+    /// Largest plaintext per record (the server's record_size_limit, if any).
+    max_fragment: usize,
 }
 
-impl<S> RealityStream<S> {
+impl<S> TlsStream<S> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         io: S,
         rb: ReadBuf,
@@ -56,6 +65,7 @@ impl<S> RealityStream<S> {
         wbuf: Vec<u8>,
         alpn: Option<Vec<u8>>,
         group: u16,
+        max_fragment: usize,
     ) -> Self {
         Self {
             io,
@@ -68,9 +78,12 @@ impl<S> RealityStream<S> {
             wpos: 0,
             key_update: None,
             read_closed: false,
+            read_error: None,
+            one_record: false,
             write_closed: false,
             alpn,
             group,
+            max_fragment,
         }
     }
 
@@ -107,6 +120,13 @@ impl<S> RealityStream<S> {
         self.plaintext = 0..0;
         out.extend_from_slice(&self.rb.take_unread());
         out
+    }
+
+    /// Decrypt at most one record per read, so that [`TlsStream::take_buffered`]
+    /// never holds decrypted bytes past the record just read. Off by default:
+    /// a read then drains every complete record already buffered.
+    pub fn limit_to_records(&mut self, on: bool) {
+        self.one_record = on;
     }
 
     /// Queues a KeyUpdate (update_requested) sent before the next write or flush:
@@ -184,7 +204,7 @@ impl<S> RealityStream<S> {
     }
 }
 
-impl<S: AsyncWrite + Unpin> RealityStream<S> {
+impl<S: AsyncWrite + Unpin> TlsStream<S> {
     fn poll_write_out(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         while self.wpos < self.wbuf.len() {
             let n = ready!(Pin::new(&mut self.io).poll_write(cx, &self.wbuf[self.wpos..]))?;
@@ -199,7 +219,7 @@ impl<S: AsyncWrite + Unpin> RealityStream<S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for RealityStream<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<S> {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut TokioReadBuf<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         loop {
@@ -208,7 +228,27 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for RealityStream<S> {
                 let start = this.plaintext.start;
                 buf.put_slice(this.rb.slice(start..start + n));
                 this.plaintext.start += n;
+                // Records already in the buffer go out in the same read: one
+                // call per record would multiply the caller's writes.
+                while !this.one_record && this.plaintext.is_empty() && buf.remaining() > 0 && !this.read_closed {
+                    match this.process_record() {
+                        Ok(true) => {
+                            let n = this.plaintext.len().min(buf.remaining());
+                            let start = this.plaintext.start;
+                            buf.put_slice(this.rb.slice(start..start + n));
+                            this.plaintext.start += n;
+                        }
+                        Ok(false) => break,
+                        Err(e) => {
+                            this.read_error = Some(e);
+                            break;
+                        }
+                    }
+                }
                 return Poll::Ready(Ok(()));
+            }
+            if let Some(e) = this.read_error.take() {
+                return Poll::Ready(Err(e));
             }
             if this.read_closed {
                 return Poll::Ready(Ok(()));
@@ -231,7 +271,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for RealityStream<S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for RealityStream<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<S> {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         ready!(this.poll_write_out(cx))?;
@@ -244,7 +284,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for RealityStream<S> {
         this.queue_key_update();
         let mut n = 0;
         while n < buf.len() {
-            let chunk = (buf.len() - n).min(MAX_PLAINTEXT);
+            let chunk = (buf.len() - n).min(this.max_fragment);
             if n > 0 && this.wbuf.len() + HEADER_LEN + chunk + 1 + TAG_LEN > MAX_WRITE_BATCH {
                 break;
             }

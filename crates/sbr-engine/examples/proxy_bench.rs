@@ -70,8 +70,15 @@ async fn socks(proxy: u16, target: SocketAddr) -> TcpStream {
     s
 }
 
-/// Gbit/s over `secs` across `streams` connections.
-async fn blast(proxy: u16, target: SocketAddr, streams: usize, secs: u64, upload: bool) -> f64 {
+fn cpu_seconds() -> f64 {
+    let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) };
+    let t = |v: libc::timeval| v.tv_sec as f64 + v.tv_usec as f64 / 1e6;
+    t(u.ru_utime) + t(u.ru_stime)
+}
+
+/// (Gbit/s, process CPU-seconds per GB) over `secs` across `streams` connections.
+async fn blast(proxy: u16, target: SocketAddr, streams: usize, secs: u64, upload: bool) -> (f64, f64) {
     let mut conns = Vec::new();
     for _ in 0..streams {
         conns.push(socks(proxy, target).await);
@@ -79,6 +86,7 @@ async fn blast(proxy: u16, target: SocketAddr, streams: usize, secs: u64, upload
     let total = Arc::new(AtomicU64::new(0));
     let deadline = Instant::now() + Duration::from_secs(secs);
     let start = Instant::now();
+    let cpu = cpu_seconds();
     let tasks: Vec<_> = conns
         .into_iter()
         .map(|mut s| {
@@ -102,7 +110,11 @@ async fn blast(proxy: u16, target: SocketAddr, streams: usize, secs: u64, upload
     for t in tasks {
         t.await.unwrap();
     }
-    total.load(Ordering::Relaxed) as f64 * 8.0 / start.elapsed().as_secs_f64() / 1e9
+    let bytes = total.load(Ordering::Relaxed) as f64;
+    (
+        bytes * 8.0 / start.elapsed().as_secs_f64() / 1e9,
+        (cpu_seconds() - cpu) / (bytes / 1e9),
+    )
 }
 
 fn free_port() -> u16 {
@@ -190,8 +202,8 @@ async fn main() {
     let (sink, source) = sink_and_source().await;
     println!("{streams} streams x {secs}s, loopback, sing-box server; Gbit/s");
     println!(
-        "{:<18} {:>12} {:>12} {:>12} {:>12}",
-        "", "sbr up", "sing-box up", "sbr down", "sing-box down"
+        "{:<18} {:>12} {:>12} {:>12} {:>12} {:>14} {:>14}",
+        "", "sbr up", "sing-box up", "sbr down", "sing-box down", "sbr up cpu/GB", "sbr down cpu/GB"
     );
 
     let sbr = Instance::start(&Options::from_value(client.clone()).unwrap(), Settings::default())
@@ -209,12 +221,12 @@ async fn main() {
 
     let _sb = spawn(bin, &client, "client", ports[0]).await;
     for (i, port) in ports.iter().enumerate() {
-        let up = blast(*port, sink, streams, secs, true).await;
-        let down = blast(*port, source, streams, secs, false).await;
-        let (su, sd) = results[i];
+        let (up, _) = blast(*port, sink, streams, secs, true).await;
+        let (down, _) = blast(*port, source, streams, secs, false).await;
+        let ((su, suc), (sd, sdc)) = results[i];
         println!(
-            "{:<18} {:>12.2} {:>12.2} {:>12.2} {:>12.2}",
-            protos[i], su, up, sd, down
+            "{:<18} {:>12.2} {:>12.2} {:>12.2} {:>12.2} {:>14.3} {:>14.3}",
+            protos[i], su, up, sd, down, suc, sdc
         );
     }
 }

@@ -16,8 +16,8 @@ Most 2025–2026 detail comes from community measurement (net4people/bbs, ntc.pa
 
 | area | state |
 |---|---|
-| REALITY | `sbr-reality`: own TLS 1.3 client with Chrome/Firefox/Safari/iOS ClientHellos, X25519MLKEM768, GREASE and ECH GREASE, Vision. Handles NewSessionTicket. |
-| Other TLS | rustls. `utls` is accepted but the ClientHello is rustls', distinguishable from a browser (uTLS parity is in progress separately). ECH only with a static config. |
+| REALITY | `sbr-reality`: own TLS 1.3 client with browser ClientHellos (Chrome 155 and Apple captured from the real clients, Firefox 148), X25519MLKEM768, GREASE and ECH GREASE, Vision. Handles NewSessionTicket. |
+| Other TLS | The same client with web PKI verification, by default for trojan/VLESS/VMess/HTTP over TLS, the v2ray transports, ShadowTLS's camouflage handshake, AnyTLS and DoH. rustls (a distinguishable ClientHello) only with `utls.enabled: false`, TLS 1.2, client certificates or ECH, which is static-config only. TLS 1.3 only; no session resumption. |
 | ClientHello fragmentation | `tls.fragment` / `record_fragment`: one split inside the SNI's first label. Applies to REALITY too. |
 | QUIC | quinn for hysteria2 (Salamander, port hopping, Brutal) and TUIC. The ClientHello in the Initial is scrambled like quic-go's: the SNI's halves go in different Initial packets (`disable_client_hello_scrambling` turns it off). |
 | Transports | ws, httpupgrade, grpc, http, and XHTTP (all modes, HTTP/1.1, HTTP/2 over TLS or REALITY, HTTP/3) as an sbr extension. No `quic` v2ray transport. |
@@ -165,7 +165,7 @@ R resists, P partially resists, F fails. Columns: REALITY = VLESS+REALITY+Vision
 | IP blocking | F | F | P | F | F | F | F | F |
 | Active probing | R* | R | P | R | P | P | R | P |
 | Entropy (FET) heuristic | R | P | R | F | R | R | R | R |
-| TLS fingerprint (JA3/JA4) | P | R | F | R | F | F | R | F |
+| TLS fingerprint (JA3/JA4) | P | R | P | R | P | P | R | F |
 | TLS-in-TLS | P | P | F | P | F | P | P | P |
 | QUIC/UDP blocking | R | F | R | R | R | R | F | F |
 | Timing/size flow fingerprinting | P | P | F | F | F | P | F | P |
@@ -180,7 +180,7 @@ Reasons:
 - **IP blocking.** No protocol survives a blocked address. Only the CDN-capable TLS transports (ws, grpc, httpupgrade behind a CDN) can move to addresses the censor is reluctant to block, and Russia blocks those too.
 - **Active probing.** REALITY forwards unauthenticated connections to its `dest`. \*In the reference deployment `dest` is a local site that cannot present the borrowed SNIs' certificates, so a probe with a borrowed SNI gets a mismatching certificate; see the server section. Salamander and WireGuard are silent to unauthenticated packets; SS-2022 has a replay filter. TLS-based servers are as good as their fallback configuration. ShadowTLS v3 servers were distinguishable by NewSessionTicket handling (Aparecium). A TUIC server answers any Initial with its own certificate.
 - **FET heuristic.** It targets random-looking TCP first packets: SS-2022 is the textbook case. Salamander is random UDP; the published rule is TCP-only, but random UDP is what Russia's mobile networks and the leaked TSG signatures target.
-- **TLS fingerprint.** REALITY uses browser ClientHellos but must track current browser releases; stale Chrome profiles were flagged in Russia in 2026. sbr's rustls-based TLS, the minimal TLS client behind ShadowTLS/AnyTLS, and quinn's QUIC ClientHello are not browser fingerprints.
+- **TLS fingerprint.** Every TCP TLS client sends a current browser's ClientHello (Chrome 155 by default, JA4 equal to the real browser's), where sing-box and Xray still send uTLS's Chrome 133, the kind of stale profile flagged in Russia in 2026. Partial, not resisting: the ClientHello is only the first message; the rest of the handshake (no resumption, TLS 1.3 only, no HTTP/2 SETTINGS fingerprint behind it) and the profiles' freshness still distinguish sbr from a browser. quinn's QUIC ClientHello (TUIC; hysteria2 without Salamander) is not a browser's.
 - **TLS-in-TLS.** Vision removes the double encryption but Xue et al. detect it; AnyTLS's padding and Hysteria's QUIC framing blur sizes without hiding round-trip structure. Plain trojan/VMess over TLS is the case the classifiers were built on.
 - **QUIC/UDP blocking.** Any UDP transport fails where UDP to foreign hosts is dropped; the TCP transports are unaffected.
 - **Flow fingerprinting.** Nothing in sbr shapes timing. Vision pads early packets only; AnyTLS pads per its scheme; WireGuard's fixed message sizes are trivially classified.
@@ -202,7 +202,7 @@ Reasons:
 
 Considered and not ranked as issues:
 
-- **Browser-grade TLS for non-REALITY outbounds** is in progress separately. Fingerprint freshness is an ongoing maintenance task, not a feature: profiles must follow browser releases.
+- **Browser-grade TLS for non-REALITY outbounds** is done for TCP. Fingerprint freshness is an ongoing maintenance task, not a feature: profiles must follow browser releases, and `sbr-reality`'s tests pin the JA4 each one must match.
 - **Padding and traffic shaping** beyond what Vision, AnyTLS and sing-mux padding provide. Published work shows padding alone is limited; the useful step is multiplexing (gap 4).
 - **CDN and domain fronting** already work with ws, grpc and httpupgrade by configuration. XHTTP (gap 2) is the better CDN transport.
 - **Snowflake, meek, WebRTC.** Snowflake needs Tor and its DTLS fingerprint was blocked in Russia from 2026-03-30 ([net4people #603](https://github.com/net4people/bbs/issues/603)); meek-style CDN tunnelling is covered by XHTTP through a CDN.

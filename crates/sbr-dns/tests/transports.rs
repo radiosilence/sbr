@@ -428,6 +428,70 @@ async fn dns_over_https_post_get_and_domain_resolver() {
     assert_eq!(stats.tcp_conns.load(Ordering::SeqCst), 2);
 }
 
+/// The first TLS record a server named by `dns` (with `{port}`) receives.
+async fn client_hello(dns: &str) -> Vec<u8> {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let r = router(&dns.replace("{port}", &l.local_addr().unwrap().port().to_string()));
+    let server = async {
+        let (mut s, _) = l.accept().await.unwrap();
+        let mut hdr = [0u8; 5];
+        s.read_exact(&mut hdr).await.unwrap();
+        let mut msg = vec![0u8; u16::from_be_bytes([hdr[3], hdr[4]]) as usize];
+        s.read_exact(&mut msg).await.unwrap();
+        msg
+    };
+    // The lookup itself never completes usefully; only its hello matters.
+    tokio::select! {
+        msg = server => msg,
+        _ = r.lookup("1.test", None) => panic!("lookup ended before its ClientHello arrived"),
+    }
+}
+
+fn extension_types(msg: &[u8]) -> Vec<u16> {
+    let b = &msg[4..];
+    let mut p = 2 + 32;
+    p += 1 + b[p] as usize;
+    p += 2 + u16::from_be_bytes([b[p], b[p + 1]]) as usize;
+    p += 1 + b[p] as usize;
+    p += 2;
+    let mut out = Vec::new();
+    while p + 4 <= b.len() {
+        out.push(u16::from_be_bytes([b[p], b[p + 1]]));
+        p += 4 + u16::from_be_bytes([b[p + 2], b[p + 3]]) as usize;
+    }
+    out
+}
+
+/// DoH imitates Chrome unless `utls` is disabled; DoT keeps rustls unless
+/// `utls` is enabled. Chrome is recognisable by its Trust Anchor IDs
+/// extension (0xca34), Firefox by record_size_limit (0x001c); rustls sends
+/// neither.
+#[tokio::test]
+async fn doh_and_dot_client_hellos() {
+    let doh = |tls: &str| {
+        format!(r#"{{"servers":[{{"type":"https","server":"127.0.0.1","server_port":{{port}},"tls":{{{tls}}}}}]}}"#)
+    };
+    let dot = |tls: &str| {
+        format!(r#"{{"servers":[{{"type":"tls","server":"127.0.0.1","server_port":{{port}},"tls":{{{tls}}}}}]}}"#)
+    };
+    let chrome = extension_types(&client_hello(&doh("")).await);
+    assert!(chrome.contains(&0xca34), "DoH defaults to Chrome: {chrome:04x?}");
+    let rustls = extension_types(&client_hello(&doh(r#""utls":{"enabled":false}"#)).await);
+    assert!(!rustls.contains(&0xca34) && !rustls.contains(&0x001c), "{rustls:04x?}");
+    let plain_dot = extension_types(&client_hello(&dot("")).await);
+    assert!(
+        !plain_dot.contains(&0xca34) && !plain_dot.contains(&0x001c),
+        "{plain_dot:04x?}"
+    );
+    let firefox_dot = extension_types(
+        &client_hello(&dot(
+            r#""enabled":true,"utls":{"enabled":true,"fingerprint":"firefox"}"#,
+        ))
+        .await,
+    );
+    assert!(firefox_dot.contains(&0x001c), "{firefox_dot:04x?}");
+}
+
 #[tokio::test]
 async fn fails_over_to_the_next_upstream_and_skips_the_dead_one() {
     let stats = Arc::new(Stats::default());
