@@ -22,7 +22,7 @@ extension Sbr {
     /// it) unless `publicMessages` is set.
     public static func forwardLogs(to logger: Logger, publicMessages: Bool = false) {
         setLogHandler { level, message in
-            if level >= .info { SbrRecentLogs.shared.append(level, message) }
+            SbrRecentLogs.shared.append(level, message)
             let type: OSLogType = switch level {
             case .trace, .debug: .debug
             case .info: .info
