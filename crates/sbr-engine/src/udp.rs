@@ -112,6 +112,7 @@ impl Engine {
         let source = meta.source;
         let mut opts = RouteOptions::default();
         let mut i = 0;
+        let mut matched = None;
         let action = loop {
             let Some((idx, action)) = self.router.next(&meta, i) else {
                 break Action::Route {
@@ -133,12 +134,16 @@ impl Engine {
                 Action::Resolve { strategy, .. } => self.resolve(&mut meta, *strategy).await,
                 Action::Route { outbound, options } => {
                     opts.merge(options);
+                    matched = Some(idx);
                     break Action::Route {
                         outbound: *outbound,
                         options: opts,
                     };
                 }
-                a => break a.clone(),
+                a => {
+                    matched = Some(idx);
+                    break a.clone();
+                }
             }
         };
 
@@ -194,6 +199,7 @@ impl Engine {
                 });
                 let epoch = Instant::now();
                 let last = Arc::new(AtomicU64::new(0));
+                let (reg, cancelled) = self.tracker.register(meta.clone(), self.chain(outbound), matched);
 
                 // Remote → client.
                 let unmap = match (&meta.destination.host, options.udp_disable_domain_unmapping) {
@@ -202,6 +208,7 @@ impl Engine {
                 };
                 let reader = {
                     let (conn, back, last) = (conn.clone(), back.clone(), last.clone());
+                    let tracked = reg.conn.clone();
                     tokio::spawn(async move {
                         let mut buf = vec![0u8; 65535];
                         loop {
@@ -210,6 +217,7 @@ impl Engine {
                                 Err(_) => return,
                             };
                             last.store(now_ms(epoch), Ordering::Relaxed);
+                            tracked.add_down(n);
                             // Report replies from the address the client asked for, so
                             // SOCKS5 clients that sent to a domain recognise them.
                             let from = match &unmap {
@@ -225,31 +233,39 @@ impl Engine {
 
                 // Client → remote.
                 let mut pending = Some((meta.destination.clone(), first));
-                let result = loop {
-                    let (dest, payload) = match pending.take() {
-                        Some(p) => p,
-                        None => {
-                            let idle_for =
-                                Duration::from_millis(now_ms(epoch).saturating_sub(last.load(Ordering::Relaxed)));
-                            let Some(remaining) = timeout.checked_sub(idle_for) else {
-                                break Ok(());
-                            };
-                            match tokio::time::timeout(remaining, rx.recv()).await {
-                                Ok(Some(p)) => p,
-                                Ok(None) => break Ok(()),
-                                Err(_) => continue, // re-check: the reader may have kept it alive
+                let forward = async {
+                    loop {
+                        let (dest, payload) = match pending.take() {
+                            Some(p) => p,
+                            None => {
+                                let idle_for =
+                                    Duration::from_millis(now_ms(epoch).saturating_sub(last.load(Ordering::Relaxed)));
+                                let Some(remaining) = timeout.checked_sub(idle_for) else {
+                                    break Ok(());
+                                };
+                                match tokio::time::timeout(remaining, rx.recv()).await {
+                                    Ok(Some(p)) => p,
+                                    Ok(None) => break Ok(()),
+                                    Err(_) => continue, // re-check: the reader may have kept it alive
+                                }
                             }
+                        };
+                        last.store(now_ms(epoch), Ordering::Relaxed);
+                        let target = if options.udp_connect {
+                            first_dest.clone()
+                        } else {
+                            options.apply(&dest)
+                        };
+                        reg.conn.add_up(payload.len());
+                        if let Err(e) = conn.send_to(&payload, &target).await {
+                            debug!(dest = %target, error = %e, "udp send failed");
                         }
-                    };
-                    last.store(now_ms(epoch), Ordering::Relaxed);
-                    let target = if options.udp_connect {
-                        first_dest.clone()
-                    } else {
-                        options.apply(&dest)
-                    };
-                    if let Err(e) = conn.send_to(&payload, &target).await {
-                        debug!(dest = %target, error = %e, "udp send failed");
                     }
+                };
+                let result = tokio::select! {
+                    biased;
+                    r = forward => r,
+                    _ = cancelled.wait() => Ok(()),
                 };
                 reader.abort();
                 result

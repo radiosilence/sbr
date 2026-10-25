@@ -2,7 +2,7 @@
 //! `build_one`; protocol modules only depend on `BuildContext` and `Upstream`.
 
 mod direct;
-mod group;
+pub mod group;
 mod http;
 mod shadowsocks;
 mod socks;
@@ -16,13 +16,15 @@ use sbr_core::dial::{self, DialOptions};
 use sbr_core::dns::Dns;
 use sbr_core::{BoxPacketConn, Destination, Stream};
 
-pub use group::Selector;
+pub use group::{GroupEnv, Selector, UrlTest};
 pub use sbr_core::{Group, Outbound, PacketConn};
 
 /// Shared services outbounds may need while being built.
 #[derive(Clone)]
 pub struct BuildContext {
     pub dns: Arc<dyn Dns>,
+    /// Services `selector`/`urltest` use (connection registry, cache file, probes).
+    pub groups: Arc<GroupEnv>,
 }
 
 /// How an outbound reaches its server: the system network, or another
@@ -77,10 +79,14 @@ pub fn build_all(configs: &[OutboundConfig], ctx: &BuildContext) -> Result<Vec<A
         ctx,
         built: vec![None; configs.len()],
         visiting: vec![false; configs.len()],
+        servers: HashMap::new(),
+        urltests: HashMap::new(),
     };
     for i in 0..configs.len() {
         b.build(i)?;
     }
+    let _ = ctx.groups.servers.set(b.servers);
+    let _ = ctx.groups.urltests.set(b.urltests);
     Ok(b.built.into_iter().map(|o| o.expect("built")).collect())
 }
 
@@ -90,6 +96,20 @@ struct Builder<'a> {
     ctx: &'a BuildContext,
     built: Vec<Option<Arc<dyn Outbound>>>,
     visiting: Vec<bool>,
+    /// Leaf tag → how to reach its own server (URL-less urltest probes).
+    servers: HashMap<String, (Upstream, Destination)>,
+    urltests: HashMap<String, Arc<UrlTest>>,
+}
+
+/// The server and dialer of outbounds that have one. Protocols added later
+/// should be listed here so URL-less `urltest` can measure them.
+fn server_of(kind: &OutboundKind) -> Option<(&sbr_config::ServerAddr, &Dial)> {
+    match kind {
+        OutboundKind::Socks(s) => Some((&s.server, &s.dial)),
+        OutboundKind::Http(s) => Some((&s.server, &s.dial)),
+        OutboundKind::Shadowsocks(s) => Some((&s.server, &s.dial)),
+        _ => None,
+    }
 }
 
 impl Builder<'_> {
@@ -116,6 +136,11 @@ impl Builder<'_> {
         self.visiting[i] = true;
         let tag = cfg.tag.clone();
         let invalid = |e: String| BuildError::Invalid(i, cfg.tag.clone(), e);
+        if let Some((server, dial)) = server_of(&cfg.kind) {
+            let up = self.upstream(dial)?;
+            let dest = Destination::from_host_port(&server.server, server.server_port);
+            self.servers.insert(tag.clone(), (up, dest));
+        }
         let out: Arc<dyn Outbound> = match &cfg.kind {
             OutboundKind::Direct(d) => {
                 if d.detour.is_some() {
@@ -131,12 +156,19 @@ impl Builder<'_> {
             }
             OutboundKind::Selector(g) => {
                 let members = g.outbounds.iter().map(|t| self.dep(t)).collect::<Result<Vec<_>, _>>()?;
-                Arc::new(Selector::new(tag, "selector", members, g.default.as_deref()))
+                Arc::new(Selector::new(
+                    tag,
+                    members,
+                    g.default.as_deref(),
+                    g.interrupt_exist_connections,
+                    self.ctx.groups.clone(),
+                ))
             }
             OutboundKind::UrlTest(g) => {
-                // No latency probing yet: behaves as a selector pinned to the first member.
                 let members = g.outbounds.iter().map(|t| self.dep(t)).collect::<Result<Vec<_>, _>>()?;
-                Arc::new(Selector::new(tag, "urltest", members, None))
+                let u = UrlTest::new(tag.clone(), members, g, self.ctx.groups.clone()).map_err(invalid)?;
+                self.urltests.insert(tag, u.clone());
+                u
             }
         };
         self.visiting[i] = false;

@@ -79,10 +79,9 @@ pub unsafe extern "C" fn sbr_start(
             .build()
             .map_err(|e| e.to_string())?;
         let settings = Settings {
-            dns: None,
-            tun_fd: None,
             relay_buffer: RELAY_BUFFER,
             base_dir: unsafe { str_arg(base_dir) }.map(Into::into),
+            ..Settings::default()
         };
         let instance = runtime
             .block_on(Instance::start(&options, settings))

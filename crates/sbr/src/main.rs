@@ -1,3 +1,5 @@
+mod rule_set;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -30,6 +32,11 @@ enum Cmd {
     Check,
     /// Print version
     Version,
+    /// Manage rule-sets
+    RuleSet {
+        #[command(subcommand)]
+        cmd: rule_set::RuleSetCmd,
+    },
 }
 
 fn load(cli: &Cli) -> Result<Options> {
@@ -50,14 +57,17 @@ fn init_log(o: &Options, no_color: bool) {
     };
     let filter = tracing_subscriber::EnvFilter::try_from_env("SBR_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level));
-    let b = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_ansi(!no_color)
-        .with_target(false);
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    // The Clash API's `/logs` reads from this layer.
+    let fmt = tracing_subscriber::fmt::layer().with_ansi(!no_color).with_target(false);
+    let registry = tracing_subscriber::registry()
+        .with(filter)
+        .with(sbr_engine::clash::log::layer());
     if o.log.timestamp {
-        b.init()
+        registry.with(fmt).init()
     } else {
-        b.without_time().init()
+        registry.with(fmt.without_time()).init()
     }
 }
 
@@ -67,6 +77,7 @@ fn main() -> Result<()> {
         std::env::set_current_dir(dir).with_context(|| format!("chdir {}", dir.display()))?;
     }
     match cli.cmd {
+        Cmd::RuleSet { cmd } => rule_set::run(cmd),
         Cmd::Version => {
             println!("sbr version {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -78,7 +89,7 @@ fn main() -> Result<()> {
             }
             // Build everything short of binding sockets, so rule-set and
             // outbound errors surface here too.
-            sbr_engine::Engine::new(&o, &Settings::default())?;
+            sbr_engine::Engine::check(&o, &Settings::default())?;
             Ok(())
         }
         Cmd::Run => {

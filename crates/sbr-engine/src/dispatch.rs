@@ -99,6 +99,8 @@ impl Engine {
         let mut opts = RouteOptions::default();
         let mut sniffed = false;
         let mut i = 0;
+        // The deciding rule, for the connection registry (`None`: final).
+        let mut matched = None;
         let action = loop {
             let Some((idx, action)) = self.router.next(&meta, i) else {
                 break Action::Route {
@@ -119,12 +121,16 @@ impl Engine {
                 Action::Resolve { strategy, .. } => self.resolve(&mut meta, *strategy).await,
                 Action::Route { outbound, options } => {
                     opts.merge(options);
+                    matched = Some(idx);
                     break Action::Route {
                         outbound: *outbound,
                         options: opts,
                     };
                 }
-                final_action => break final_action.clone(),
+                final_action => {
+                    matched = Some(idx);
+                    break final_action.clone();
+                }
             }
         };
 
@@ -136,7 +142,18 @@ impl Engine {
                 match out.connect(&dest).await {
                     Ok(remote) => {
                         client.inner.ready().await?;
-                        self.relay(&meta, client, remote).await
+                        // Registered once connected, like sing-box; closing it
+                        // through the registry aborts the relay.
+                        let (reg, cancelled) = self.tracker.register(meta.clone(), self.chain(outbound), matched);
+                        let client = crate::track::Counted {
+                            inner: client,
+                            conn: &reg.conn,
+                        };
+                        tokio::select! {
+                            biased;
+                            r = self.relay(&meta, client, remote) => r,
+                            _ = cancelled.wait() => Ok(()),
+                        }
                     }
                     Err(e) => {
                         warn!(inbound = %meta.inbound, dest = %dest, outbound = out.tag(), error = %e, "connect failed");

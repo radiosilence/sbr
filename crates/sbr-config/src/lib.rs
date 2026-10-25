@@ -20,7 +20,7 @@ use std::time::Duration;
 use obj::{Diag, Obj};
 use serde_json::Value;
 
-pub use experimental::{CacheFileOptions, ClashApiOptions, Experimental};
+pub use experimental::{CacheFileOptions, ClashApiOptions, Experimental, split_host_port};
 pub use route::*;
 pub use srs::parse_rule_set;
 pub use tls::{Ech, Multiplex, Reality, TlsOutbound, Transport, Utls};
