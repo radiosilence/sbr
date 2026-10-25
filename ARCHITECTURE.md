@@ -46,3 +46,7 @@ sbr contacts only endpoints the config names. Never add a built-in default URL (
 
 - `cargo fmt` (max_width 120), `cargo clippy --workspace --all-targets` clean, `cargo test --workspace` green.
 - Comments explain *why*. Match the existing density.
+
+## Untrusted input
+
+Local apps, servers, the network and remote rule-sets are all hostile (`docs/security-audit.md`). A panic or an unbounded allocation kills the iOS extension and with it the tunnel, so every length field is checked before use and every table, queue and buffer driven by input has a cap in bytes, not only in entries. New parsers of untrusted bytes get a target in `fuzz/` (`cargo +nightly fuzz run -O <target>`).
