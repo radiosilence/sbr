@@ -67,6 +67,9 @@ async fn rustls_echo(cfg: Arc<ServerConfig>, key_update_after: Option<usize>) ->
                 return;
             }
             tls.write_all(&buf[..n]).await.unwrap();
+            // Records tokio-rustls could not write yet would otherwise wait
+            // for the next read.
+            tls.flush().await.unwrap();
             total += n;
             if let Some(after) = key_update_after
                 && !updated

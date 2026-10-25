@@ -106,6 +106,10 @@ async fn echo(cfg: ServerConfig) -> (std::net::SocketAddr, tokio::task::JoinHand
                 return Ok(());
             }
             tls.write_all(&buf[..n]).await.map_err(|e| e.to_string())?;
+            // tokio-rustls may keep records it could not write yet; without a
+            // flush they wait for the next read, which never comes once the
+            // client has sent everything.
+            tls.flush().await.map_err(|e| e.to_string())?;
         }
     });
     (addr, h)
