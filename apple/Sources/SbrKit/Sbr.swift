@@ -215,7 +215,7 @@ public final class Sbr: @unchecked Sendable {
         try? withHandle { sbr_network_changed($0) }
     }
 
-    private func withHandle<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
+    func withHandle<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
         lock.lock()
         defer { lock.unlock() }
         guard let h = handle else { throw SbrError("sbr is stopped") }

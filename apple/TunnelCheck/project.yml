@@ -1,0 +1,88 @@
+# XcodeGen spec for the macOS packet tunnel test rig (see README.md).
+#
+# A minimal host app plus the app's own PacketTunnelProvider as a packet
+# tunnel app extension, under separate bundle IDs so the rig never touches the
+# real app's VPN configuration. SbrKit is compiled from source and linked
+# against libsbr_apple.a for the host architecture, so the rig does not need
+# (or overwrite) apple/SbrCore.xcframework.
+name: SbrTunnelCheck
+
+options:
+  createIntermediateGroups: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: 2256Q92VF2
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: Apple Development
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ONLY_ACTIVE_ARCH: YES
+    # `import SbrCore` resolves to sbr.h through SbrCore/module.modulemap.
+    SWIFT_INCLUDE_PATHS: $(SRCROOT)/SbrCore
+    SBR_RUST_LIB_DIR: $(SRCROOT)/../../target/$(CURRENT_ARCH)-apple-darwin/release
+    "SBR_RUST_LIB_DIR[arch=arm64]": $(SRCROOT)/../../target/aarch64-apple-darwin/release
+
+targets:
+  SbrKitStatic:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: ../Sources/SbrKit
+    settings:
+      base:
+        PRODUCT_NAME: SbrKit
+        PRODUCT_MODULE_NAME: SbrKit
+
+  SbrTunnelCheck:
+    type: application
+    platform: macOS
+    sources:
+      - path: Host
+        excludes: ["*.entitlements"]
+    dependencies:
+      - target: SbrKitStatic
+        link: true
+      - target: SbrTunnelCheckExtension
+        embed: true
+    info:
+      path: Support/Host-Info.plist
+      properties:
+        CFBundleDisplayName: sbr tunnel check
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSUIElement: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: cc.blit.sbr.check
+        PRODUCT_NAME: SbrTunnelCheck
+        CODE_SIGN_ENTITLEMENTS: Host/Host.entitlements
+        LIBRARY_SEARCH_PATHS: $(SBR_RUST_LIB_DIR)
+        OTHER_LDFLAGS: -lsbr_apple -liconv -framework Security -framework CoreFoundation
+
+  SbrTunnelCheckExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      # The shipping provider, unchanged.
+      - path: ../App/Tunnel/PacketTunnelProvider.swift
+    dependencies:
+      - target: SbrKitStatic
+        link: true
+    info:
+      path: Support/Tunnel-Info.plist
+      properties:
+        CFBundleDisplayName: SbrTunnelCheckExtension
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: cc.blit.sbr.check.tunnel
+        CODE_SIGN_ENTITLEMENTS: Tunnel.entitlements
+        LIBRARY_SEARCH_PATHS: $(SBR_RUST_LIB_DIR)
+        OTHER_LDFLAGS: -lsbr_apple -liconv -framework Security -framework CoreFoundation

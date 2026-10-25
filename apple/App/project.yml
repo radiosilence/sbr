@@ -6,6 +6,7 @@
 #                              (iOS, tvOS, and Mac App Store style on macOS)
 #   SbrMac                     macOS Developer ID flavour of the same app ...
 #   SbrTunnelSystemExtension   ... shipping the tunnel as a system extension
+#   SbrWidgets                 iOS 18+ Control Center toggle, embedded in Sbr
 name: Sbr
 
 options:
@@ -42,10 +43,14 @@ targets:
     sources:
       - path: App
         excludes: ["*.entitlements"]
+      - path: Shared
     dependencies:
       - package: SbrKit
       - target: SbrTunnel
         embed: true
+      - target: SbrWidgets
+        embed: true
+        destinationFilters: [iOS]
     info:
       path: Support/App-Info.plist
       properties:
@@ -74,6 +79,8 @@ targets:
         PRODUCT_NAME: sbr
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: App/App.entitlements
+        # Adds Access WiFi Information, for trusting the current network.
+        "CODE_SIGN_ENTITLEMENTS[sdk=iphone*]": App/App-iOS.entitlements
         "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": App/App-macOS.entitlements
       configs:
         # App Store builds sign with the API-provisioned distribution profile.
@@ -115,6 +122,34 @@ targets:
           "CODE_SIGN_IDENTITY[sdk=iphoneos*]": Apple Distribution
           "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": sbr tunnel App Store
 
+  SbrWidgets:
+    type: app-extension
+    platform: iOS
+    # Controls are new in iOS 18; iOS 17 leaves the extension unloaded.
+    deploymentTarget: "18.0"
+    sources:
+      - path: Widgets
+        excludes: ["*.entitlements"]
+      - path: Shared
+    info:
+      path: Support/Widgets-Info.plist
+      properties:
+        CFBundleDisplayName: sbr
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        SbrTunnelBundleIdentifier: $(SBR_BUNDLE_ID).tunnel
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID).widgets
+        CODE_SIGN_ENTITLEMENTS: Widgets/Widgets.entitlements
+      configs:
+        Release:
+          "CODE_SIGN_STYLE[sdk=iphoneos*]": Manual
+          "CODE_SIGN_IDENTITY[sdk=iphoneos*]": Apple Distribution
+          "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": sbr widgets App Store
+
   SbrMac:
     type: application
     platform: macOS
@@ -122,6 +157,7 @@ targets:
     sources:
       - path: App
         excludes: ["*.entitlements"]
+      - path: Shared
     dependencies:
       - package: SbrKit
       - target: SbrTunnelSystemExtension

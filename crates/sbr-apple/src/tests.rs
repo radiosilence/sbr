@@ -158,6 +158,73 @@ fn both_runtime_flavours_relay_and_count_live() {
 }
 
 #[test]
+fn connections_snapshot_and_close() {
+    let echo = echo_server();
+    let i = start(CFG, sbr_start_options_default());
+    let proxy = listen_addr(i);
+    let mut streams: Vec<TcpStream> = (0..3)
+        .map(|_| {
+            let (mut s, rep) = socks(proxy, echo);
+            assert_eq!(rep, 0);
+            s.write_all(b"ping").unwrap();
+            let mut b = [0u8; 4];
+            s.read_exact(&mut b).unwrap();
+            s
+        })
+        .collect();
+    let snapshot =
+        |limit| -> serde_json::Value { serde_json::from_str(&unsafe { take(sbr_connections(i, limit)) }).unwrap() };
+    // Counts land just after the write syscall, so the client can be ahead.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let v = loop {
+        let v = snapshot(2);
+        let counted = v["connections"].as_array().unwrap().iter().all(|c| c["download"] == 4);
+        if v["total"] == 3 && counted || Instant::now() > deadline {
+            break v;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let conns = v["connections"].as_array().unwrap();
+    assert_eq!(v["total"], 3, "{v}");
+    assert_eq!(conns.len(), 2, "limit caps the list");
+    let first = &conns[0];
+    let id = first["id"].as_str().unwrap().to_owned();
+    assert!(id.as_str() > conns[1]["id"].as_str().unwrap(), "newest first: {v}");
+    assert_eq!(first["network"], "tcp");
+    assert_eq!(first["inbound"], "mixed/in");
+    assert_eq!(first["destination"], echo.to_string());
+    assert_eq!(first["domain"], serde_json::Value::Null);
+    assert_eq!(first["ip"], "127.0.0.1");
+    assert_eq!(first["protocol"], serde_json::Value::Null);
+    assert_eq!(first["chain"], serde_json::json!(["a", "proxy"]));
+    assert_eq!(first["rule"], "final");
+    assert_eq!((&first["upload"], &first["download"]), (&4.into(), &4.into()));
+    let start = first["start"].as_u64().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    assert!(start <= now && now - start < 60_000, "{start} vs {now}");
+    assert_eq!(v["upload_total"], 12);
+    assert_eq!(snapshot(0)["connections"].as_array().unwrap().len(), 3);
+
+    let id = c(&id);
+    assert_eq!(unsafe { sbr_close_connection(i, id.as_ptr()) }, 1);
+    // The newest stream was the one closed: its client sees EOF.
+    let mut b = [0u8; 1];
+    assert_eq!(streams.pop().unwrap().read(&mut b).unwrap(), 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while snapshot(0)["total"] != 2 {
+        assert!(Instant::now() < deadline, "closed connection still listed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(unsafe { sbr_close_connection(i, id.as_ptr()) }, 0);
+    assert_eq!(unsafe { sbr_close_connection(i, c("not-an-id").as_ptr()) }, 0);
+    unsafe { sbr_stop(i) };
+    assert!(unsafe { sbr_connections(ptr::null_mut(), 0) }.is_null());
+}
+
+#[test]
 fn connection_limit() {
     let echo = echo_server();
     let i = start(

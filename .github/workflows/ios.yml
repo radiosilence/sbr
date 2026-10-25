@@ -112,7 +112,7 @@ jobs:
           security find-identity -v -p codesigning "$keychain" | grep -q "Apple Distribution" \
             || { echo "::error::no Apple Distribution identity in IOS_CERTIFICATE_P12"; exit 1; }
       - name: Install the provisioning profiles
-        run: uv run apple/tools/fetch-profiles.py "sbr App Store" "sbr tunnel App Store"
+        run: uv run apple/tools/fetch-profiles.py "sbr App Store" "sbr tunnel App Store" "sbr widgets App Store"
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}

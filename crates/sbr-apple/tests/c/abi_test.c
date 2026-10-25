@@ -55,6 +55,12 @@ int main(void) {
     CHECK(groups != NULL && strstr(groups, "\"selected\":\"b\"") != NULL);
     sbr_string_free(groups);
 
+    char *conns = sbr_connections(sbr, 0);
+    CHECK(conns != NULL && strstr(conns, "\"connections\":[]") != NULL);
+    sbr_string_free(conns);
+    CHECK(sbr_close_connection(sbr, "00000000-0000-4000-8000-000000000001") == 0);
+    CHECK(sbr_close_connection(sbr, NULL) == 0);
+
     uint64_t up = 1, down = 1, active = 1;
     sbr_stats(sbr, &up, &down, &active);
     CHECK(up == 0 && down == 0 && active == 0);

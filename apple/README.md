@@ -46,7 +46,8 @@ That is the whole extension. The base class:
    interfaces changes. `wake()` calls it too, because UDP NAT mappings are likely gone
    after sleep. `sleep()` returns immediately: an idle sbr arms no timers, so there is
    nothing to pause.
-6. Answers `SbrRequest` app messages (`groups`, `select`, `stats`, `reload`, `profile`).
+6. Answers `SbrRequest` app messages (`groups`, `select`, `stats`, `connections`,
+   `closeConnection`, `reload`, `profile`).
    On the app side, call `NETunnelProviderSession.send(_:)`.
 7. Refreshes a remote profile itself when `providerConfiguration["remote"]` names
    one (an `SbrRemoteProfile`: URL, interval, when the config was downloaded).
@@ -95,6 +96,8 @@ int32_t         sbr_fetch_profile(SbrInstance *instance, const char *url, SbrFet
 void            sbr_stop(SbrInstance *instance);
 int32_t         sbr_select(SbrInstance *instance, const char *group, const char *member);
 char           *sbr_groups(SbrInstance *instance);
+char           *sbr_connections(SbrInstance *instance, uint32_t limit);
+int32_t         sbr_close_connection(SbrInstance *instance, const char *id);
 void            sbr_stats(SbrInstance *instance, uint64_t *up, uint64_t *down, uint64_t *active);
 void            sbr_runtime_stats(SbrInstance *instance, SbrRuntimeStats *out);
 void            sbr_network_changed(SbrInstance *instance);
@@ -216,6 +219,15 @@ targets, with nightly build-std for tvOS. aws-lc-sys and blake3 build C code
 that needs an Apple SDK, so on Linux the script swaps in a stand-in compiler
 that emits empty objects. The Rust code is fully type-checked; the C code is
 only compiled by the real macOS build.
+
+## Tunnel check
+
+`mise run test:apple-tunnel` runs sbr inside a real macOS packet tunnel
+extension and checks TCP, DNS, UDP and a bulk download through it, without
+touching the Mac's default route or DNS. It is the only test that exercises a
+Network Extension, whose own sockets bypass its tunnel; CI cannot run it,
+because an NE needs a signed app and a one-time approval of its VPN
+configuration. See [`TunnelCheck/README.md`](TunnelCheck/README.md).
 
 ## TestFlight
 

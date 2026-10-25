@@ -7,3 +7,6 @@
 /apple/App/Support
 .swiftpm
 .build/
+/apple/TunnelCheck/*.xcodeproj
+/apple/TunnelCheck/Support
+/apple/TunnelCheck/build

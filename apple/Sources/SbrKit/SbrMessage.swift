@@ -8,6 +8,10 @@ public enum SbrRequest: Codable, Sendable {
     /// Start a latency test of a group; poll `.groups` for the results.
     case urlTest(group: String)
     case stats
+    /// The newest open connections (at most 200).
+    case connections
+    /// Close one connection; answers with the connections left.
+    case closeConnection(id: String)
     /// The extension's recent log lines (memory only).
     case logs
     /// Run this config (a no-op when it is already running), or re-read the
@@ -53,6 +57,7 @@ public struct SbrResponse: Codable, Sendable {
     public var stats: SbrStats?
     public var logs: [String]?
     public var profile: SbrProfileSnapshot?
+    public var connections: SbrConnections?
     public var error: String?
 
     public init(
@@ -60,12 +65,14 @@ public struct SbrResponse: Codable, Sendable {
         stats: SbrStats? = nil,
         logs: [String]? = nil,
         profile: SbrProfileSnapshot? = nil,
+        connections: SbrConnections? = nil,
         error: String? = nil
     ) {
         self.groups = groups
         self.stats = stats
         self.logs = logs
         self.profile = profile
+        self.connections = connections
         self.error = error
     }
 }

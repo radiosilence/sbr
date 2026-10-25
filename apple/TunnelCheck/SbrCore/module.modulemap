@@ -1,0 +1,4 @@
+module SbrCore {
+    header "../../../crates/sbr-apple/include/sbr.h"
+    export *
+}
