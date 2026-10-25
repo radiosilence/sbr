@@ -131,3 +131,50 @@ async fn tun_system_stack_end_to_end() {
 
     instance.shutdown();
 }
+
+/// At MTU 1280 the kernel fragments large datagrams into the TUN, and
+/// replies larger than the MTU must come back fragmented. This is the
+/// nested-VPN case (OpenVPN or WireGuard over UDP inside the tunnel).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tun_udp_fragments_at_small_mtu() {
+    if !can_tun() {
+        eprintln!("skipping: needs root and /dev/net/tun");
+        return;
+    }
+    let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let udp_port = udp.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut b = [0u8; 65535];
+        loop {
+            let (n, from) = udp.recv_from(&mut b).await.unwrap();
+            udp.send_to(&b[..n], from).await.unwrap();
+        }
+    });
+    let cfg = r#"{
+        "inbounds": [{
+            "type": "tun", "tag": "tun-in", "interface_name": "sbrt1",
+            "address": ["172.19.1.1/30"], "mtu": 1280,
+            "auto_route": true, "route_address": ["198.18.98.0/24"]
+        }],
+        "outbounds": [{"type": "direct", "tag": "direct"}],
+        "route": {"rules": [
+            {"ip_cidr": "198.18.98.0/24", "action": "route-options", "override_address": "127.0.0.1"}
+        ]}
+    }"#;
+    let instance = Instance::start(&Options::parse(cfg).unwrap(), Settings::default())
+        .await
+        .unwrap();
+    let u = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+    u.connect(("198.18.98.1", udp_port)).await.unwrap();
+    for size in [1200, 1253, 3000, 20000, 65000] {
+        let msg: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        u.send(&msg).await.unwrap();
+        let mut b = vec![0u8; 65535];
+        let n = tokio::time::timeout(Duration::from_secs(3), u.recv(&mut b))
+            .await
+            .unwrap_or_else(|_| panic!("{size}-byte echo timed out"))
+            .unwrap();
+        assert_eq!(&b[..n], &msg[..], "{size}-byte echo corrupted");
+    }
+    instance.shutdown();
+}
