@@ -255,9 +255,13 @@ impl Engine {
     /// on the next packet). In-flight TCP is left alone: it either survives
     /// (same interface) or fails fast on its own. Pooled upstream state
     /// (multiplex sessions, QUIC connections, DNS cache) belongs here too as
-    /// it lands, so the next request dials over the new path.
+    /// it lands, so the next request dials over the new path. Outbounds with
+    /// long-lived sockets (WireGuard) replace them.
     pub fn network_changed(&self) {
         let udp = self.nat.clear();
+        for o in &self.outbounds {
+            o.network_changed();
+        }
         info!(udp_sessions = udp, "network changed: reset path-bound state");
     }
 

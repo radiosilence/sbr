@@ -88,7 +88,7 @@ This feeds **the same config file** to both cores. Setup: 4 streams of loopback 
 | socks → direct | 30–33 Gbit/s | 34–37 Gbit/s |
 | socks → shadowsocks-2022 → server | 16.7–17.4 Gbit/s | 15.7–16.2 Gbit/s |
 
-WireGuard (`cargo run --release -p sbr-engine --example wg_throughput -- /path/to/sing-box-with_wireguard [streams] [seconds]`): sbr and sing-box as clients of the same sing-box peer, same 4-vCPU box, loopback:
+WireGuard (`cargo run --release -p sbr-engine --example wg_throughput -- /path/to/sing-box-with_wireguard [streams] [seconds] [runs]`): sbr and sing-box as clients of the same sing-box peer, same 4-vCPU box, loopback. These numbers predate the connected socket and egress thread; Apple silicon numbers are in `BENCHMARKS.md`:
 
 | streams | sbr up / down | sing-box up / down |
 |---|---|---|

@@ -8,10 +8,24 @@
 //! data packets of a flow are all the same size, so a burst leaves in one
 //! syscall); elsewhere it degrades to one datagram per call.
 //!
+//! On Darwin those per-datagram sends are most of the upload cost; the
+//! crypto is around a tenth. Two things address that. A client of a single
+//! server connects its socket, which more than halves the cost of each send.
+//! On a multi-thread runtime a dedicated egress thread does the sends, so
+//! they overlap with the stack and encryption of the next round. One thread
+//! is enough: the kernel serialises sends on a socket, and more sockets would
+//! make the peer see us roam. Encryption stays on the device task because
+//! boringtun assigns nonces and encrypts in one `&mut` call; wireguard-go's
+//! scheme (nonces in order, AEAD on a pool, sends in order) would buy little
+//! when the AEAD is that small a share.
+//!
 //! Power: the task only wakes for packets, a kick from a socket handle, a
 //! smoltcp deadline (retransmit, delayed ACK), or WireGuard timers. Timers
 //! tick once a second while traffic flowed in the last 30 s, at the
 //! persistent-keepalive interval when one is configured, and never otherwise.
+//! The egress thread sleeps in a channel receive between rounds, and small
+//! rounds (ACKs, interactive traffic) skip it while it is idle, so it adds no
+//! wakeups unless there is bulk to send.
 
 use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, SocketAddr};
@@ -60,12 +74,34 @@ pub struct UdpIo {
     state: UdpSocketState,
     /// Dual-stack IPv6 socket: IPv4 peers are addressed as mapped addresses.
     v6: bool,
+    /// Connected to the only peer. Darwin routes every unconnected `sendto`
+    /// afresh, which costs more than the rest of the send; a connected
+    /// socket sends a datagram in less than half the time.
+    connected: bool,
 }
 
 impl UdpIo {
-    pub fn new(sock: UdpSocket, v6: bool) -> io::Result<Self> {
+    /// `peer`: connect to it (a single peer at a fixed address).
+    pub fn new(sock: UdpSocket, v6: bool, peer: Option<SocketAddr>) -> io::Result<Self> {
         let state = UdpSocketState::new((&sock).into())?;
-        Ok(Self { sock, state, v6 })
+        let mut io = Self {
+            sock,
+            state,
+            v6,
+            connected: false,
+        };
+        if let Some(peer) = peer {
+            socket2::SockRef::from(&io.sock).connect(&io.wire_addr(peer).into())?;
+            io.connected = true;
+        }
+        Ok(io)
+    }
+
+    fn wire_addr(&self, to: SocketAddr) -> SocketAddr {
+        match (self.v6, to.ip()) {
+            (true, IpAddr::V4(v4)) => SocketAddr::new(v4.to_ipv6_mapped().into(), to.port()),
+            _ => to,
+        }
     }
 
     fn try_recv(&self, bufs: &mut [IoSliceMut<'_>], meta: &mut [RecvMeta]) -> io::Result<usize> {
@@ -73,22 +109,29 @@ impl UdpIo {
             .try_io(Interest::READABLE, || self.state.recv((&self.sock).into(), bufs, meta))
     }
 
-    async fn send(&self, to: SocketAddr, contents: &[u8], segment: Option<usize>) -> io::Result<()> {
-        let destination = match (self.v6, to.ip()) {
-            (true, IpAddr::V4(v4)) => SocketAddr::new(v4.to_ipv6_mapped().into(), to.port()),
-            _ => to,
-        };
+    /// One non-blocking send, bypassing Tokio's readiness tracking (the
+    /// egress thread calls it too).
+    fn try_send(&self, to: SocketAddr, contents: &[u8], segment: Option<usize>) -> io::Result<()> {
+        // Darwin refuses a destination on a connected socket (EISCONN); GSO
+        // batches (Linux, which accepts one) still need `sendmsg`.
+        if self.connected && segment.is_none() {
+            return socket2::SockRef::from(&self.sock).send(contents).map(|_| ());
+        }
         let t = Transmit {
-            destination,
+            destination: self.wire_addr(to),
             ecn: None,
             contents,
             segment_size: segment,
             src_ip: None,
         };
+        self.state.try_send((&self.sock).into(), &t)
+    }
+
+    async fn send(&self, to: SocketAddr, contents: &[u8], segment: Option<usize>) -> io::Result<()> {
         loop {
             match self
                 .sock
-                .try_io(Interest::WRITABLE, || self.state.try_send((&self.sock).into(), &t))
+                .try_io(Interest::WRITABLE, || self.try_send(to, contents, segment))
             {
                 Ok(()) => return Ok(()),
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => self.sock.writable().await?,
@@ -96,10 +139,39 @@ impl UdpIo {
             }
         }
     }
+
+    /// `send` for the egress thread, which has no runtime: waits in poll(2).
+    fn send_blocking(&self, to: SocketAddr, contents: &[u8], segment: Option<usize>) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        loop {
+            match self.try_send(to, contents, segment) {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    let mut pfd = libc::pollfd {
+                        fd: self.sock.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    // SAFETY: one valid pollfd for the duration of the call.
+                    match unsafe { libc::poll(&mut pfd, 1, 1000) } {
+                        // Stuck for a second: drop the datagram, like a full queue would.
+                        0 => return Err(io::ErrorKind::TimedOut.into()),
+                        n if n < 0 => {
+                            let e = io::Error::last_os_error();
+                            if e.kind() != io::ErrorKind::Interrupted {
+                                return Err(e);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                r => return r,
+            }
+        }
+    }
 }
 
 pub enum Transport {
-    Socket(UdpIo),
+    Socket(Arc<UdpIo>),
     /// Through a detour outbound: one association per peer.
     Detour {
         conns: Vec<(Arc<dyn PacketConn>, Destination)>,
@@ -130,15 +202,144 @@ pub struct Device {
     pub transport: Transport,
     pub private: StaticSecret,
     pub public: PublicKey,
+    /// A fresh socket for the new network path (`Shared::rebind`).
+    pub rebind: Option<Box<dyn Fn() -> io::Result<UdpIo> + Send>>,
 }
 
-/// Outgoing datagrams to one destination, coalesced for GSO.
-struct Batch {
-    buf: Vec<u8>,
-    dest: Option<SocketAddr>,
+/// Consecutive datagrams to one destination and of one size (the last may
+/// be shorter): a single `sendmsg` with GSO.
+#[derive(Clone, Copy)]
+struct Run {
+    start: usize,
+    dest: SocketAddr,
     seg: usize,
     count: usize,
-    max_segments: usize,
+}
+
+/// One round's encrypted datagrams, back to back in one buffer. Recycled
+/// between the device task and the egress thread, so steady-state traffic
+/// allocates nothing.
+#[derive(Default)]
+struct Outbox {
+    buf: Vec<u8>,
+    /// Each run and where it ends in `buf`.
+    runs: Vec<(Run, usize)>,
+    datagrams: usize,
+    /// The socket to send on, set when handed to the egress thread.
+    io: Option<Arc<UdpIo>>,
+}
+
+impl Outbox {
+    fn clear(&mut self) {
+        self.buf.clear();
+        self.runs.clear();
+        self.datagrams = 0;
+        self.io = None;
+    }
+
+    fn sends(&self) -> impl Iterator<Item = (SocketAddr, &[u8], Option<usize>)> {
+        self.runs
+            .iter()
+            .map(|(r, end)| (r.dest, &self.buf[r.start..*end], (r.count > 1).then_some(r.seg)))
+    }
+}
+
+/// Rounds with at most this many datagrams skip the egress thread when it
+/// is idle: interactive traffic and ACKs don't pay for a thread handoff.
+const INLINE_MAX: usize = 2;
+/// Outboxes queued for or being sent by the egress thread. Two keep it busy
+/// while the device task fills the next; more would only add latency.
+const MAX_IN_FLIGHT: usize = 2;
+
+/// The egress thread: sends what the device task encrypted, so syscalls
+/// (most of the upload cost on Darwin, where every datagram is one
+/// `send`) overlap with the stack and the crypto.
+struct Egress {
+    tx: mpsc::Sender<Outbox>,
+    free: mpsc::Receiver<Outbox>,
+    spare: Vec<Outbox>,
+    in_flight: usize,
+}
+
+impl Egress {
+    /// Only where it can run in parallel: on a single-thread runtime (the
+    /// iOS default, chosen for power) a second thread would add wakeups
+    /// for throughput the radio cannot use.
+    fn start() -> Option<Self> {
+        let rt = tokio::runtime::Handle::current();
+        if rt.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread || rt.metrics().num_workers() < 2 {
+            return None;
+        }
+        let (tx, mut rx) = mpsc::channel::<Outbox>(MAX_IN_FLIGHT);
+        let (free_tx, free) = mpsc::channel(MAX_IN_FLIGHT + 1);
+        std::thread::Builder::new()
+            .name("sbr-wg-egress".into())
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                // Ends when the device task drops its sender.
+                while let Some(mut out) = rx.blocking_recv() {
+                    if let Some(io) = out.io.take() {
+                        for (dest, data, seg) in out.sends() {
+                            if let Err(e) = io.send_blocking(dest, data, seg) {
+                                debug!(error = %e, %dest, "wireguard: send failed");
+                            }
+                        }
+                    }
+                    out.clear();
+                    if free_tx.blocking_send(out).is_err() {
+                        return;
+                    }
+                }
+            })
+            .inspect_err(|e| debug!(error = %e, "wireguard: no egress thread"))
+            .ok()?;
+        Some(Self {
+            tx,
+            free,
+            spare: Vec::with_capacity(MAX_IN_FLIGHT + 1),
+            in_flight: 0,
+        })
+    }
+
+    /// Hand `out` over and replace it with an empty outbox, waiting while
+    /// the thread is behind. Gives `out` back if the thread is gone.
+    async fn ship(&mut self, out: &mut Outbox, io: &Arc<UdpIo>) -> bool {
+        while let Ok(o) = self.free.try_recv() {
+            self.spare.push(o);
+            self.in_flight -= 1;
+        }
+        let mut next = match self.spare.pop() {
+            Some(o) => o,
+            None if self.in_flight < MAX_IN_FLIGHT => Outbox::default(),
+            None => match self.free.recv().await {
+                Some(o) => {
+                    self.in_flight -= 1;
+                    o
+                }
+                None => return false,
+            },
+        };
+        std::mem::swap(out, &mut next);
+        next.io = Some(io.clone());
+        match self.tx.send(next).await {
+            Ok(()) => {
+                self.in_flight += 1;
+                true
+            }
+            Err(mpsc::error::SendError(back)) => {
+                *out = back;
+                false
+            }
+        }
+    }
+
+    fn idle(&mut self) -> bool {
+        while let Ok(o) = self.free.try_recv() {
+            self.spare.push(o);
+            self.in_flight -= 1;
+        }
+        self.in_flight == 0
+    }
 }
 
 struct Io {
@@ -147,7 +348,11 @@ struct Io {
     scratch: Vec<u8>,
     /// Reusable packet buffers.
     pool: Vec<Vec<u8>>,
-    batch: Batch,
+    out: Outbox,
+    /// The run being filled.
+    open: Option<Run>,
+    max_segments: usize,
+    egress: Option<Egress>,
 }
 
 impl Device {
@@ -158,6 +363,7 @@ impl Device {
             mut transport,
             private,
             public,
+            rebind,
         } = self;
         let (rx_slots, rx_size, max_segments) = match &transport {
             Transport::Socket(u) => (
@@ -176,12 +382,12 @@ impl Device {
             shared: shared.clone(),
             scratch: vec![0u8; MAX_DATAGRAM],
             pool: Vec::new(),
-            batch: Batch {
-                buf: Vec::with_capacity(64 * 1024 + 2048),
-                dest: None,
-                seg: 0,
-                count: 0,
-                max_segments,
+            out: Outbox::default(),
+            open: None,
+            max_segments,
+            egress: match transport {
+                Transport::Socket(_) => Egress::start(),
+                Transport::Detour { .. } => None,
             },
         };
         let keepalive = peers.iter().map(|p| p.keepalive).filter(|k| *k > 0).min();
@@ -245,6 +451,18 @@ impl Device {
                 io.pool.push(pkt);
             }
             io.flush(&transport).await;
+
+            if shared.rebind.swap(false, Ordering::Relaxed)
+                && let Some(rebind) = &rebind
+            {
+                match rebind() {
+                    Ok(u) => {
+                        debug!("wireguard: network changed, new socket");
+                        transport = Transport::Socket(Arc::new(u));
+                    }
+                    Err(e) => debug!(error = %e, "wireguard: rebind failed, keeping the old socket"),
+                }
+            }
 
             // An RTT probe asked for a fresh handshake.
             if shared.want_handshake.swap(false, Ordering::Relaxed) {
@@ -488,17 +706,16 @@ impl Io {
                 return;
             }
         };
-        let b = &mut self.batch;
-        if b.count > 0
-            && (b.dest != Some(dest) || b.count >= b.max_segments || b.buf.len() + pkt.len() + 32 > GSO_MAX_BYTES)
+        let start = self.out.buf.len();
+        if let Some(r) = self.open
+            && (r.dest != dest || r.count >= self.max_segments || start - r.start + pkt.len() + 32 > GSO_MAX_BYTES)
         {
-            self.flush(transport).await;
+            self.close_run(start);
         }
-        // Encrypt straight into the batch: no copy between crypto and syscall.
-        let b = &mut self.batch;
-        let start = b.buf.len();
-        b.buf.resize(start + pkt.len().max(116) + 32, 0);
-        let n = match peer.tunn.encapsulate(pkt, &mut b.buf[start..]) {
+        // Encrypt straight into the outbox: no copy between crypto and syscall.
+        let buf = &mut self.out.buf;
+        buf.resize(start + pkt.len().max(116) + 32, 0);
+        let n = match peer.tunn.encapsulate(pkt, &mut buf[start..]) {
             TunnResult::WriteToNetwork(out) => out.len(),
             TunnResult::Err(e) => {
                 trace!(error = ?e, "wireguard: encapsulate");
@@ -506,41 +723,57 @@ impl Io {
             }
             _ => 0,
         };
-        b.buf.truncate(start + n);
+        buf.truncate(start + n);
         if n == 0 {
             return;
         }
-        set_reserved(peer, &mut b.buf[start..]);
-        if b.count == 0 {
-            (b.dest, b.seg, b.count) = (Some(dest), n, 1);
-        } else if n == b.seg {
-            b.count += 1;
-        } else if n < b.seg {
-            // A shorter datagram may only end a GSO batch.
-            b.count += 1;
-            self.flush(transport).await;
-        } else {
-            let tail = b.buf.split_off(start);
-            self.flush(transport).await;
-            let b = &mut self.batch;
-            b.buf.extend_from_slice(&tail);
-            (b.dest, b.seg, b.count) = (Some(dest), n, 1);
+        set_reserved(peer, &mut buf[start..]);
+        self.out.datagrams += 1;
+        match self.open.as_mut().map(|r| (n.cmp(&r.seg), r)) {
+            Some((std::cmp::Ordering::Equal, r)) => r.count += 1,
+            Some((std::cmp::Ordering::Less, r)) => {
+                // A shorter datagram may only end a GSO run.
+                r.count += 1;
+                self.close_run(start + n);
+            }
+            _ => {
+                self.close_run(start);
+                self.open = Some(Run {
+                    start,
+                    dest,
+                    seg: n,
+                    count: 1,
+                });
+            }
         }
     }
 
+    fn close_run(&mut self, end: usize) {
+        if let Some(r) = self.open.take() {
+            self.out.runs.push((r, end));
+        }
+    }
+
+    /// Send what this round encrypted: on the egress thread when there is
+    /// one and the round is big enough to be worth the handoff, else here.
     async fn flush(&mut self, transport: &Transport) {
-        let b = &mut self.batch;
-        if b.count == 0 {
+        self.close_run(self.out.buf.len());
+        let Transport::Socket(u) = transport else { return };
+        if self.out.runs.is_empty() {
             return;
         }
-        if let (Transport::Socket(u), Some(dest)) = (transport, b.dest) {
-            let seg = (b.count > 1).then_some(b.seg);
-            if let Err(e) = u.send(dest, &b.buf, seg).await {
+        if let Some(eg) = &mut self.egress
+            && !(self.out.datagrams <= INLINE_MAX && eg.idle())
+            && eg.ship(&mut self.out, u).await
+        {
+            return;
+        }
+        for (dest, data, seg) in self.out.sends() {
+            if let Err(e) = u.send(dest, data, seg).await {
                 debug!(error = %e, %dest, "wireguard: send failed");
             }
         }
-        b.buf.clear();
-        b.count = 0;
+        self.out.clear();
     }
 
     async fn initiate(&mut self, transport: &Transport, peers: &mut [PeerSetup]) {

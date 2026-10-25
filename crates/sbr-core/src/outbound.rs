@@ -42,6 +42,8 @@ pub trait Outbound: Send + Sync {
     fn probe_rtt(&self) -> Option<BoxFuture<'_, io::Result<std::time::Duration>>> {
         None
     }
+    /// The host's network path changed: drop sockets bound to the old one.
+    fn network_changed(&self) {}
 }
 
 /// `selector` / `urltest`.

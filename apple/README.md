@@ -125,6 +125,17 @@ wakeups.
   macOS. Set `threads` to 2 or more if one connection's crypto ever becomes the
   bottleneck.
 
+WireGuard follows the same default. On a multi-thread runtime each endpoint
+gets one egress thread that makes the UDP sends, so they overlap with the stack
+and the crypto. On current-thread it sends inline. Measured on an M1 Pro, against
+a sing-box peer on loopback with the machine shared with other builds: one
+thread reaches about 2 Gbit/s of upload at 3.2–3.5 CPU-seconds per GB, and the
+multi-thread runtime with the egress thread gets the same throughput at 3.8–4.3.
+At these rates the loopback sing-box server is the bottleneck: it uses about
+three cores. The single thread is about 85% busy at that rate, so the egress
+thread is headroom for macOS on fast links. On a phone it would spend more CPU
+per byte for an uplink the radio can't fill.
+
 The runtime always runs on its own driver thread, so Swift can call in from
 any thread. `spawn_blocking` (getaddrinfo) is capped at 8 threads, against
 Tokio's default of 512.

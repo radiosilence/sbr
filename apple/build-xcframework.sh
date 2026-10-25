@@ -8,10 +8,10 @@
 #   rustup toolchain install nightly --component rust-src
 # or skip them with SBR_SKIP_TVOS=1. SBR_SKIP_CATALYST=1 skips Catalyst.
 #
-# Release profile: fat LTO, one codegen unit (workspace Cargo.toml); the
-# archives are then stripped of debug info. Local symbols stay: aws-lc's
-# assembly objects relocate against local labels, and stripping them breaks
-# the final link ("address not in any section").
+# Release profile: fat LTO, one codegen unit (workspace Cargo.toml), no debug
+# info. The archives are deliberately not run through strip(1): it corrupts
+# aws-lc's assembly objects (even -S), and the app then fails to link with
+# "address not in any section". Xcode strips the final binary.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -50,7 +50,7 @@ module SbrCore {
 }
 MAP
 
-# One (fat, stripped) archive per xcframework slice.
+# One (fat) archive per xcframework slice.
 slice() {
   local name=$1; shift
   mkdir -p "$OUT/$name"
@@ -61,9 +61,6 @@ slice() {
   else
     cp "${inputs[0]}" "$OUT/$name/$lib"
   fi
-  # -S: debug info, -x: local symbols. Global symbols stay: it's a static
-  # library and the app's linker still needs them.
-  xcrun strip -S "$OUT/$name/$lib" 2>/dev/null || strip -S "$OUT/$name/$lib"
   XCF_ARGS+=(-library "$OUT/$name/$lib" -headers "$OUT/headers")
 }
 
@@ -80,7 +77,7 @@ fi
 xcodebuild -create-xcframework "${XCF_ARGS[@]}" -output apple/SbrCore.xcframework
 
 echo
-echo "slice sizes (stripped static archives; the linked app adds far less after dead-stripping):"
+echo "slice sizes (static archives; the linked app adds far less after dead-stripping):"
 for d in "$OUT"/*/; do
   [ -f "$d$lib" ] && printf '  %-16s %s\n' "$(basename "$d")" "$(du -h "$d$lib" | cut -f1)"
 done
