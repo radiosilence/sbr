@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 sbr-config.workspace = true
 sbr-core.workspace = true
+sbr-dns.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true

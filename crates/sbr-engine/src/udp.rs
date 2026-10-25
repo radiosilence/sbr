@@ -128,6 +128,11 @@ impl Engine {
         back: Arc<dyn UdpWriteBack>,
     ) -> io::Result<()> {
         let source = meta.source;
+        // DNS: FakeIP destination → domain before routing; replies must
+        // still appear to come from the fake address.
+        let fake_origin = Some(meta.destination.clone());
+        self.restore_domain(&mut meta)?;
+        let fake_origin = fake_origin.filter(|o| *o != meta.destination);
         let mut opts = RouteOptions::default();
         let mut i = 0;
         let action = loop {
@@ -148,7 +153,7 @@ impl Engine {
                     }
                 }
                 Action::RouteOptions(o) => opts.merge(o),
-                Action::Resolve { strategy, .. } => self.resolve(&mut meta, *strategy).await,
+                Action::Resolve { server, strategy } => self.resolve(&mut meta, server.as_deref(), *strategy).await,
                 Action::Route { outbound, options } => {
                     opts.merge(options);
                     break Action::Route {
@@ -215,10 +220,12 @@ impl Engine {
                 let last = Arc::new(AtomicU64::new(0));
 
                 // Remote → client. Replies are reported from the address the
-                // client sent to: undo `override_address`/`override_port`, and
-                // map a resolved domain back (SOCKS5 clients sending to a name).
-                let original = meta.destination.clone();
-                let unmap_domain = matches!(original.host, Host::Domain(_)) && !options.udp_disable_domain_unmapping;
+                // client sent to: the FakeIP it used, the address before
+                // `override_address`/`override_port`, or the domain it named
+                // (SOCKS5 clients sending to a name).
+                let original = fake_origin.clone().unwrap_or_else(|| meta.destination.clone());
+                let unmap_domain = fake_origin.is_some()
+                    || (matches!(meta.destination.host, Host::Domain(_)) && !options.udp_disable_domain_unmapping);
                 let unmap = move |from: Destination| -> Destination {
                     if from == first_dest_c || (unmap_domain && from.port == original.port) {
                         original.clone()
@@ -265,6 +272,7 @@ impl Engine {
                         }
                     };
                     last.store(now_ms(epoch), Ordering::Relaxed);
+                    let dest = self.unfake(dest); // FakeIP
                     let target = if options.udp_connect {
                         first_dest.clone()
                     } else {

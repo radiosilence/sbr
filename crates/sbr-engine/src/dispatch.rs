@@ -95,6 +95,14 @@ impl Engine {
             debug!(inbound = %meta.inbound, dest = %meta.destination, limit = self.max_connections, "connection limit reached");
             return client.fail(&OpenError::Rejected { drop: false }).await;
         };
+        // DNS: a FakeIP destination becomes its domain (and, with
+        // reverse_mapping, a recently resolved IP gains one) before routing.
+        if let Err(e) = self.restore_domain(&mut meta) {
+            let err = OpenError::Io(e);
+            client.fail(&err).await?;
+            let OpenError::Io(e) = err else { unreachable!() };
+            return Err(e);
+        }
         let mut client = Replay {
             inner: client,
             head: Vec::new(),
@@ -120,7 +128,7 @@ impl Engine {
                     }
                 }
                 Action::RouteOptions(o) => opts.merge(o),
-                Action::Resolve { strategy, .. } => self.resolve(&mut meta, *strategy).await,
+                Action::Resolve { server, strategy } => self.resolve(&mut meta, server.as_deref(), *strategy).await,
                 Action::Route { outbound, options } => {
                     opts.merge(options);
                     break Action::Route {
@@ -169,11 +177,31 @@ impl Engine {
         }
     }
 
-    pub(crate) async fn resolve(&self, meta: &mut Metadata, strategy: Option<sbr_config::DomainStrategy>) {
+    pub(crate) async fn resolve(
+        &self,
+        meta: &mut Metadata,
+        server: Option<&str>,
+        strategy: Option<sbr_config::DomainStrategy>,
+    ) {
         let Some(domain) = meta.destination.domain().map(str::to_owned) else {
             return;
         };
-        match self.dns.lookup(&domain, strategy).await {
+        // `server` names a DNS server; otherwise DNS rules see the connection.
+        let bound = server.and_then(|s| {
+            let r = sbr_config::DomainResolver {
+                server: s.to_owned(),
+                ..Default::default()
+            };
+            self.dns.bind(&sbr_core::dns::ResolverSpec {
+                resolver: Some(&r),
+                outbound: None,
+            })
+        });
+        let result = match bound {
+            Some(d) => d.lookup(&domain, strategy).await,
+            None => self.dns.lookup_for(&domain, strategy, meta).await,
+        };
+        match result {
             Ok(ips) => meta.destination_addresses = ips,
             Err(e) => debug!(%domain, error = %e, "resolve failed"),
         }

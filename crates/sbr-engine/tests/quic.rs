@@ -139,6 +139,7 @@ fn outbound(json: &str) -> Arc<dyn Outbound> {
     .unwrap();
     let ctx = BuildContext {
         dns: Arc::new(SystemDns),
+        default_resolver: None,
     };
     build_all(&o.outbounds, &ctx).unwrap().remove(0)
 }

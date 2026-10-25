@@ -164,3 +164,105 @@ fn stepper_sniff_options_protocol() {
     m.destination_addresses.push("9.9.9.9".parse().unwrap());
     assert_eq!(r.route(&m), go(2));
 }
+
+/// DNS rules compiled through `Matcher` (what sbr-dns does).
+fn dns_matchers(json: &str) -> Vec<Matcher> {
+    let o = sbr_config::Options::parse(json).unwrap();
+    let sets = RuleSets::compile(&o.route.rule_sets, |_| Err(std::io::ErrorKind::NotFound.into())).unwrap();
+    let dns = o.dns.unwrap();
+    dns.rules
+        .iter()
+        .enumerate()
+        .map(|(i, r)| Matcher::compile(&r.rule, &format!("dns.rules[{i}]"), &sets).unwrap())
+        .collect()
+}
+
+fn dns_meta(name: &str, answers: &[&str]) -> Metadata {
+    let mut m = meta(name, 0);
+    m.destination_addresses = answers.iter().map(|a| a.parse().unwrap()).collect();
+    m
+}
+
+#[test]
+fn dns_query_type_ip_version_and_outbound() {
+    let m = dns_matchers(&format!(
+        r#"{{"inbounds":[{{"type":"mixed","tag":"in"}}],{OUTS},"dns":{{"servers":[{{"type":"local","tag":"l"}}],"rules":[
+            {{"query_type":["A","HTTPS"],"server":"l"}},
+            {{"ip_version":6,"server":"l"}},
+            {{"outbound":"any","server":"l"}},
+            {{"outbound":"b","inbound":"in","server":"l"}}
+        ]}}}}"#
+    ));
+    let q = |t: Option<u16>, o: Option<&'static str>| DnsQuery {
+        query_type: t,
+        outbound: o,
+    };
+    let meta = dns_meta("x.test", &[]);
+    assert!(m[0].matches_dns(&meta, &q(Some(1), None)));
+    assert!(m[0].matches_dns(&meta, &q(Some(65), None)));
+    assert!(!m[0].matches_dns(&meta, &q(Some(28), None)));
+    assert!(!m[0].matches_dns(&meta, &q(None, None)), "lookups carry no query type");
+    assert!(
+        m[1].matches_dns(&meta, &q(Some(28), None)),
+        "ip_version from the query type"
+    );
+    assert!(!m[1].matches_dns(&meta, &q(Some(1), None)));
+    assert!(
+        !m[2].matches_dns(&meta, &q(Some(1), None)),
+        "outbound needs an outbound"
+    );
+    assert!(m[2].matches_dns(&meta, &q(None, Some("a"))));
+    assert!(m[3].matches_dns(&meta, &q(None, Some("b"))));
+    assert!(!m[3].matches_dns(&meta, &q(None, Some("a"))));
+    assert!(
+        !m[0].matches(&meta),
+        "route semantics: no DNS context, no query_type hit"
+    );
+}
+
+#[test]
+fn dns_address_limit_pre_and_post_match() {
+    let m = dns_matchers(&format!(
+        r#"{{"inbounds":[{{"type":"mixed","tag":"in"}}],{OUTS},
+            "route":{{"rule_set":[{{"type":"inline","tag":"cn","rules":[{{"ip_cidr":"1.0.0.0/8"}}]}},
+                                 {{"type":"inline","tag":"names","rules":[{{"domain_suffix":"cn"}}]}}]}},
+            "dns":{{"servers":[{{"type":"local","tag":"l"}}],"rules":[
+            {{"ip_cidr":"10.0.0.0/8","server":"l"}},
+            {{"rule_set":"cn","server":"l"}},
+            {{"rule_set":"names","server":"l"}},
+            {{"ip_accept_any":true,"server":"l"}},
+            {{"rule_set":"cn","rule_set_ip_cidr_accept_empty":true,"server":"l"}},
+            {{"domain":"x.test","ip_is_private":true,"server":"l"}}
+        ]}}}}"#
+    ));
+    let q = DnsQuery {
+        query_type: Some(1),
+        outbound: None,
+    };
+    assert!(m[0].has_address_limit() && m[1].has_address_limit() && m[3].has_address_limit());
+    assert!(!m[2].has_address_limit(), "a domain-only rule-set is no address limit");
+    let none = dns_meta("a.test", &[]);
+    assert!(
+        m[0].pre_match_dns(&none, &q),
+        "IP items are skipped before the response"
+    );
+    assert!(!m[0].matches_dns(&none, &q));
+    assert!(m[0].matches_dns(&dns_meta("a.test", &["10.1.2.3"]), &q));
+    assert!(!m[0].matches_dns(&dns_meta("a.test", &["11.1.2.3"]), &q));
+    assert!(m[1].pre_match_dns(&none, &q));
+    assert!(
+        m[1].matches_dns(&dns_meta("a.test", &["1.2.3.4"]), &q),
+        "rule-set CIDRs filter responses"
+    );
+    assert!(!m[1].matches_dns(&dns_meta("a.test", &["8.8.8.8"]), &q));
+    assert!(!m[2].pre_match_dns(&none, &q));
+    assert!(m[2].pre_match_dns(&dns_meta("x.cn", &[]), &q));
+    assert!(!m[3].matches_dns(&none, &q));
+    assert!(m[3].matches_dns(&dns_meta("a.test", &["8.8.8.8"]), &q));
+    assert!(!m[1].matches_dns(&none, &q), "an empty response doesn't match ip_cidr");
+    assert!(m[4].matches_dns(&none, &q), "unless rule_set_ip_cidr_accept_empty");
+    // domain and IP items share one OR-group (sing-box): the domain alone satisfies it.
+    assert!(m[5].matches_dns(&dns_meta("x.test", &["8.8.8.8"]), &q));
+    assert!(m[5].matches_dns(&dns_meta("y.test", &["192.168.1.1"]), &q));
+    assert!(!m[5].matches_dns(&dns_meta("y.test", &["8.8.8.8"]), &q));
+}

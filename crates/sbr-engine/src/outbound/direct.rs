@@ -19,9 +19,9 @@ pub struct Direct {
 impl Direct {
     pub fn new(tag: String, d: &Dial, ctx: &BuildContext) -> Self {
         Self {
-            tag,
+            dns: ctx.dns_for(Some(&tag), d),
             opts: DialOptions::from(d),
-            dns: ctx.dns.clone(),
+            tag,
         }
     }
 }

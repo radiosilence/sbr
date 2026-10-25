@@ -9,6 +9,9 @@ pub struct RouteOptions {
     pub rules: Vec<Rule>,
     pub rule_sets: Vec<RuleSet>,
     pub final_outbound: Option<String>,
+    /// `route.default_domain_resolver`: the DNS server outbounds resolve
+    /// domains with when they set no `domain_resolver` of their own.
+    pub default_domain_resolver: Option<crate::DomainResolver>,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +158,16 @@ pub struct Matchers {
     pub rule_set: Vec<String>,
     pub rule_set_ip_cidr_match_source: bool,
     pub protocol: Vec<Protocol>,
+    /// DNS rules only: query types (numeric).
+    pub query_type: Vec<u16>,
+    /// DNS rules only (deprecated in sing-box 1.12): the outbound whose dial
+    /// triggered the lookup; `"any"` matches every outbound.
+    pub outbound: Vec<String>,
+    /// DNS rules only: the response carries at least one address.
+    pub ip_accept_any: bool,
+    /// DNS rules only (legacy): `ip_cidr` items in the referenced rule-sets
+    /// accept a response without addresses.
+    pub rule_set_ip_cidr_accept_empty: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -170,14 +183,26 @@ pub enum RuleSetSource {
     LocalSource(String),
 }
 
+/// Which rule grammar is being parsed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Flavor {
+    /// Top-level route rule, with an action.
+    Route,
+    /// Inside a rule-set or a logical route rule.
+    Headless,
+    /// Inside a logical DNS rule: DNS matchers, no action.
+    DnsHeadless,
+}
+
 pub(crate) fn parse_route(mut o: Obj, diag: &mut Diag) -> Result<RouteOptions> {
-    let rules = parse_rules(o.raw("rules"), &o.sub("rules"), true, diag)?;
+    let rules = parse_rules(o.raw("rules"), &o.sub("rules"), Flavor::Route, diag)?;
     let rule_sets = array(o.raw("rule_set"), &o.sub("rule_set"))?
         .into_iter()
         .enumerate()
         .map(|(i, v)| parse_rule_set(Obj::new(v, format!("route.rule_set[{i}]"))?, diag))
         .collect::<Result<Vec<_>>>()?;
     let final_outbound = o.string("final")?;
+    let default_domain_resolver = crate::dns::parse_domain_resolver(&mut o, "default_domain_resolver")?;
     o.tolerate(
         diag,
         &[
@@ -187,7 +212,6 @@ pub(crate) fn parse_route(mut o: Obj, diag: &mut Diag) -> Result<RouteOptions> {
             "default_mark",
             "find_process",
             "find_neighbor",
-            "default_domain_resolver",
             "default_network_strategy",
             "default_network_type",
             "default_fallback_network_type",
@@ -204,6 +228,7 @@ pub(crate) fn parse_route(mut o: Obj, diag: &mut Diag) -> Result<RouteOptions> {
         rules,
         rule_sets,
         final_outbound,
+        default_domain_resolver,
     })
 }
 
@@ -211,7 +236,7 @@ fn parse_rule_set(mut o: Obj, diag: &mut Diag) -> Result<RuleSet> {
     let ty: String = o.req("type")?;
     let tag: String = o.req("tag")?;
     let source = match ty.as_str() {
-        "inline" => RuleSetSource::Inline(parse_rules(o.raw("rules"), &o.sub("rules"), false, diag)?),
+        "inline" => RuleSetSource::Inline(parse_rules(o.raw("rules"), &o.sub("rules"), Flavor::Headless, diag)?),
         "local" => {
             let format = o.string("format")?;
             let path: String = o.req("path")?;
@@ -253,24 +278,37 @@ pub fn parse_rule_set_source(input: &str) -> Result<Vec<Rule>> {
         return Err(Error::at("version", format!("unsupported rule-set version {version}")));
     }
     let mut diag = Diag { warnings: Vec::new() };
-    let rules = parse_rules(o.raw("rules"), "rules", false, &mut diag)?;
+    let rules = parse_rules(o.raw("rules"), "rules", Flavor::Headless, &mut diag)?;
     o.finish()?;
     Ok(rules)
 }
 
-fn parse_rules(v: Option<Value>, path: &str, with_action: bool, diag: &mut Diag) -> Result<Vec<Rule>> {
+pub(crate) fn parse_rules(v: Option<Value>, path: &str, flavor: Flavor, diag: &mut Diag) -> Result<Vec<Rule>> {
     array(v, path)?
         .into_iter()
         .enumerate()
-        .map(|(i, v)| parse_rule(Obj::new(v, format!("{path}[{i}]"))?, with_action, diag))
+        .map(|(i, v)| parse_rule(Obj::new(v, format!("{path}[{i}]"))?, flavor, diag))
         .collect()
 }
 
-fn parse_rule(mut o: Obj, with_action: bool, diag: &mut Diag) -> Result<Rule> {
+fn parse_rule(mut o: Obj, flavor: Flavor, diag: &mut Diag) -> Result<Rule> {
+    let (kind, invert) = parse_rule_body(&mut o, flavor == Flavor::DnsHeadless, diag)?;
+    let action = if flavor == Flavor::Route {
+        parse_action(&mut o, diag)?
+    } else {
+        RuleAction::None
+    };
+    o.finish()?;
+    Ok(Rule { kind, invert, action })
+}
+
+/// The matcher part of a rule (default or logical), leaving action fields
+/// in `o` for the caller. `dns` admits the DNS-only matchers.
+pub(crate) fn parse_rule_body(o: &mut Obj, dns: bool, diag: &mut Diag) -> Result<(RuleKind, bool)> {
     let ty = o.string("type")?.unwrap_or_else(|| "default".into());
     let invert = o.bool("invert")?;
     let kind = match ty.as_str() {
-        "default" => RuleKind::Default(Box::new(parse_matchers(&mut o)?)),
+        "default" => RuleKind::Default(Box::new(parse_matchers(o, dns)?)),
         "logical" => {
             let mode = match o.req::<String>("mode")?.as_str() {
                 "and" => LogicalMode::And,
@@ -279,7 +317,8 @@ fn parse_rule(mut o: Obj, with_action: bool, diag: &mut Diag) -> Result<Rule> {
                     return Err(Error::at(&o.sub("mode"), format!("unknown logical mode {m:?}")));
                 }
             };
-            let rules = parse_rules(o.raw("rules"), &o.sub("rules"), false, diag)?;
+            let flavor = if dns { Flavor::DnsHeadless } else { Flavor::Headless };
+            let rules = parse_rules(o.raw("rules"), &o.sub("rules"), flavor, diag)?;
             if rules.is_empty() {
                 return Err(Error::at(&o.sub("rules"), "missing rules"));
             }
@@ -289,13 +328,7 @@ fn parse_rule(mut o: Obj, with_action: bool, diag: &mut Diag) -> Result<Rule> {
             return Err(Error::at(&o.sub("type"), format!("unknown rule type {t:?}")));
         }
     };
-    let action = if with_action {
-        parse_action(&mut o, diag)?
-    } else {
-        RuleAction::None
-    };
-    o.finish()?;
-    Ok(Rule { kind, invert, action })
+    Ok((kind, invert))
 }
 
 fn parse_action(o: &mut Obj, diag: &mut Diag) -> Result<RuleAction> {
@@ -398,8 +431,8 @@ fn parse_route_options(o: &mut Obj, diag: &mut Diag) -> Result<RouteOptionsActio
     Ok(r)
 }
 
-fn parse_matchers(o: &mut Obj) -> Result<Matchers> {
-    let m = Matchers {
+fn parse_matchers(o: &mut Obj, dns: bool) -> Result<Matchers> {
+    let mut m = Matchers {
         inbound: o.list("inbound")?,
         ip_version: match o.opt::<u8>("ip_version")? {
             None | Some(0) => None,
@@ -444,7 +477,19 @@ fn parse_matchers(o: &mut Obj) -> Result<Matchers> {
                 .map(|s| Protocol::parse(s).ok_or_else(|| Error::at(&path, format!("unknown protocol {s:?}"))))
                 .collect::<Result<Vec<_>>>()?
         },
+        ..Matchers::default()
     };
+    if dns {
+        let path = o.sub("query_type");
+        m.query_type = o
+            .list::<Value>("query_type")?
+            .iter()
+            .map(|v| crate::dns::parse_query_type(v).ok_or_else(|| Error::at(&path, format!("unknown query type {v}"))))
+            .collect::<Result<_>>()?;
+        m.outbound = o.list("outbound")?;
+        m.ip_accept_any = o.bool("ip_accept_any")?;
+        m.rule_set_ip_cidr_accept_empty = o.bool("rule_set_ip_cidr_accept_empty")?;
+    }
     for re in &m.domain_regex {
         // Validated here so config errors surface at load, with a path.
         if re.is_empty() {
