@@ -32,6 +32,8 @@ pub struct Conn {
     pub start: SystemTime,
     pub up: AtomicU64,
     pub down: AtomicU64,
+    /// Relay timing for passive health checks (TCP only).
+    pub activity: crate::health::Activity,
     cancel: Mutex<Option<oneshot::Sender<()>>>,
 }
 
@@ -120,6 +122,7 @@ impl Tracker {
             start: SystemTime::now(),
             up: AtomicU64::new(0),
             down: AtomicU64::new(0),
+            activity: Default::default(),
             cancel: Mutex::new(Some(tx)),
         });
         self.shards[id as usize % SHARDS]
@@ -177,6 +180,22 @@ impl Tracker {
         hit.len()
     }
 
+    /// Close connections carried by `leaf` that are stalled or have received
+    /// nothing: on a degraded path they are dead, and closing them makes the
+    /// app retry now (on the next member) instead of after its own timeout.
+    pub fn close_broken(&self, leaf: &str) -> usize {
+        let hit: Vec<_> = self
+            .connections()
+            .into_iter()
+            .filter(|c| {
+                c.chain.first().is_some_and(|t| &**t == leaf)
+                    && (c.activity.stalled() || c.down.load(Ordering::Relaxed) == 0)
+            })
+            .collect();
+        hit.iter().for_each(|c| c.close());
+        hit.len()
+    }
+
     /// Clash dashboards key connections by UUID. Ours embed the counter in
     /// the last 48 bits so they can be looked up without a second map.
     pub fn uuid(&self, id: u64) -> String {
@@ -223,6 +242,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for Counted<'_, S> {
         let n = buf.filled().len() - before;
         if n > 0 {
             self.conn.add_up(n);
+            self.conn.activity.on_up();
         }
         r
     }
@@ -231,8 +251,11 @@ impl<S: AsyncRead + Unpin> AsyncRead for Counted<'_, S> {
 impl<S: AsyncWrite + Unpin> AsyncWrite for Counted<'_, S> {
     fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let r = Pin::new(&mut self.inner).poll_write(cx, buf);
-        if let Poll::Ready(Ok(n)) = r {
+        if let Poll::Ready(Ok(n)) = r
+            && n > 0
+        {
             self.conn.add_down(n);
+            self.conn.activity.on_down();
         }
         r
     }
@@ -248,8 +271,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Counted<'_, S> {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let r = Pin::new(&mut self.inner).poll_write_vectored(cx, bufs);
-        if let Poll::Ready(Ok(n)) = r {
+        if let Poll::Ready(Ok(n)) = r
+            && n > 0
+        {
             self.conn.add_down(n);
+            self.conn.activity.on_down();
         }
         r
     }

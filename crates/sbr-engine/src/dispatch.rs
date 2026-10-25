@@ -12,7 +12,7 @@ use sbr_core::{AsyncStream, BoxFuture, Metadata, Protocol};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tracing::{debug, info, warn};
 
-use crate::Engine;
+use crate::{Engine, health};
 
 /// sing-box `C.ReadPayloadTimeout`.
 pub const SNIFF_TIMEOUT: Duration = Duration::from_millis(300);
@@ -157,18 +157,30 @@ impl Engine {
                         // Registered once connected, like sing-box; closing it
                         // through the registry aborts the relay.
                         let (reg, cancelled) = self.tracker.register(meta.clone(), self.chain(outbound), matched);
-                        let client = crate::track::Counted {
-                            inner: client,
-                            conn: &reg.conn,
-                        };
-                        tokio::select! {
+                        let conn = &reg.conn;
+                        let leaf = conn.chain.first().cloned().unwrap_or_else(|| out.tag().into());
+                        let client = crate::track::Counted { inner: client, conn };
+                        let remote = health::Observed::new(remote, &conn.activity);
+                        let watch = health::watch(conn, |w| match w {
+                            health::Watched::Stalled(s) => self.groups.report(&leaf, s, &dest, Some(conn.id)),
+                            health::Watched::Recovered => self.groups.retract(&leaf, conn.id),
+                        });
+                        let r = tokio::select! {
                             biased;
                             r = self.relay(&meta, client, remote) => r,
                             _ = cancelled.wait() => Ok(()),
-                        }
+                            never = watch => match never {},
+                        };
+                        self.groups.finished(&leaf, conn, &dest);
+                        r
                     }
                     Err(e) => {
                         warn!(inbound = %meta.inbound, dest = %dest, outbound = out.tag(), error = %e, "connect failed");
+                        if out.kind() != "block"
+                            && let Some(leaf) = self.chain(outbound).first()
+                        {
+                            self.groups.report(leaf, health::Signal::Connect, &dest, None);
+                        }
                         let err = OpenError::Io(e);
                         client.inner.fail(&err).await?;
                         let OpenError::Io(e) = err else { unreachable!() };

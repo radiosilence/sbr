@@ -456,7 +456,7 @@ impl Endpoint {
                     .guard()
                     .ok_or_else(|| io::Error::other("xhttp: QUIC connection closing"))?;
                 Ok((
-                    Up::H3(h3io::H3Up::new(tx, guard)),
+                    Up::H3(Box::new(h3io::H3Up::new(tx, guard))),
                     Down::H3(h3io::H3Down::new(rx, guard2)),
                 ))
             }
@@ -808,7 +808,7 @@ impl AsyncRead for Down {
 enum Up {
     H1(h1::ChunkedWriter<WriteHalf<Stream>>),
     H2(h2io::H2Up),
-    H3(h3io::H3Up),
+    H3(Box<h3io::H3Up>),
     Packet(PacketUp),
 }
 

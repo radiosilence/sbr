@@ -150,7 +150,7 @@ async fn next_chunk(mut rx: ReqRecv, first: bool) -> (ReqRecv, io::Result<Option
 /// Check for 200 and discard the body.
 pub async fn drain(rx: ReqRecv) -> io::Result<()> {
     let (mut rx, mut r) = next_chunk(rx, true).await;
-    while let Some(_) = r? {
+    while r?.is_some() {
         (rx, r) = next_chunk(rx, false).await;
     }
     Ok(())
