@@ -11,6 +11,14 @@ final class TunnelModel: ObservableObject {
     @Published private(set) var downloadRate: Double = 0
     @Published private(set) var testing: Set<String> = []
     @Published var errorMessage: String?
+    /// "Block traffic outside the tunnel": `includeAllNetworks`. Applied the
+    /// next time the tunnel connects.
+    @Published var strict = UserDefaults.standard.bool(forKey: "strict") {
+        didSet {
+            UserDefaults.standard.set(strict, forKey: "strict")
+            Task { try? await self.install() }
+        }
+    }
 
     private var manager: NETunnelProviderManager?
     private var statusObserver: NSObjectProtocol?
@@ -125,6 +133,7 @@ final class TunnelModel: ObservableObject {
         proto.serverAddress = "sbr"
         // The tunnel reads config.json from the App Group container.
         proto.providerConfiguration = [SbrProviderKey.appGroup: AppConfig.appGroup]
+        Sbr.applyLeakProtection(to: proto, enabled: strict)
         m.protocolConfiguration = proto
         m.localizedDescription = "sbr"
         m.isEnabled = true
