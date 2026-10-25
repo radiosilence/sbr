@@ -67,11 +67,16 @@ pub fn memory_footprint() -> u64 {
         phys_footprint: u64,
     }
     const TASK_VM_INFO: libc::task_flavor_t = 22;
+    // What the `mach_task_self()` macro in <mach/mach_init.h> reads; libc's
+    // binding of it is deprecated.
+    unsafe extern "C" {
+        static mach_task_self_: libc::mach_port_t;
+    }
     let mut info = TaskVmInfo::default();
     let mut count = (size_of::<TaskVmInfo>() / size_of::<libc::natural_t>()) as libc::mach_msg_type_number_t;
     // SAFETY: `count` is the size of `info` in natural_t units; the kernel
     // fills at most that many.
-    let kr = unsafe { libc::task_info(libc::mach_task_self(), TASK_VM_INFO, (&raw mut info).cast(), &mut count) };
+    let kr = unsafe { libc::task_info(mach_task_self_, TASK_VM_INFO, (&raw mut info).cast(), &mut count) };
     if kr == libc::KERN_SUCCESS {
         info.phys_footprint
     } else {

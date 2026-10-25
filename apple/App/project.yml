@@ -54,6 +54,15 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen:
           UIColorName: LaunchBackground
+        # As declared in App Store Connect for the first build: standard,
+        # exempt encryption only. Skips the per-build compliance question.
+        ITSAppUsesNonExemptEncryption: false
+        # iPad multitasking requires all four; App Store validation rejects none.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         # sing-box remote-profile links, and the same under sbr://.
         CFBundleURLTypes:
           - CFBundleURLName: cc.blit.sbr.profile

@@ -650,11 +650,11 @@ mod platform {
             return Err(io::Error::last_os_error());
         }
         let got = r as usize;
-        for i in 0..got {
-            batch.lens[i] = if hdrs[i].msg.msg_flags & libc::MSG_TRUNC != 0 {
+        for (len, hdr) in batch.lens.iter_mut().zip(&hdrs[..got]) {
+            *len = if hdr.msg.msg_flags & libc::MSG_TRUNC != 0 {
                 0
             } else {
-                hdrs[i].datalen
+                hdr.datalen
             };
         }
         Ok(got)

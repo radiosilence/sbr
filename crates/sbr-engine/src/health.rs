@@ -210,6 +210,11 @@ impl Record {
         true
     }
 
+    /// A probe was abandoned before it finished.
+    pub fn abort_probe(&mut self) {
+        self.probing = false;
+    }
+
     pub fn probe_done(&mut self, now: Instant, v: Verdict) -> Change {
         self.probing = false;
         let expired = self.degraded.is_some_and(|d| now >= d.until);
