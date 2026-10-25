@@ -35,5 +35,5 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
-rcgen = "0.14"
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 tokio-tungstenite = "0.28"

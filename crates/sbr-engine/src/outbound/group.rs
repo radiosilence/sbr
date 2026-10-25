@@ -290,7 +290,7 @@ pub struct UrlTest {
     selected: AtomicUsize,
     started: AtomicBool,
     looping: AtomicBool,
-    checking: AtomicBool,
+    checking: tokio::sync::Mutex<()>,
     update: Mutex<()>,
     epoch: Instant,
     /// Milliseconds since `epoch`.
@@ -333,7 +333,7 @@ impl UrlTest {
             selected: AtomicUsize::new(usize::MAX),
             started: AtomicBool::new(false),
             looping: AtomicBool::new(false),
-            checking: AtomicBool::new(false),
+            checking: tokio::sync::Mutex::new(()),
             update: Mutex::new(()),
             epoch: Instant::now(),
             last_active: AtomicU64::new(0),
@@ -353,6 +353,11 @@ impl UrlTest {
             usize::MAX => self.members[self.select().0].clone(),
             i => self.members[i].clone(),
         }
+    }
+
+    /// Whether the background probe loop is running (false while idle).
+    pub fn probing(&self) -> bool {
+        self.looping.load(Ordering::Acquire)
     }
 
     fn post_start(&self) {
@@ -441,12 +446,12 @@ impl UrlTest {
     /// `force` re-probes members whose history is still fresh.
     pub fn url_test(&self, force: bool) -> BoxFuture<'_, HashMap<String, u16>> {
         Box::pin(async move {
-            if self.checking.swap(true, Ordering::AcqRel) {
-                return HashMap::new();
-            }
+            // sing-box returns an empty result when a check is already running;
+            // waiting for it instead means a parent group testing this one
+            // sees its results (fresh members are then skipped, so it's cheap).
+            let _running = self.checking.lock().await;
             let r = test_outbounds(&self.env, &self.members, self.url.as_ref(), self.interval, force).await;
             self.perform_update_check();
-            self.checking.store(false, Ordering::Release);
             r
         })
     }

@@ -15,6 +15,10 @@ Read this before adding a protocol, inbound or service.
   - `udp.rs`: `Engine::handle_udp(inbound, type, UdpPacket, Arc<dyn UdpWriteBack>)`, a full-cone NAT session per client source, routed on the first packet.
   - `outbound/`: one module per protocol, registered in `outbound/mod.rs::Builder::build`. Protocols reach their server through `Upstream` (system dialer with DNS, or a `detour` outbound), so detour chains work for free.
   - `inbound/`: proxy inbounds; `tun` lives in the `sbr-tun` crate plus `inbound/tun.rs`.
+  - `track.rs`: live connection registry (Clash API, `interrupt_exist_connections`). `handle_tcp` and the UDP session register once connected; closing a connection aborts its relay.
+  - `outbound/group.rs`: `selector`, `urltest` and `GroupEnv` (delay history, probes). New protocols with a `server` should be added to `server_of` in `outbound/mod.rs` so URL-less `urltest` can measure them.
+  - `ruleset.rs` (remote rule-sets), `cache.rs` (`cache_file`; other subsystems get namespaced tables via `CacheFile::table`, e.g. `"fakeip"`), `fetch.rs` (HTTP(S) client through an outbound), `clash/` (Clash API).
+- `sbr-config/src/srs.rs`: the binary rule-set codec, byte-compatible with sing-box.
 - `sbr-apple`: C ABI + staticlib. `apple/`: Swift package.
 
 ## Adding an outbound protocol
@@ -30,6 +34,10 @@ Read this before adding a protocol, inbound or service.
 - Relay buffers come from `Settings::relay_buffer` (16 KiB on iOS, 64 KiB elsewhere).
 - Prefer `aws-lc-rs` for crypto (hardware AES and ChaCha on Apple silicon). Use `rustls` with the `aws_lc_rs` provider for TLS.
 - Power: no busy timers. Idle sessions must cost zero wakeups; use deadlines, not polling intervals.
+
+## No third-party endpoints
+
+sbr contacts only endpoints the config names. Never add a built-in default URL (probe targets, downloads, update checks); where sing-box has one, document the deviation in the README.
 
 ## Style
 

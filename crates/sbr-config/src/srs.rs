@@ -591,9 +591,9 @@ fn dump_adguard(keys: &[Vec<u8>]) -> Vec<String> {
     keys.iter()
         .filter_map(|k| {
             let mut key = reverse_domain(k);
-            let (suffix, start) = match key.first()? {
-                &PREFIX_LABEL => (false, false),
-                &ROOT_LABEL => (true, false),
+            let (suffix, start) = match *key.first()? {
+                PREFIX_LABEL => (false, false),
+                ROOT_LABEL => (true, false),
                 _ => (false, true),
             };
             if !start {

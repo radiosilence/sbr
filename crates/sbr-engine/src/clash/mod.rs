@@ -415,24 +415,25 @@ async fn get_proxies(State(api): State<Api>) -> Json<Value> {
     Json(json!({ "proxies": map }))
 }
 
-fn find(api: &ApiState, name: &str) -> Result<Arc<dyn Outbound>, Response> {
-    api.engine
-        .outbound(name)
-        .cloned()
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "Resource not found"))
+fn find(api: &ApiState, name: &str) -> Option<Arc<dyn Outbound>> {
+    api.engine.outbound(name).cloned()
+}
+
+fn not_found() -> Response {
+    error(StatusCode::NOT_FOUND, "Resource not found")
 }
 
 async fn get_proxy(State(api): State<Api>, Path(name): Path<String>) -> Response {
     match find(&api, &name) {
-        Ok(o) => Json(proxy_info(&api, &o)).into_response(),
-        Err(r) => r,
+        Some(o) => Json(proxy_info(&api, &o)).into_response(),
+        None => not_found(),
     }
 }
 
 async fn put_proxy(State(api): State<Api>, Path(name): Path<String>, body: Bytes) -> Response {
     let o = match find(&api, &name) {
-        Ok(o) => o,
-        Err(r) => return r,
+        Some(o) => o,
+        None => return not_found(),
     };
     let Some(member) = serde_json::from_slice::<Value>(&body)
         .ok()
@@ -469,8 +470,8 @@ impl DelayQuery {
 
 async fn proxy_delay(State(api): State<Api>, Path(name): Path<String>, Query(q): Query<DelayQuery>) -> Response {
     let o = match find(&api, &name) {
-        Ok(o) => o,
-        Err(r) => return r,
+        Some(o) => o,
+        None => return not_found(),
     };
     let Some(timeout) = q.timeout() else {
         return error(StatusCode::BAD_REQUEST, "Body invalid");
@@ -499,14 +500,14 @@ async fn get_groups(State(api): State<Api>) -> Json<Value> {
 
 async fn get_group(State(api): State<Api>, Path(name): Path<String>) -> Response {
     match find(&api, &name) {
-        Ok(o) if o.as_group().is_some() => Json(proxy_info(&api, &o)).into_response(),
+        Some(o) if o.as_group().is_some() => Json(proxy_info(&api, &o)).into_response(),
         _ => error(StatusCode::NOT_FOUND, "Resource not found"),
     }
 }
 
 async fn group_delay(State(api): State<Api>, Path(name): Path<String>, Query(q): Query<DelayQuery>) -> Response {
     let o = match find(&api, &name) {
-        Ok(o) if o.as_group().is_some() => o,
+        Some(o) if o.as_group().is_some() => o,
         _ => return error(StatusCode::NOT_FOUND, "Resource not found"),
     };
     let Some(timeout) = q.timeout() else {
