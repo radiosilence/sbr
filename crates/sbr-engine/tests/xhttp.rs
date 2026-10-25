@@ -1,6 +1,6 @@
 //! XHTTP interop against a real Xray-core server (`$SBR_XRAY`, else `xray`
 //! on PATH; the tests skip without one): every mode over HTTP/1.1 and
-//! HTTP/2 with TLS, HTTP/2 over REALITY, and cleartext HTTP/1.1, with VLESS
+//! HTTP/2 with TLS, HTTP/2 over REALITY, HTTP/3, and cleartext HTTP/1.1, with VLESS
 //! TCP and UDP through each.
 
 mod common;
@@ -151,7 +151,7 @@ async fn udp_roundtrip(out: &Arc<dyn Outbound>, echo: SocketAddr, sizes: &[usize
 struct Xray {
     _proc: Proc,
     _dir: PathBuf,
-    /// Inbound ports by name: `tls`, `reality`, `plain`, `custom`.
+    /// Inbound ports by name: `tls`, `reality`, `plain`, `custom`, `h3`.
     ports: Vec<(&'static str, u16)>,
     public_key: String,
     cert_pem: String,
@@ -197,6 +197,7 @@ async fn start_xray(bin: &Path) -> Xray {
             ("reality", common::free_port()),
             ("plain", common::free_port()),
             ("custom", common::free_port()),
+            ("h3", common::free_udp_port()),
         ];
         let tls_settings = json!({
             "alpn": ["h2", "http/1.1"],
@@ -233,6 +234,14 @@ async fn start_xray(bin: &Path) -> Xray {
                     "network": "xhttp", "xhttpSettings": custom_server_settings(),
                     "security": "tls", "tlsSettings": tls_settings,
                 })),
+                inbound(ports[4].1, json!({
+                    "network": "xhttp", "xhttpSettings": {"path": "/xh"},
+                    "security": "tls",
+                    "tlsSettings": {
+                        "alpn": ["h3"],
+                        "certificates": [{"certificateFile": cert_path, "keyFile": key_path}],
+                    },
+                })),
             ],
             "outbounds": [
                 {"protocol": "freedom", "tag": "direct",
@@ -256,7 +265,8 @@ async fn start_xray(bin: &Path) -> Xray {
                 break;
             }
             let mut all = true;
-            for (_, port) in &ports {
+            // The HTTP/3 inbound listens on UDP only.
+            for (_, port) in ports.iter().filter(|(n, _)| *n != "h3") {
                 all &= TcpStream::connect(("127.0.0.1", *port)).await.is_ok();
             }
             if all {
@@ -284,6 +294,7 @@ enum Sec {
     TlsH1,
     Reality,
     Plain,
+    TlsH3,
 }
 
 impl Sec {
@@ -293,6 +304,7 @@ impl Sec {
             Sec::TlsH1 => "tls-h1",
             Sec::Reality => "reality-h2",
             Sec::Plain => "plain-h1",
+            Sec::TlsH3 => "tls-h3",
         }
     }
 }
@@ -308,6 +320,9 @@ fn tls_json(x: &Xray, sec: Sec) -> Option<Value> {
             "server_name": REALITY_SNI,
             "utls": {"enabled": true, "fingerprint": "chrome"},
             "reality": {"enabled": true, "public_key": x.public_key, "short_id": SHORT_ID},
+        })),
+        Sec::TlsH3 => Some(json!({
+            "enabled": true, "server_name": SNI, "certificate": x.cert_pem, "alpn": ["h3"],
         })),
         Sec::Plain => None,
     }
@@ -358,9 +373,10 @@ async fn xray_xhttp_modes() {
     let (techo, uecho) = (common::echo().await, common::udp_echo().await);
 
     let mut cases = Vec::new();
-    for sec in [Sec::TlsH2, Sec::TlsH1, Sec::Reality, Sec::Plain] {
+    for sec in [Sec::TlsH2, Sec::TlsH1, Sec::Reality, Sec::Plain, Sec::TlsH3] {
         let inbound = match sec {
             Sec::Reality => "reality",
+            Sec::TlsH3 => "h3",
             Sec::Plain => "plain",
             _ => "tls",
         };

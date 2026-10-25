@@ -17,6 +17,7 @@
 mod browser;
 mod h1;
 mod h2io;
+mod h3io;
 mod pool;
 
 use std::io;
@@ -37,32 +38,33 @@ use self::browser::{Headers, padding, request_headers, set};
 use self::pool::{Pool, PoolConn, Running, Slot, rand_between};
 use super::ServerDialer;
 use crate::outbound::Upstream;
+use crate::outbound::quic::Dialer as QuicDialer;
 use crate::tls::TlsClient;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Version {
     H1,
     H2,
+    H3,
 }
 
 /// Xray `decideHTTPVersion`.
-fn decide_version(tls: Option<&TlsOutbound>, path: &str) -> Result<Version, String> {
-    let Some(t) = tls else { return Ok(Version::H1) };
+fn decide_version(tls: Option<&TlsOutbound>) -> Version {
+    let Some(t) = tls else { return Version::H1 };
     if t.reality.as_ref().is_some_and(|r| r.enabled) {
-        return Ok(Version::H2);
+        return Version::H2;
     }
     match t.alpn.as_slice() {
-        [a] if a == "http/1.1" => Ok(Version::H1),
-        [a] if a == "h3" => Err(format!(
-            "{path}: XHTTP over HTTP/3 (alpn h3) is not supported by sbr yet"
-        )),
-        _ => Ok(Version::H2),
+        [a] if a == "http/1.1" => Version::H1,
+        [a] if a == "h3" => Version::H3,
+        _ => Version::H2,
     }
 }
 
 enum Conn {
     H1(h1::H1Conn),
     H2(h2io::H2Conn),
+    H3(h3io::H3Conn),
 }
 
 impl PoolConn for Conn {
@@ -70,6 +72,7 @@ impl PoolConn for Conn {
         match self {
             Conn::H1(c) => c.is_closed(),
             Conn::H2(c) => c.is_closed(),
+            Conn::H3(c) => c.is_closed(),
         }
     }
 }
@@ -175,15 +178,24 @@ struct Endpoint {
     path: String,
     query: String,
     keepalive: Option<Duration>,
+    /// HTTP/3 only: the QUIC dialer.
+    quic: Option<QuicDialer>,
     pool: Pool<Conn>,
 }
 
 impl Endpoint {
     fn new(cfg: &Xhttp, dialer: ServerDialer, tls: Option<&TlsOutbound>, path: &str) -> Result<Self, String> {
-        let version = decide_version(tls, path)?;
+        let version = decide_version(tls);
+        let quic = match (version, tls) {
+            (Version::H3, Some(t)) => Some(
+                QuicDialer::new(dialer.upstream.clone(), dialer.server.clone(), t, &["h3"], false)
+                    .map_err(|e| format!("{path}: {e}"))?,
+            ),
+            _ => None,
+        };
         let dialer = match version {
             Version::H1 => dialer.with_default_alpn(&["http/1.1"]),
-            Version::H2 => dialer.with_default_alpn(&["h2", "http/1.1"]),
+            _ => dialer.with_default_alpn(&["h2", "http/1.1"]),
         };
         let host = match &cfg.host {
             Some(h) => h.clone(),
@@ -209,6 +221,7 @@ impl Endpoint {
             path,
             query: q.to_owned(),
             keepalive,
+            quic,
             pool: Pool::new(&cfg.xmux),
             dialer,
             cfg: cfg.clone(),
@@ -219,6 +232,7 @@ impl Endpoint {
         match self.version {
             Version::H1 => Conn::H1(h1::H1Conn::default()),
             Version::H2 => Conn::H2(h2io::H2Conn::default()),
+            Version::H3 => Conn::H3(h3io::H3Conn::default()),
         }
     }
 
@@ -378,7 +392,14 @@ impl Endpoint {
     fn h2(slot: &SlotRef) -> &h2io::H2Conn {
         match &slot.conn {
             Conn::H2(c) => c,
-            Conn::H1(_) => unreachable!("slot version matches its endpoint"),
+            _ => unreachable!("slot version matches its endpoint"),
+        }
+    }
+
+    fn h3<'a>(&'a self, slot: &'a SlotRef) -> (&'a h3io::H3Conn, &'a QuicDialer) {
+        match (&slot.conn, &self.quic) {
+            (Conn::H3(c), Some(d)) => (c, d),
+            _ => unreachable!("slot version matches its endpoint"),
         }
     }
 
@@ -391,6 +412,15 @@ impl Endpoint {
                     .await
                     .inspect_err(|_| slot.mark_closed())?;
                 Ok(Down::H2(h2io::H2Down::new(resp)))
+            }
+            Version::H3 => {
+                let (c, d) = self.h3(slot);
+                let (mut tx, rx, guard) = c
+                    .request(d, self.keepalive, self.h2_request(&req, None)?)
+                    .await
+                    .inspect_err(|_| slot.mark_closed())?;
+                let _ = tx.finish().await;
+                Ok(Down::H3(h3io::H3Down::new(rx, guard)))
             }
             Version::H1 => {
                 let head = self.h1_head(&req, h1::BodyKind::None, true);
@@ -414,6 +444,21 @@ impl Endpoint {
                     .await
                     .inspect_err(|_| slot.mark_closed())?;
                 Ok((Up::H2(h2io::H2Up::new(send)), Down::H2(h2io::H2Down::new(resp))))
+            }
+            Version::H3 => {
+                let (c, d) = self.h3(slot);
+                let (tx, rx, guard) = c
+                    .request(d, self.keepalive, self.h2_request(&req, None)?)
+                    .await
+                    .inspect_err(|_| slot.mark_closed())?;
+                // One guard per half: the connection lives while either does.
+                let guard2 = c
+                    .guard()
+                    .ok_or_else(|| io::Error::other("xhttp: QUIC connection closing"))?;
+                Ok((
+                    Up::H3(h3io::H3Up::new(tx, guard)),
+                    Down::H3(h3io::H3Down::new(rx, guard2)),
+                ))
             }
             Version::H1 => {
                 let head = self.h1_head(&req, h1::BodyKind::Chunked, true);
@@ -447,7 +492,7 @@ impl XhttpClient {
         upstream: Upstream,
         base_dir: Option<&std::path::Path>,
     ) -> Result<Self, String> {
-        let up = Endpoint::new(cfg, base, tls, "tls.alpn")?;
+        let up = Endpoint::new(cfg, base, tls, "tls")?;
         let down = match &cfg.download {
             None => None,
             Some(d) => {
@@ -468,7 +513,7 @@ impl XhttpClient {
                     &d.xhttp,
                     dialer,
                     dtls,
-                    "transport.downloadSettings.tls.alpn",
+                    "transport.downloadSettings.tls",
                 )?))
             }
         };
@@ -664,11 +709,11 @@ async fn packet_uploader(ep: Arc<Endpoint>, mut slot: SlotRef, session: String, 
             }
             notified.await;
         };
-        if interval.from > 0 {
-            if let Some(t) = last {
-                let wait = Duration::from_millis(rand_between(interval).max(0) as u64);
-                tokio::time::sleep_until((t + wait).into()).await;
-            }
+        if interval.from > 0
+            && let Some(t) = last
+        {
+            let wait = Duration::from_millis(rand_between(interval).max(0) as u64);
+            tokio::time::sleep_until((t + wait).into()).await;
         }
         last = Some(Instant::now());
         if !slot.take_request() {
@@ -689,6 +734,24 @@ async fn packet_uploader(ep: Arc<Endpoint>, mut slot: SlotRef, session: String, 
                     let shared = shared.clone();
                     tokio::spawn(async move {
                         if let Err(e) = h2io::drain(resp).await {
+                            shared.fail(format!("xhttp upload: {e}"));
+                        }
+                    });
+                    Ok::<_, io::Error>(())
+                }
+                .await
+            }
+            Conn::H3(c) => {
+                let len = body.len();
+                let has_len = len > 0 || matches!(req.method.as_str(), "POST" | "PUT" | "PATCH");
+                async {
+                    let hreq = ep.h2_request(&req, has_len.then_some(len))?;
+                    let d = ep.quic.as_ref().expect("HTTP/3 endpoint has a QUIC dialer");
+                    let (rx, guard) = h3io::post(c, d, ep.keepalive, hreq, body).await?;
+                    let shared = shared.clone();
+                    tokio::spawn(async move {
+                        let _guard = guard;
+                        if let Err(e) = h3io::drain(rx).await {
                             shared.fail(format!("xhttp upload: {e}"));
                         }
                     });
@@ -729,6 +792,7 @@ impl Drop for AbortOnDrop {
 enum Down {
     H1(h1::H1Response<ReadHalf<Stream>>),
     H2(h2io::H2Down),
+    H3(h3io::H3Down),
 }
 
 impl AsyncRead for Down {
@@ -736,6 +800,7 @@ impl AsyncRead for Down {
         match self.get_mut() {
             Down::H1(r) => Pin::new(r).poll_read(cx, buf),
             Down::H2(r) => Pin::new(r).poll_read(cx, buf),
+            Down::H3(r) => Pin::new(r).poll_read(cx, buf),
         }
     }
 }
@@ -743,6 +808,7 @@ impl AsyncRead for Down {
 enum Up {
     H1(h1::ChunkedWriter<WriteHalf<Stream>>),
     H2(h2io::H2Up),
+    H3(h3io::H3Up),
     Packet(PacketUp),
 }
 
@@ -765,6 +831,7 @@ impl AsyncWrite for XhttpStream {
         match &mut self.get_mut().up {
             Up::H1(w) => Pin::new(w).poll_write(cx, buf),
             Up::H2(w) => Pin::new(w).poll_write(cx, buf),
+            Up::H3(w) => Pin::new(w).poll_write(cx, buf),
             Up::Packet(w) => Pin::new(w).poll_write(cx, buf),
         }
     }
@@ -772,6 +839,7 @@ impl AsyncWrite for XhttpStream {
         match &mut self.get_mut().up {
             Up::H1(w) => Pin::new(w).poll_flush(cx),
             Up::H2(w) => Pin::new(w).poll_flush(cx),
+            Up::H3(w) => Pin::new(w).poll_flush(cx),
             Up::Packet(w) => Pin::new(w).poll_flush(cx),
         }
     }
@@ -779,6 +847,7 @@ impl AsyncWrite for XhttpStream {
         let r = match &mut self.get_mut().up {
             Up::H1(w) => Pin::new(w).poll_shutdown(cx),
             Up::H2(w) => Pin::new(w).poll_shutdown(cx),
+            Up::H3(w) => Pin::new(w).poll_shutdown(cx),
             Up::Packet(w) => Pin::new(w).poll_shutdown(cx),
         };
         ready!(r)?;
