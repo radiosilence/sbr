@@ -47,6 +47,17 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         (providerConfiguration[SbrProviderKey.appGroup] as? String).flatMap { SbrConfigStore(appGroup: $0).directory }
     }
 
+    /// The extension's own Application Support directory: where relative
+    /// paths in the config (cache_file, local rule-sets) live when no App
+    /// Group is configured.
+    static var privateDirectory: URL? {
+        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        else { return nil }
+        let sbr = dir.appendingPathComponent("sbr", isDirectory: true)
+        try? FileManager.default.createDirectory(at: sbr, withIntermediateDirectories: true)
+        return sbr
+    }
+
     /// Override to load the config from somewhere else (Keychain, a server).
     open func loadConfiguration() throws -> String {
         if let inline = providerConfiguration[SbrProviderKey.config] as? String {
@@ -75,7 +86,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             guard let fd = Sbr.findTunFileDescriptor() else { throw SbrError("utun file descriptor not found") }
             var opts = coreOptions
             opts.tunFileDescriptor = fd
-            if opts.baseDirectory == nil { opts.baseDirectory = appGroupDirectory }
+            if opts.baseDirectory == nil { opts.baseDirectory = appGroupDirectory ?? Self.privateDirectory }
             _ = swapCore(try Sbr(config: config, options: opts))
             startPathMonitor()
             logger.info("tunnel up on fd \(fd)")
@@ -119,10 +130,10 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             return SbrResponse(groups: core.groups())
         case .stats:
             return SbrResponse(stats: core.stats())
-        case .reload:
+        case let .reload(config):
             // Interface settings come from the tun inbound; if those changed,
             // the app should restart the tunnel instead.
-            try core.reload(config: try loadConfiguration())
+            try core.reload(config: try config ?? loadConfiguration())
             return SbrResponse(groups: core.groups())
         }
     }

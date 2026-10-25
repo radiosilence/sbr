@@ -44,17 +44,23 @@ struct ProfileLink {
     }
 }
 
-/// Profiles live in the App Group: `profiles/index.json` plus one JSON file
-/// per profile. The active one is copied to `config.json`, which is what the
-/// tunnel reads.
+/// Profiles live in the app's own container (`Application Support/profiles`:
+/// `index.json` plus one JSON file per profile), protected until first
+/// unlock. The tunnel never reads them: the app hands it the active
+/// profile's text inside the VPN configuration (see `TunnelModel.apply`), so
+/// no shared container holds every profile's credentials.
 @MainActor
 final class ProfileStore: ObservableObject {
     @Published private(set) var profiles: [Profile] = []
     @Published private(set) var activeID: UUID?
     @Published private(set) var refreshing: Set<UUID> = []
+    /// The active profile's config, for the tunnel.
+    @Published private(set) var activeText: String?
 
-    private let config = SbrConfigStore(appGroup: AppConfig.appGroup)
-    private var dir: URL? { config.directory?.appendingPathComponent("profiles", isDirectory: true) }
+    private var dir: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("profiles", isDirectory: true)
+    }
     private var indexURL: URL? { dir?.appendingPathComponent("index.json") }
 
     private struct Index: Codable {
@@ -70,6 +76,7 @@ final class ProfileStore: ObservableObject {
         else { return }
         profiles = index.profiles
         activeID = index.active
+        activeText = active.flatMap { try? text(of: $0) }
     }
 
     /// Download a remote profile, validate it with the tunnel's own parser,
@@ -94,13 +101,13 @@ final class ProfileStore: ObservableObject {
     }
 
     func text(of profile: Profile) throws -> String {
-        guard let url = file(profile.id) else { throw SbrError("App Group unavailable") }
+        guard let url = file(profile.id) else { throw SbrError("no storage directory") }
         return try String(contentsOf: url, encoding: .utf8)
     }
 
     /// Make `profile` the one the tunnel runs.
     func activate(_ profile: Profile) throws {
-        try config.save(try text(of: profile))
+        activeText = try text(of: profile)
         activeID = profile.id
         try saveIndex()
     }
@@ -108,7 +115,10 @@ final class ProfileStore: ObservableObject {
     func remove(_ profile: Profile) {
         if let url = file(profile.id) { try? FileManager.default.removeItem(at: url) }
         profiles.removeAll { $0.id == profile.id }
-        if activeID == profile.id { activeID = nil }
+        if activeID == profile.id {
+            activeID = nil
+            activeText = nil
+        }
         try? saveIndex()
     }
 
@@ -125,7 +135,7 @@ final class ProfileStore: ObservableObject {
         updated.updated = Date()
         try write(updated, text: text)
         guard profile.id == activeID, before != text else { return false }
-        try config.save(text)
+        activeText = text
         return true
     }
 
@@ -151,7 +161,7 @@ final class ProfileStore: ObservableObject {
     }
 
     private func write(_ profile: Profile, text: String) throws {
-        guard let dir, let url = file(profile.id) else { throw SbrError("App Group unavailable") }
+        guard let dir, let url = file(profile.id) else { throw SbrError("no storage directory") }
         if let problem = Sbr.check(config: text) { throw SbrError(problem) }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try Data(text.utf8).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])

@@ -12,7 +12,7 @@ lowercase interface text, square corners, hairlines and a single mint accent
 cd apple
 ./build-xcframework.sh              # SBR_SKIP_TVOS=1 without a nightly toolchain
 cd App
-mise exec -- xcodegen generate      # SBR_TEAM_ID overrides the team in project.yml
+mise exec -- xcodegen generate      # team: DEVELOPMENT_TEAM in project.yml
 open Sbr.xcodeproj
 ```
 

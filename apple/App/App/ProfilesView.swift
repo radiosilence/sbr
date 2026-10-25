@@ -4,7 +4,6 @@ import UniformTypeIdentifiers
 
 struct ProfilesView: View {
     @EnvironmentObject private var profiles: ProfileStore
-    @EnvironmentObject private var tunnel: TunnelModel
     @State private var link = ""
     @State private var busy = false
     @State private var problem: String?
@@ -116,10 +115,9 @@ struct ProfilesView: View {
         busy = true
         defer { busy = false }
         do {
-            let p = try await profiles.add(remote: parsed.url, name: parsed.name)
+            try await profiles.add(remote: parsed.url, name: parsed.name)
             link = ""
             problem = nil
-            if p.id == profiles.activeID { await tunnel.reload() }
         } catch {
             problem = error.localizedDescription
         }
@@ -128,7 +126,6 @@ struct ProfilesView: View {
     private func activate(_ p: Profile) async {
         do {
             try profiles.activate(p)
-            await tunnel.reload()
         } catch {
             problem = error.localizedDescription
         }
@@ -136,7 +133,7 @@ struct ProfilesView: View {
 
     private func refresh(_ p: Profile) async {
         do {
-            if try await profiles.refresh(p) { await tunnel.reload() }
+            try await profiles.refresh(p)
         } catch {
             problem = error.localizedDescription
         }
@@ -148,8 +145,7 @@ struct ProfilesView: View {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             let text = try String(contentsOf: url, encoding: .utf8)
-            let p = try profiles.add(text: text, name: url.deletingPathExtension().lastPathComponent)
-            if p.id == profiles.activeID { await tunnel.reload() }
+            try profiles.add(text: text, name: url.deletingPathExtension().lastPathComponent)
             problem = nil
         } catch {
             problem = error.localizedDescription
