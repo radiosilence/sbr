@@ -248,7 +248,7 @@ async fn bursty() -> SocketAddr {
 
 async fn api(addr: SocketAddr, path: &str) -> Value {
     let mut s = TcpStream::connect(addr).await.unwrap();
-    let req = format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
     s.write_all(req.as_bytes()).await.unwrap();
     let mut out = Vec::new();
     s.read_to_end(&mut out).await.unwrap();
