@@ -13,6 +13,8 @@ sbr check -c config.json
 - **Ecosystem.** Tokio, rustls/aws-lc (hardware AES-GCM on Apple silicon), quinn (QUIC for hysteria2/tuic) and smoltcp all exist and are fast. In Swift, every protocol would be written from scratch on top of Network.framework, and the code would only run on Apple platforms.
 - **One core, everywhere.** The same crate runs as a Linux server, a macOS CLI, and inside a `NEPacketTunnelProvider` behind a C ABI. Swift stays responsible for what only Swift can do: NetworkExtension, UI and Keychain.
 
+Which censors and surveillance programmes sbr is designed against, and what it still lacks, is in [`docs/threat-model.md`](docs/threat-model.md).
+
 ## Layout
 
 | crate | what |
