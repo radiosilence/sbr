@@ -24,7 +24,6 @@ struct LogsView: View {
                     #endif
                 }
                 .padding(.bottom, Theme.Space.m)
-                #if os(macOS)
                 Toggle(isOn: $tunnel.userspaceTCP) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("userspace tcp").font(.sbr(.control))
@@ -34,7 +33,6 @@ struct LogsView: View {
                 }
                 .tint(.sbrAccent)
                 .padding(.bottom, Theme.Space.m)
-                #endif
                 DiagnoseSection()
                 if !tunnel.isConnected, !tunnel.logs.isEmpty {
                     Text("from the last session.").font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)

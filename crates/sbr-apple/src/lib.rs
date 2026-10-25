@@ -85,9 +85,6 @@ impl Launch {
             base_dir: self.base_dir.clone(),
             tun_fd,
             max_connections: self.max_connections,
-            // iOS stops a packet-tunnel extension whose kernel-listener TCP
-            // path is under sustained load; the userspace stack holds up.
-            tun_stack: MOBILE.then_some(sbr_engine::TunTcp::Userspace),
             ..Settings::default()
         }
     }
