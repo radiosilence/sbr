@@ -269,7 +269,8 @@ async fn sing_box_reality_vless() {
                 .await
                 .unwrap_or_else(|e| panic!("REALITY handshake {fp:?} pq={pq} via cover {i}: {e}"));
             assert_eq!(tls.cipher_suite().id(), u16::from(suites[i].suite()));
-            let hybrid = fp == Fingerprint::Chrome && pq;
+            // Every profile but iOS 14 offers X25519MLKEM768 first.
+            let hybrid = fp != Fingerprint::Ios && pq;
             assert_eq!(tls.key_exchange_group(), if hybrid { 0x11ec } else { 0x001d });
             seed = seed.wrapping_add(1);
             vless_round_trip(tls, echo, seed).await;

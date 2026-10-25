@@ -464,20 +464,33 @@ async fn apple_and_firefox_fingerprints() {
             0x0000, 0x0017, 0xff01, 0x000a, 0x000b, 0x0010, 0x0005, 0x000d, 0x0012, 0x0033, 0x002d, 0x002b, 0x001b
         ]
     );
+    assert!(is_grease(t[14]) && t.len() == 15, "Safari 26.3 sends no padding");
     assert_eq!(safari.ext(0x001b), &[2, 0, 1]);
-    assert_eq!(safari.msg.len(), 512);
+    assert_eq!(&safari.suites[1..4], &[0x1302, 0x1303, 0x1301]);
+    let shares = key_share_groups(&safari);
+    assert_eq!(&shares[1..], &[(0x11ec, 1184 + 32), (0x001d, 32)]);
+    assert_eq!(u16s(&safari.ext(0x002b)[1..])[1..], [0x0304, 0x0303]);
 
     let ff = capture(&test_config(Fingerprint::Firefox, true)).await;
     assert_eq!(
         ff.types(),
         vec![
-            0x0000, 0x0017, 0xff01, 0x000a, 0x000b, 0x0023, 0x0010, 0x0005, 0x0022, 0x0033, 0x002b, 0x000d, 0x002d,
-            0x001c, 0xfe0d
+            0x0000, 0x0017, 0xff01, 0x000a, 0x000b, 0x0010, 0x0005, 0x0022, 0x0012, 0x0033, 0x002b, 0x000d, 0x001c,
+            0x001b, 0xfe0d
         ]
     );
     assert!(!ff.suites.iter().any(|&s| is_grease(s)));
-    assert_eq!(key_share_groups(&ff), vec![(0x001d, 32), (0x0017, 65)]);
+    assert_eq!(
+        key_share_groups(&ff),
+        vec![(0x11ec, 1184 + 32), (0x001d, 32), (0x0017, 65)]
+    );
+    // The standalone X25519 share is the hybrid's X25519 half.
+    let ks = ff.ext(0x0033);
+    let hybrid_x = &ks[2 + 4 + 1184..2 + 4 + 1184 + 32];
+    let x = &ks[2 + 4 + 1216 + 4..2 + 4 + 1216 + 4 + 32];
+    assert_eq!(hybrid_x, x);
     assert_eq!(ff.ext(0x001c), &[0x40, 0x01]);
+    assert_eq!(ff.ext(0x001b), &[6, 0, 1, 0, 2, 0, 3]);
 }
 
 #[tokio::test]

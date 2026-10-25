@@ -44,13 +44,11 @@ is the actual target:
    - `phys_footprint` memory stats; jetsam headroom under load;
    - `NEPacketTunnelNetworkSettings` derived from the tun inbound
      (`sbr_tun_network_settings`).
-2. **IP fragment reassembly in the TUN (correctness, user-visible).**
-   `crates/sbr-tun/src/packet.rs::parse` drops IPv4 fragments and doesn't walk
-   IPv6 extension headers. The user's profile comment says nested UDP VPNs (AWS
-   Client VPN / OpenVPN-UDP) break on sing-box's `system` stack and work on
-   gVisor. With MTU 1280, nested VPN datagrams get fragmented, so sbr will
-   break the same way until UDP fragments are reassembled (bounded table,
-   short timeout, no timers when idle). TCP doesn't need it.
+2. ~~**IP fragment reassembly in the TUN.**~~ Done (`crates/sbr-tun/src/frag.rs`,
+   README "TUN system stack: fragments"). The kernel path is covered by
+   `tun_udp_fragments_at_small_mtu` in `crates/sbr-engine/tests/tun.rs`, which
+   needs root on Linux and has not run yet; test it on a device with a nested
+   UDP VPN.
 3. **Interop against the user's actual servers.** Add Xray (VLESS+REALITY+
    Vision, with fallback) and apernet hysteria2 (salamander, userpass) as test
    servers next to sing-box. Both build from Go source via proxy.golang.org.
@@ -103,6 +101,9 @@ is the actual target:
 - Interop env vars: `SBR_SING_BOX` (sing-box with utls+quic+wireguard),
   `SING_BOX` (QUIC tests). Build one with
   `go build -tags with_quic,with_utls,with_wireguard,with_gvisor ./cmd/sing-box`.
+  `SBR_XRAY` and `SBR_HYSTERIA` (Xray-core and apernet hysteria, `brew install
+  xray hysteria`) drive `tests/upstream_servers.rs`; Homebrew's `sing-box` has
+  every tag the other tests need.
 - Known upstream quirks: sing-box's httpupgrade server can eat the first tunnel
   byte (trojan+httpupgrade test excluded); ShadowTLS v2 against a TLS 1.3 camouflage
   server is racy in Go's client too; `shadowsocks` crate 1.25 silently truncates

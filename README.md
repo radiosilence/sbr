@@ -13,6 +13,8 @@ sbr check -c config.json
 - **Ecosystem.** Tokio, rustls/aws-lc (hardware AES-GCM on Apple silicon), quinn (QUIC for hysteria2/tuic) and smoltcp all exist and are fast. In Swift, every protocol would be written from scratch on top of Network.framework, and the code would only run on Apple platforms.
 - **One core, everywhere.** The same crate runs as a Linux server, a macOS CLI, and inside a `NEPacketTunnelProvider` behind a C ABI. Swift stays responsible for what only Swift can do: NetworkExtension, UI and Keychain.
 
+Which censors and surveillance programmes sbr is designed against, and what it still lacks, is in [`docs/threat-model.md`](docs/threat-model.md).
+
 ## Layout
 
 | crate | what |
@@ -112,6 +114,12 @@ No clear winner at this noise level. rustls reads ciphertext 4 KiB at a time and
 
 sing-box wins plain TCP relay **on Linux** because its `bufio` uses `splice(2)` zero-copy. Darwin has no splice, so on Apple targets that path is copy-vs-copy. sbr wins on encrypted relay. This is a single synthetic loopback test, so treat it as a smoke signal, not a verdict.
 
+## TUN system stack: fragments
+
+A UDP tunnel nested inside sbr's (OpenVPN or AWS Client VPN over UDP, at the usual MTU 1280) sends datagrams larger than the TUN MTU, so the kernel fragments them. sing-box's kernel `system` stack drops these, which is why such profiles use `stack: mixed`. sbr's system stack reassembles IPv4 and IPv6 fragments (`crates/sbr-tun/src/frag.rs`) and fragments its own replies that exceed the MTU, acting as the sending host; that applies to IPv6 too, since sbr is the source of those packets.
+
+The reassembly table holds at most 128 datagrams and 2 MiB, and a datagram not completed within 5 s is discarded. The timeout is checked when fragments arrive rather than by a timer, so an idle table costs no wakeups. Any overlap abandons the datagram (RFC 5722, applied to IPv4 as well); exact duplicates are ignored. TCP fragments, which the kernel does not normally produce at the TUN MTU, are reassembled, translated, and fragmented again under sbr's own IP ID, because every translated flow shares one address pair and the apps' IDs could collide in the kernel's reassembly. IPv6 Hop-by-Hop, Routing (with no segments left) and Destination Options headers are skipped to reach TCP or UDP.
+
 ## TLS and V2Ray transports
 
 The outbound `tls` object is rustls + aws-lc-rs (`crates/sbr-engine/src/tls`): `server_name`, `disable_sni`, `insecure`, `alpn`, `min_version`/`max_version` (rustls speaks 1.2 and 1.3 only), `certificate`/`certificate_path` (replaces the web PKI roots, like sing-box), `certificate_sha256` and `certificate_public_key_sha256` pins, client certificates, `handshake_timeout`, `fragment`/`record_fragment` (one split inside the SNI's first label, as sing-box effectively does; on Linux it waits for the ACK via `TCP_INFO`, elsewhere it sleeps `fragment_fallback_delay`), and `ech` with a static `config` (no DNS lookup of ECH configs, no retry with server-provided configs). `reality` goes through `sbr-reality` with its browser fingerprints.
@@ -121,6 +129,12 @@ The outbound `tls` object is rustls + aws-lc-rs (`crates/sbr-engine/src/tls`): `
 Transports: `ws` (incl. early data in the path or a header), `httpupgrade`, `grpc` (the "gun" framing over one pooled HTTP/2 connection per outbound, h2c without TLS) and `http` (HTTP/2 over TLS, HTTP/1.1 without). gRPC/HTTP `idle_timeout`/`ping_timeout` are parsed but no health pings are sent (no idle timers).
 
 Interop is tested against real sing-box servers (`crates/sbr-engine/tests/singbox.rs`): every protocol over every transport with and without TLS, 1 MiB round trips plus UDP, Vision with TLS 1.3 inside (direct mode), REALITY with and without Vision, and each TLS option. The trojan + `httpupgrade` pair is excluded: sing-box's httpupgrade server flushes `101` before hijacking, so Go's HTTP server can swallow the first byte of the tunnel and its trojan server rejects the short read. That is a server-side race any client hits.
+
+The servers the jaritanet gateway actually runs are tested too (`crates/sbr-engine/tests/upstream_servers.rs`, binaries from `$SBR_XRAY` / `$SBR_HYSTERIA` or `PATH`): Xray-core VLESS + REALITY + Vision with a loopback `dest` behind `xver: 1`, several `serverNames` and a guest blackhole, and apernet hysteria2 on several ports with salamander and `userpass`. They cover 1 MiB round trips, Vision's direct copy, XUDP and plain VLESS UDP, fragmented hy2 datagrams, wrong credentials failing promptly, unauthenticated probes reaching `dest` while sbr clients are connected, and the whole `buildProfile` shape (urltest, both selectors, a Shadowsocks exit detoured through `entry-select`). Server behaviour those tests pin down:
+
+- XTLS/REALITY servers (Xray 26.10) refuse a ClientHello without an X25519MLKEM768 share ahead of X25519. sbr's `firefox` and `safari` therefore follow the uTLS profiles Xray itself uses (`HelloFirefox_148`, `HelloSafari_26_3`); `ios` is uTLS `HelloIOS_14`, has no ML-KEM, and is refused by such servers (it reaches `dest` like a probe), as it is for Xray's and sing-box's own clients.
+- Xray 26 `freedom` blackholes private, loopback and CGNAT destinations (`100.64.0.0/10` included) for vless inbounds unless `finalRules` allow them, so a profile that sends DNS to `127.0.0.1` or tailnet traffic over a REALITY leaf is refused by the server; over hy2 the same traffic works.
+- apernet hysteria2 serialises each downlink UDP message, header included, into a 4096-byte buffer, so a reply payload of more than about 4080 bytes is never delivered.
 
 Vision skips sing-box's 5 ms sleep before the first raw write; rustls is fed one TLS record per wakeup until the server's switch to direct, so no inner bytes ever reach the outer TLS.
 

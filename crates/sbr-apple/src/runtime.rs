@@ -47,6 +47,8 @@ const MAX_BLOCKING_THREADS: usize = 8;
 
 pub struct Running {
     pub engine: Arc<Engine>,
+    /// For work the ABI starts but doesn't wait on (latency tests).
+    pub handle: tokio::runtime::Handle,
     #[cfg(test)]
     pub listening: Vec<(String, std::net::SocketAddr)>,
     /// Handing the instance back to the driver stops it.
@@ -56,7 +58,7 @@ pub struct Running {
 
 impl Running {
     pub fn start(options: Options, settings: Settings, flavor: Flavor) -> Result<Self, String> {
-        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<Instance, String>>(1);
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(Instance, tokio::runtime::Handle), String>>(1);
         let (stop_tx, stop_rx) = oneshot::channel::<Instance>();
         let thread = std::thread::Builder::new()
             .name("sbr".into())
@@ -78,7 +80,7 @@ impl Running {
                 };
                 let started = rt.block_on(Instance::start(&options, settings));
                 let ok = started.is_ok();
-                let _ = ready_tx.send(started.map_err(|e| e.to_string()));
+                let _ = ready_tx.send(started.map(|i| (i, rt.handle().clone())).map_err(|e| e.to_string()));
                 if ok {
                     // Parks with no timer armed: an idle engine costs no wakeups.
                     if let Ok(instance) = rt.block_on(stop_rx) {
@@ -90,8 +92,9 @@ impl Running {
             })
             .map_err(|e| format!("spawn runtime thread: {e}"))?;
         match ready_rx.recv() {
-            Ok(Ok(instance)) => Ok(Self {
+            Ok(Ok((instance, handle))) => Ok(Self {
                 engine: instance.engine.clone(),
+                handle,
                 #[cfg(test)]
                 listening: instance.listening.clone(),
                 stop: Some((stop_tx, instance)),

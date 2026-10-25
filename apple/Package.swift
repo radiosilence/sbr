@@ -11,8 +11,13 @@ let package = Package(
         .target(
             name: "SbrKit",
             dependencies: ["SbrCore"],
-            // Rust's std links libiconv on Apple targets.
-            linkerSettings: [.linkedLibrary("iconv")]
+            linkerSettings: [
+                // Rust's std links libiconv on Apple targets.
+                .linkedLibrary("iconv"),
+                // rustls' platform certificate verifier.
+                .linkedFramework("CoreFoundation"),
+                .linkedFramework("Security"),
+            ]
         ),
     ]
 )

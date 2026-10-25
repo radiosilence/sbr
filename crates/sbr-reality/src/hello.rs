@@ -1,15 +1,20 @@
 //! Browser ClientHello fingerprints.
 //!
-//! Profiles are transcribed from uTLS (`github.com/metacubex/utls` v1.8.7,
-//! `u_parrots.go`), which is what sing-box and Xray send for the same
-//! `fingerprint` names:
+//! Profiles are transcribed from uTLS (`u_parrots.go`) as Xray-core 26.10
+//! uses it (`refraction-networking/utls` aa6edf4b11af), the `*_Auto` ids Xray
+//! maps each `fingerprint` name to:
 //!
 //! | name      | uTLS id            |
 //! |-----------|--------------------|
 //! | `chrome`  | `HelloChrome_133`  |
-//! | `firefox` | `HelloFirefox_120` |
-//! | `safari`  | `HelloSafari_16_0` |
+//! | `firefox` | `HelloFirefox_148` |
+//! | `safari`  | `HelloSafari_26_3` |
 //! | `ios`     | `HelloIOS_14`      |
+//!
+//! XTLS/REALITY servers since 2026-09-08 refuse a ClientHello without an
+//! X25519MLKEM768 key share ahead of any X25519 one, so `ios` (no ML-KEM, in
+//! uTLS as in sbr) cannot authenticate to them; it falls through to the
+//! server's `dest` like any probe.
 //!
 //! GREASE values follow BoringSSL (`0x?a?a`, one random value per role, the two
 //! GREASE extensions never equal), Chrome's extension order is a fresh random
@@ -43,9 +48,9 @@ pub enum Fingerprint {
     /// Chrome 133 (uTLS `HelloChrome_133`, sing-box `chrome` / default).
     #[default]
     Chrome,
-    /// Firefox 120 (uTLS `HelloFirefox_120`).
+    /// Firefox 148 (uTLS `HelloFirefox_148`).
     Firefox,
-    /// Safari 16.0 (uTLS `HelloSafari_16_0`).
+    /// Safari 26.3 (uTLS `HelloSafari_26_3`).
     Safari,
     /// iOS 14 (uTLS `HelloIOS_14`).
     Ios,
@@ -104,6 +109,9 @@ struct Spec {
     exts: &'static [Ext],
     /// Chrome-style extension permutation.
     shuffle: bool,
+    /// The X25519 share repeats the X25519 half of the hybrid share
+    /// (uTLS `ReuseHybridAndClassicalKeyShares`).
+    reuse_x25519: bool,
 }
 
 // Cipher suites.
@@ -116,7 +124,7 @@ const FIREFOX_SUITES: &[u16] = &[
     0x009d, 0x002f, 0x0035,
 ];
 const SAFARI_SUITES: &[u16] = &[
-    GREASE, 0x1301, 0x1302, 0x1303, 0xc02c, 0xc02b, 0xcca9, 0xc030, 0xc02f, 0xcca8, 0xc00a, 0xc009, 0xc014, 0xc013,
+    GREASE, 0x1302, 0x1303, 0x1301, 0xc02c, 0xc02b, 0xcca9, 0xc030, 0xc02f, 0xcca8, 0xc00a, 0xc009, 0xc014, 0xc013,
     0x009d, 0x009c, 0x0035, 0x002f, 0xc008, 0xc012, 0x000a,
 ];
 const IOS_SUITES: &[u16] = &[
@@ -131,7 +139,10 @@ const FIREFOX_SIGALGS: &[u16] = &[
 ];
 const FIREFOX_DC_SIGALGS: &[u16] = &[0x0403, 0x0503, 0x0603, 0x0203];
 // Apple really lists rsa_pss_rsae_sha384 twice.
-const APPLE_SIGALGS: &[u16] = &[
+const SAFARI_SIGALGS: &[u16] = &[
+    0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0805, 0x0501, 0x0806, 0x0601, 0x0201,
+];
+const IOS_SIGALGS: &[u16] = &[
     0x0403, 0x0804, 0x0401, 0x0503, 0x0203, 0x0805, 0x0805, 0x0501, 0x0806, 0x0601, 0x0201,
 ];
 
@@ -139,6 +150,7 @@ const CHROME_GROUPS: &[u16] = &[GREASE, GROUP_X25519_MLKEM768, GROUP_X25519, GRO
 const CHROME_SHARES: &[u16] = &[GREASE, GROUP_X25519_MLKEM768, GROUP_X25519];
 const CHROME_VERSIONS: &[u16] = &[GREASE, 0x0304, 0x0303];
 const FIREFOX_GROUPS: &[u16] = &[
+    GROUP_X25519_MLKEM768,
     GROUP_X25519,
     GROUP_P256,
     GROUP_P384,
@@ -146,11 +158,22 @@ const FIREFOX_GROUPS: &[u16] = &[
     GROUP_FFDHE2048,
     GROUP_FFDHE3072,
 ];
-const FIREFOX_SHARES: &[u16] = &[GROUP_X25519, GROUP_P256];
+/// NSS reuses the hybrid share's X25519 key for the standalone X25519 share.
+const FIREFOX_SHARES: &[u16] = &[GROUP_X25519_MLKEM768, GROUP_X25519, GROUP_P256];
 const FIREFOX_VERSIONS: &[u16] = &[0x0304, 0x0303];
-const APPLE_GROUPS: &[u16] = &[GREASE, GROUP_X25519, GROUP_P256, GROUP_P384, GROUP_P521];
-const APPLE_SHARES: &[u16] = &[GREASE, GROUP_X25519];
-const APPLE_VERSIONS: &[u16] = &[GREASE, 0x0304, 0x0303, 0x0302, 0x0301];
+const SAFARI_GROUPS: &[u16] = &[
+    GREASE,
+    GROUP_X25519_MLKEM768,
+    GROUP_X25519,
+    GROUP_P256,
+    GROUP_P384,
+    GROUP_P521,
+];
+const SAFARI_SHARES: &[u16] = &[GREASE, GROUP_X25519_MLKEM768, GROUP_X25519];
+const SAFARI_VERSIONS: &[u16] = &[GREASE, 0x0304, 0x0303];
+const IOS_GROUPS: &[u16] = &[GREASE, GROUP_X25519, GROUP_P256, GROUP_P384, GROUP_P521];
+const IOS_SHARES: &[u16] = &[GREASE, GROUP_X25519];
+const IOS_VERSIONS: &[u16] = &[GREASE, 0x0304, 0x0303, 0x0302, 0x0301];
 
 const AEAD_AES128GCM: u16 = 1;
 const AEAD_CHACHA20POLY1305: u16 = 3;
@@ -178,6 +201,7 @@ const CHROME: Spec = Spec {
         Ext::Grease2,
     ],
     shuffle: true,
+    reuse_x25519: false,
 };
 
 const FIREFOX: Spec = Spec {
@@ -188,18 +212,19 @@ const FIREFOX: Spec = Spec {
         Ext::RenegotiationInfo,
         Ext::Groups(FIREFOX_GROUPS),
         Ext::PointFormats,
-        Ext::SessionTicket,
         Ext::Alpn,
         Ext::StatusRequest,
         Ext::DelegatedCredentials(FIREFOX_DC_SIGALGS),
+        Ext::Sct,
         Ext::KeyShare(FIREFOX_SHARES),
         Ext::Versions(FIREFOX_VERSIONS),
         Ext::SignatureAlgorithms(FIREFOX_SIGALGS),
-        Ext::PskModes,
         Ext::RecordSizeLimit(0x4001),
+        Ext::CompressCertificate(&[0x0001, 0x0002, 0x0003]),
         Ext::EchGrease(&[AEAD_AES128GCM, AEAD_CHACHA20POLY1305], &[223]),
     ],
     shuffle: false,
+    reuse_x25519: true,
 };
 
 const SAFARI: Spec = Spec {
@@ -209,20 +234,20 @@ const SAFARI: Spec = Spec {
         Ext::Sni,
         Ext::ExtendedMasterSecret,
         Ext::RenegotiationInfo,
-        Ext::Groups(APPLE_GROUPS),
+        Ext::Groups(SAFARI_GROUPS),
         Ext::PointFormats,
         Ext::Alpn,
         Ext::StatusRequest,
-        Ext::SignatureAlgorithms(APPLE_SIGALGS),
+        Ext::SignatureAlgorithms(SAFARI_SIGALGS),
         Ext::Sct,
-        Ext::KeyShare(APPLE_SHARES),
+        Ext::KeyShare(SAFARI_SHARES),
         Ext::PskModes,
-        Ext::Versions(APPLE_VERSIONS),
+        Ext::Versions(SAFARI_VERSIONS),
         Ext::CompressCertificate(&[0x0001]),
         Ext::Grease2,
-        Ext::Padding,
     ],
     shuffle: false,
+    reuse_x25519: false,
 };
 
 const IOS: Spec = Spec {
@@ -232,19 +257,20 @@ const IOS: Spec = Spec {
         Ext::Sni,
         Ext::ExtendedMasterSecret,
         Ext::RenegotiationInfo,
-        Ext::Groups(APPLE_GROUPS),
+        Ext::Groups(IOS_GROUPS),
         Ext::PointFormats,
         Ext::Alpn,
         Ext::StatusRequest,
-        Ext::SignatureAlgorithms(APPLE_SIGALGS),
+        Ext::SignatureAlgorithms(IOS_SIGALGS),
         Ext::Sct,
-        Ext::KeyShare(APPLE_SHARES),
+        Ext::KeyShare(IOS_SHARES),
         Ext::PskModes,
-        Ext::Versions(APPLE_VERSIONS),
+        Ext::Versions(IOS_VERSIONS),
         Ext::Grease2,
         Ext::Padding,
     ],
     shuffle: false,
+    reuse_x25519: false,
 };
 
 fn spec(fp: Fingerprint) -> &'static Spec {
@@ -356,6 +382,12 @@ fn x25519_key() -> io::Result<(agreement::PrivateKey, Vec<u8>)> {
     Ok((k, p))
 }
 
+fn x25519_from(secret: &[u8; 32]) -> io::Result<(agreement::PrivateKey, Vec<u8>)> {
+    let k = agreement::PrivateKey::from_private_key(&agreement::X25519, secret).map_err(|_| crypto_err())?;
+    let p = k.compute_public_key().map_err(|_| crypto_err())?.as_ref().to_vec();
+    Ok((k, p))
+}
+
 pub(crate) fn build(p: &HelloParams<'_>) -> io::Result<ClientHello> {
     let spec = spec(p.fingerprint);
     let grease = Grease::new()?;
@@ -377,6 +409,7 @@ pub(crate) fn build(p: &HelloParams<'_>) -> io::Result<ClientHello> {
     let mut x25519 = None;
     let mut mlkem = None;
     let mut p256 = None;
+    let mut hybrid_x25519: Option<[u8; 32]> = None;
 
     let mut m = Vec::with_capacity(2048);
     m.extend_from_slice(&[1, 0, 0, 0]); // ClientHello, u24 length patched below
@@ -447,7 +480,10 @@ pub(crate) fn build(p: &HelloParams<'_>) -> io::Result<ClientHello> {
                     match g {
                         GREASE => shares.push((grease.group, vec![0])),
                         GROUP_X25519 => {
-                            let (k, pk) = x25519_key()?;
+                            let (k, pk) = match &hybrid_x25519 {
+                                Some(secret) if spec.reuse_x25519 => x25519_from(secret)?,
+                                _ => x25519_key()?,
+                            };
                             x25519 = Some(k);
                             shares.push((g, pk));
                         }
@@ -455,7 +491,9 @@ pub(crate) fn build(p: &HelloParams<'_>) -> io::Result<ClientHello> {
                             let dk = kem::DecapsulationKey::generate(&kem::ML_KEM_768).map_err(|_| crypto_err())?;
                             let ek = dk.encapsulation_key().map_err(|_| crypto_err())?;
                             let ek = ek.key_bytes().map_err(|_| crypto_err())?;
-                            let (xk, xp) = x25519_key()?;
+                            let secret: [u8; 32] = random_bytes()?;
+                            let (xk, xp) = x25519_from(&secret)?;
+                            hybrid_x25519 = Some(secret);
                             let mut data = Vec::with_capacity(MLKEM768_ENCAPS_LEN + 32);
                             data.extend_from_slice(ek.as_ref());
                             data.extend_from_slice(&xp);

@@ -9,7 +9,9 @@
 # or skip them with SBR_SKIP_TVOS=1. SBR_SKIP_CATALYST=1 skips Catalyst.
 #
 # Release profile: fat LTO, one codegen unit (workspace Cargo.toml); the
-# archives are then stripped of debug info and local symbols.
+# archives are then stripped of debug info. Local symbols stay: aws-lc's
+# assembly objects relocate against local labels, and stripping them breaks
+# the final link ("address not in any section").
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -61,7 +63,7 @@ slice() {
   fi
   # -S: debug info, -x: local symbols. Global symbols stay: it's a static
   # library and the app's linker still needs them.
-  xcrun strip -S -x "$OUT/$name/$lib" 2>/dev/null || strip -S -x "$OUT/$name/$lib"
+  xcrun strip -S "$OUT/$name/$lib" 2>/dev/null || strip -S "$OUT/$name/$lib"
   XCF_ARGS+=(-library "$OUT/$name/$lib" -headers "$OUT/headers")
 }
 
