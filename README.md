@@ -140,6 +140,18 @@ A UDP tunnel nested inside sbr's (OpenVPN or AWS Client VPN over UDP, at the usu
 
 The reassembly table holds at most 128 datagrams and 2 MiB, and a datagram not completed within 5 s is discarded. The timeout is checked when fragments arrive rather than by a timer, so an idle table costs no wakeups. Any overlap abandons the datagram (RFC 5722, applied to IPv4 as well); exact duplicates are ignored. TCP fragments, which the kernel does not normally produce at the TUN MTU, are reassembled, translated, and fragmented again under sbr's own IP ID, because every translated flow shares one address pair and the apps' IDs could collide in the kernel's reassembly. IPv6 Hop-by-Hop, Routing (with no segments left) and Destination Options headers are skipped to reach TCP or UDP.
 
+## TUN on Apple: failing fast and staying out of its own tunnel
+
+A Network Extension's own sockets are scoped to the physical interface and never enter its tunnel. The system stack terminates TCP in a kernel listener on the TUN address, so on Apple platforms that listener is bound to the utun with `IP_BOUND_IF`; otherwise its SYN-ACKs leave by Wi-Fi or cellular and no TCP connection through the tunnel completes, while UDP, written straight to the utun descriptor, keeps working. With `includeAllNetworks` (the app's kill switch) the system does not reliably exempt the extension's sockets, so the extension also pins sbr's outbound sockets to the current physical interface, as `auto_route` does on desktops.
+
+Clients should fall back quickly rather than wait out timeouts:
+
+- A UDP flow that is rejected by a rule or whose outbound cannot connect is answered with ICMP or ICMPv6 port unreachable from the remote address, as a router would. A QUIC client then falls back to TCP at once. sing-box's gVisor stack behaves the same way; its kernel stack does not.
+- VLESS with the Vision flow refuses UDP/443, as Xray's client does. QUIC inside Vision's TLS-over-TCP is slow and conspicuous, while the browser's TCP fallback is carried by Vision's splice.
+- A DNS `strategy` of `ipv4_only` or `ipv6_only` also removes the excluded family's `ipv4hint`/`ipv6hint` from HTTPS and SVCB answers. Safari and Network.framework connect to those hints directly, so filtering only AAAA still handed out IPv6 addresses.
+
+When the extension stops without being asked, the app shows the system's reason. Panics and fatal signals are appended to a file in the extension's container, and a heartbeat records time and memory use every 10 s; the next start reports either the breadcrumbs or the last heartbeat (a memory kill leaves no other trace) in the logs tab. The logs tab's diagnose checks run DNS, TCP, HTTP/3 and a bulk download from the app, through the tunnel like any other app's traffic.
+
 ## TLS and V2Ray transports
 
 The outbound `tls` object (`crates/sbr-engine/src/tls`): `server_name`, `disable_sni`, `insecure`, `alpn`, `min_version`/`max_version` (1.2 and 1.3 only), `certificate`/`certificate_path` (replaces the web PKI roots, like sing-box), `certificate_sha256` and `certificate_public_key_sha256` pins, client certificates, `handshake_timeout`, `fragment`/`record_fragment` (below), and `ech` with a static `config` (no DNS lookup of ECH configs, no retry with server-provided configs). `reality` goes through `sbr-reality` with its browser fingerprints.
