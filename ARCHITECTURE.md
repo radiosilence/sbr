@@ -15,7 +15,7 @@ Read this before adding a protocol, inbound or service.
   - `udp.rs`: `Engine::handle_udp(inbound, type, UdpPacket, Arc<dyn UdpWriteBack>)`, a full-cone NAT session per client source, routed on the first packet.
   - `outbound/`: one module per protocol, registered in `outbound/mod.rs::Builder::build`. Protocols reach their server through `Upstream` (system dialer with DNS, or a `detour` outbound), so detour chains work for free.
   - `inbound/`: proxy inbounds; `tun` lives in the `sbr-tun` crate plus `inbound/tun.rs`.
-- `sbr-apple`: C ABI + staticlib. `apple/`: Swift package.
+- `sbr-apple`: C ABI + staticlib; `include/sbr.h` must match the exports (`tests/c_abi.rs` enforces it). `apple/`: Swift package and sample app; see `apple/README.md` for the power and memory budget.
 
 ## Adding an outbound protocol
 
