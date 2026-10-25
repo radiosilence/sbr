@@ -15,6 +15,7 @@ Read this before adding a protocol, inbound or service.
   - `udp.rs`: `Engine::handle_udp(inbound, type, UdpPacket, Arc<dyn UdpWriteBack>)`, a full-cone NAT session per client source, routed on the first packet.
   - `outbound/`: one module per protocol, registered in `outbound/mod.rs::Builder::build`. Protocols reach their server through `Upstream` (system dialer with DNS, or a `detour` outbound), so detour chains work for free.
   - `inbound/`: proxy inbounds; `tun` lives in the `sbr-tun` crate plus `inbound/tun.rs`.
+- `sbr-reality`: standalone REALITY client, `connect(stream, &RealityConfig) -> RealityStream<S>`, generic over the transport. Carries its own minimal TLS 1.3 client because rustls cannot emit browser ClientHellos (uTLS profiles: chrome/firefox/safari/ios). Interop-tested against a sing-box binary built with `-tags with_utls` (`SBR_SING_BOX`).
 - `sbr-apple`: C ABI + staticlib. `apple/`: Swift package.
 
 ## Adding an outbound protocol
