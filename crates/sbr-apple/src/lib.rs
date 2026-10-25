@@ -383,6 +383,87 @@ pub unsafe extern "C" fn sbr_url_test(instance: *mut SbrInstance, group: *const 
     })
 }
 
+/// Default and ceiling for `sbr_connections`: each entry is a few hundred
+/// bytes of JSON, and the extension has ~50 MB in all.
+const CONNECTIONS_LIMIT: usize = 200;
+
+fn connections_json(e: &Engine, limit: usize) -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::time::UNIX_EPOCH;
+    let t = &e.tracker;
+    let all = t.connections();
+    let (up, down) = t.totals();
+    // `connections()` is in id order, so the newest are at the end.
+    let conns: Vec<serde_json::Value> = all
+        .iter()
+        .rev()
+        .take(limit)
+        .map(|c| {
+            let m = &c.meta;
+            serde_json::json!({
+                "id": c.uuid(t),
+                "network": match m.network {
+                    sbr_engine::sbr_core::Network::Tcp => "tcp",
+                    sbr_engine::sbr_core::Network::Udp => "udp",
+                    sbr_engine::sbr_core::Network::Icmp => "icmp",
+                },
+                "inbound": format!("{}/{}", m.inbound_type, m.inbound),
+                "source": m.source.to_string(),
+                "destination": m.destination.to_string(),
+                "domain": m.domain(),
+                "ip": m.destination_ips().next().map(|ip| ip.to_string()),
+                "protocol": m.protocol.map(|p| p.as_str()),
+                "chain": c.chain.iter().map(|t| &**t).collect::<Vec<_>>(),
+                "rule": e.rule_label(c.rule),
+                "upload": c.up.load(Relaxed),
+                "download": c.down.load(Relaxed),
+                "start": c.start.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "total": all.len(),
+        "upload_total": up,
+        "download_total": down,
+        "connections": conns,
+    })
+    .to_string()
+}
+
+/// # Safety
+/// `instance` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sbr_connections(instance: *mut SbrInstance, limit: u32) -> *mut c_char {
+    guard(ptr::null_mut(), || {
+        let Some(e) = engine_of(instance) else {
+            return ptr::null_mut();
+        };
+        let limit = match limit as usize {
+            0 => CONNECTIONS_LIMIT,
+            n => n.min(CONNECTIONS_LIMIT),
+        };
+        out_string(connections_json(&e, limit))
+    })
+}
+
+/// # Safety
+/// `instance` must be live; `id` NULL or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sbr_close_connection(instance: *mut SbrInstance, id: *const c_char) -> i32 {
+    guard(0, || {
+        let (Some(e), Some(id)) = (engine_of(instance), unsafe { str_arg(id) }) else {
+            return 0;
+        };
+        match e.tracker.find(id) {
+            Some(c) => {
+                c.close();
+                1
+            }
+            None => 0,
+        }
+    })
+}
+
 fn json_str(s: &str) -> String {
     let mut o = String::with_capacity(s.len() + 2);
     o.push('"');

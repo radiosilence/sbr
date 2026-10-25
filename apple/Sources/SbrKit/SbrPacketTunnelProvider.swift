@@ -11,7 +11,7 @@ import os
 /// derive `NEPacketTunnelNetworkSettings` from its `tun` inbound, apply them,
 /// find the utun fd NetworkExtension created and start sbr on it. Path
 /// changes and wake-ups reset path-bound state; app messages
-/// (`SbrRequest`) expose groups, selection, stats and reload.
+/// (`SbrRequest`) expose groups, selection, stats, connections and reload.
 open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     private static let subsystem = Bundle.main.bundleIdentifier ?? "sbr"
     public let logger = Logger(subsystem: SbrPacketTunnelProvider.subsystem, category: "tunnel")
@@ -132,6 +132,11 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             return SbrResponse(groups: core.groups())
         case .stats:
             return SbrResponse(stats: core.stats())
+        case .connections:
+            return SbrResponse(connections: core.connections())
+        case let .closeConnection(id):
+            core.closeConnection(id: id)
+            return SbrResponse(connections: core.connections())
         case .logs:
             return SbrResponse(logs: SbrRecentLogs.shared.snapshot())
         case let .reload(config):
