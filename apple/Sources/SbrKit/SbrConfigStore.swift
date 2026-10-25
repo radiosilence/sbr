@@ -8,6 +8,12 @@ public enum SbrProviderKey {
     /// App Group identifier whose container holds `config.json` (preferred:
     /// no size concerns, and rule-set files can sit next to it).
     public static let appGroup = "appGroup"
+    /// JSON-encoded `SbrRemoteProfile`: the URL `config` came from, which the
+    /// tunnel refreshes it from on its own.
+    public static let remote = "remote"
+    /// Replaces the config's `log.level` (for example "debug"), including in
+    /// profiles the tunnel downloads itself.
+    public static let logLevel = "logLevel"
 }
 
 /// The config file shared between the app and its tunnel extension through

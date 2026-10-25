@@ -8,6 +8,7 @@
 //! unwinds into Swift.
 
 mod log;
+mod profile;
 mod runtime;
 mod sys;
 mod tun_settings;
@@ -18,9 +19,11 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use sbr_engine::fetch::Url;
 use sbr_engine::sbr_config::Options;
 use sbr_engine::{Engine, Settings};
 
+use profile::Applied;
 use runtime::{Flavor, Running};
 use sbr_engine::outbound::group::real_tag;
 
@@ -99,6 +102,10 @@ pub struct SbrInstance {
 struct Inner {
     running: Option<Running>,
     launch: Launch,
+    /// The text `running` was started from.
+    config: String,
+    /// What host-originated connections are routed as.
+    inbound: (Arc<str>, &'static str),
 }
 
 impl SbrInstance {
@@ -108,6 +115,94 @@ impl SbrInstance {
 
     fn engine(&self) -> Option<Arc<Engine>> {
         self.lock().running.as_ref().map(|r| r.engine.clone())
+    }
+
+    /// Download `url` through the running engine's routing on its runtime and
+    /// hand the result to `reply`. False when nothing is running. `reply` is
+    /// dropped uncalled if the engine stops first.
+    fn fetch(&self, url: Url, reply: impl FnOnce(Result<String, String>) + Send + 'static) -> bool {
+        let (engine, handle, inbound) = {
+            let inner = self.lock();
+            let Some(r) = inner.running.as_ref() else {
+                return false;
+            };
+            (r.engine.clone(), r.handle.clone(), inner.inbound.clone())
+        };
+        handle.spawn(async move { reply(profile::fetch(&engine, inbound, &url).await) });
+        true
+    }
+}
+
+impl Inner {
+    /// Validate, then restart on `options`. A config that fails validation
+    /// leaves the old one running; listeners and the TUN can still fail at
+    /// start, and then the instance is left stopped.
+    fn swap(&mut self, text: &str, options: Options) -> Result<(), String> {
+        self.validate(&options)?;
+        let inbound = profile::host_inbound(&options);
+        self.running = None;
+        self.running = Some(self.launch.start(options)?);
+        self.config = text.to_owned();
+        self.inbound = inbound;
+        Ok(())
+    }
+
+    fn validate(&self, options: &Options) -> Result<(), String> {
+        Engine::new(options, &self.launch.settings(None))
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Run `text` unless it is what is already running.
+    fn apply_profile(&mut self, text: &str) -> Result<Applied, String> {
+        if self.running.is_some() && text == self.config {
+            return Ok(Applied::Unchanged);
+        }
+        let options = parse(Some(text))?;
+        if let Ok(old) = Options::parse(&self.config)
+            && profile::network_settings_differ(&old, &options)
+        {
+            self.validate(&options)?;
+            return Ok(Applied::NeedsNetworkSettings);
+        }
+        self.swap(text, options)?;
+        Ok(Applied::Reloaded)
+    }
+}
+
+/// `SbrFetchCallback` in sbr.h.
+pub type FetchFn = unsafe extern "C" fn(context: *mut c_void, profile: *const c_char, error: *const c_char);
+
+/// Calls the host back exactly once: with the result, or with an error if
+/// the task is dropped first (the engine stopped or reloaded).
+struct Reply {
+    callback: FetchFn,
+    context: *mut c_void,
+    sent: bool,
+}
+
+// SAFETY: the host promises `context` may be used from any thread.
+unsafe impl Send for Reply {}
+
+impl Reply {
+    fn send(&mut self, r: Result<String, String>) {
+        self.sent = true;
+        let r = r.and_then(|p| CString::new(p).map_err(|_| "profile contains a NUL byte".to_owned()));
+        let (profile, error) = match r {
+            Ok(p) => (Some(p), None),
+            Err(e) => (None, CString::new(e.replace('\0', " ")).ok()),
+        };
+        let p = |s: &Option<CString>| s.as_ref().map_or(ptr::null(), |s| s.as_ptr());
+        // SAFETY: the host passed a valid callback; the strings outlive the call.
+        unsafe { (self.callback)(self.context, p(&profile), p(&error)) };
+    }
+}
+
+impl Drop for Reply {
+    fn drop(&mut self) {
+        if !self.sent {
+            self.send(Err("cancelled: sbr stopped".to_owned()));
+        }
     }
 }
 
@@ -214,11 +309,16 @@ pub unsafe extern "C" fn sbr_start_ex(
             },
             max_connections: o.max_connections as usize,
         };
-        let running = launch.start(parse(unsafe { str_arg(config_json) })?)?;
+        let text = unsafe { str_arg(config_json) };
+        let options = parse(text)?;
+        let inbound = profile::host_inbound(&options);
+        let running = launch.start(options)?;
         Ok(Box::new(SbrInstance {
             inner: Mutex::new(Inner {
                 running: Some(running),
                 launch,
+                config: text.unwrap_or_default().to_owned(),
+                inbound,
             }),
         }))
     });
@@ -241,16 +341,77 @@ pub unsafe extern "C" fn sbr_reload(instance: *mut SbrInstance, config_json: *co
     let r = guard(Err("internal error (panic)".to_owned()), || {
         // SAFETY: NULL or live per the contract.
         let inst = unsafe { instance.as_ref() }.ok_or("instance is NULL")?;
-        let options = parse(unsafe { str_arg(config_json) })?;
-        let mut inner = inst.lock();
-        // Reject a bad config before touching the running one. Listeners and
-        // the TUN can still fail at start; then the instance is left stopped.
-        Engine::new(&options, &inner.launch.settings(None)).map_err(|e| e.to_string())?;
-        inner.running = None;
-        inner.running = Some(inner.launch.start(options)?);
-        Ok(())
+        let text = unsafe { str_arg(config_json) };
+        let options = parse(text)?;
+        inst.lock().swap(text.unwrap_or_default(), options)
     });
     r.err().map_or(ptr::null_mut(), out_string)
+}
+
+/// Start downloading the profile at `url` (https only) through the running
+/// config's route rules, with no identifying headers. Returns 1 if started:
+/// `callback` then runs exactly once, on an sbr thread. Returns 0 (and never
+/// calls back) when `url` is not https or nothing is running.
+///
+/// # Safety
+/// `instance` must be live; `url` NULL or a valid C string; `callback` and
+/// `context` usable from any thread until the call back.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sbr_fetch_profile(
+    instance: *mut SbrInstance,
+    url: *const c_char,
+    callback: Option<FetchFn>,
+    context: *mut c_void,
+) -> i32 {
+    guard(0, || {
+        // SAFETY: NULL or live per the contract.
+        let (Some(inst), Some(callback)) = (unsafe { instance.as_ref() }, callback) else {
+            return 0;
+        };
+        let Some(url) = unsafe { str_arg(url) }.and_then(Url::parse).filter(|u| u.https) else {
+            return 0;
+        };
+        let reply = Reply {
+            callback,
+            context,
+            sent: false,
+        };
+        inst.fetch(url, move |r| {
+            let mut reply = reply;
+            reply.send(r);
+        }) as i32
+    })
+}
+
+/// Run `config_json` unless it is the running config. Returns one of
+/// `SBR_PROFILE_*`, or -1 with `error_out` set; on -1 or
+/// `SBR_PROFILE_NEEDS_NETWORK_SETTINGS` the running config is untouched.
+///
+/// # Safety
+/// `instance` must be live; `config_json` NULL or a valid C string;
+/// `error_out` NULL or a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sbr_apply_profile(
+    instance: *mut SbrInstance,
+    config_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> i32 {
+    let r = guard(Err("internal error (panic)".to_owned()), || {
+        // SAFETY: NULL or live per the contract.
+        let inst = unsafe { instance.as_ref() }.ok_or("instance is NULL")?;
+        let text = unsafe { str_arg(config_json) }.ok_or("config is NULL or not UTF-8")?;
+        inst.lock().apply_profile(text)
+    });
+    match r {
+        Ok(a) => a as i32,
+        Err(e) => {
+            if !error_out.is_null() {
+                // SAFETY: checked non-null; caller owns the slot.
+                unsafe { *error_out = out_string(e) };
+            }
+            -1
+        }
+    }
 }
 
 /// # Safety

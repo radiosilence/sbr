@@ -12,6 +12,13 @@ import os
 /// find the utun fd NetworkExtension created and start sbr on it. Path
 /// changes and wake-ups reset path-bound state; app messages
 /// (`SbrRequest`) expose groups, selection, stats, connections and reload.
+///
+/// With `providerConfiguration["remote"]` set, the tunnel refreshes that
+/// profile itself on its interval: downloaded through its own outbounds
+/// (`Sbr.fetchProfile`), validated, then hot-reloaded. A profile that fails
+/// validation leaves the running config untouched. The last good download is
+/// kept in the extension's container, survives restarts, and is what
+/// `SbrRequest.profile` returns for the app to store.
 open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     private static let subsystem = Bundle.main.bundleIdentifier ?? "sbr"
     public let logger = Logger(subsystem: SbrPacketTunnelProvider.subsystem, category: "tunnel")
@@ -21,6 +28,10 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     private var pathMonitor: NWPathMonitor?
     private let pathQueue = DispatchQueue(label: "sbr.path-monitor")
     private var lastPath: String? // only touched on pathQueue
+    // Guarded by `lock`.
+    private var remote: SbrRemoteProfile?
+    private var logLevel: String?
+    private var refreshTask: Task<Void, Never>?
 
     /// The running core, if any.
     public var core: Sbr? {
@@ -80,7 +91,10 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         Sbr.forwardLogs(to: Logger(subsystem: Self.subsystem, category: "core"), publicMessages: publicLogMessages)
         logger.info("starting sbr \(Sbr.version, privacy: .public)")
         do {
-            let config = try loadConfiguration()
+            let saved = Self.savedState(providerConfiguration)
+            let (text, remote) = Self.newest(try loadConfiguration(), remote: saved.remote)
+            setState(remote: remote, logLevel: saved.logLevel)
+            let config = Self.withLogLevel(text, saved.logLevel)
             try await setTunnelNetworkSettings(try Sbr.tunnelNetworkSettings(config: config))
             // The utun exists once the settings are applied.
             guard let fd = Sbr.findTunFileDescriptor() else { throw SbrError("utun file descriptor not found") }
@@ -89,6 +103,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             if opts.baseDirectory == nil { opts.baseDirectory = appGroupDirectory ?? Self.privateDirectory }
             _ = swapCore(try Sbr(config: config, options: opts))
             startPathMonitor()
+            scheduleRefresh()
             logger.info("tunnel up on fd \(fd)")
         } catch {
             logger.error("start failed: \(error.localizedDescription, privacy: .private)")
@@ -101,6 +116,8 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         logger.info("stopping (reason \(reason.rawValue))")
         pathMonitor?.cancel()
         pathMonitor = nil
+        setState(remote: nil, logLevel: nil)
+        scheduleRefresh()
         swapCore(nil)?.stop()
     }
 
@@ -108,7 +125,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         let response: SbrResponse
         do {
             let request = try JSONDecoder().decode(SbrRequest.self, from: messageData)
-            response = try handle(request)
+            response = try await handle(request)
         } catch {
             response = SbrResponse(error: error.localizedDescription)
         }
@@ -116,8 +133,12 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Override to add requests; call super for the built-in ones.
-    open func handle(_ request: SbrRequest) throws -> SbrResponse {
+    open func handle(_ request: SbrRequest) async throws -> SbrResponse {
         if case .logs = request { return SbrResponse(logs: SbrRecentLogs.shared.snapshot()) }
+        if case .profile = request {
+            let current = state.remote
+            return SbrResponse(profile: Self.loadSnapshot().flatMap { $0.url == current?.url ? $0 : nil })
+        }
         guard let core else { throw SbrError("sbr is not running") }
         switch request {
         case .groups:
@@ -139,12 +160,136 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             return SbrResponse(connections: core.connections())
         case .logs:
             return SbrResponse(logs: SbrRecentLogs.shared.snapshot())
-        case let .reload(config):
-            // Interface settings come from the tun inbound; if those changed,
-            // the app should restart the tunnel instead.
-            try core.reload(config: try config ?? loadConfiguration())
+        case .profile:
+            return SbrResponse()
+        case let .reload(config, remote, logLevel):
+            let saved = config == nil ? Self.savedState(providerConfiguration) : (remote: remote, logLevel: logLevel)
+            // A copy the tunnel downloaded after the app's wins: the app may
+            // not have picked it up yet.
+            let (text, newest) = Self.newest(try config ?? loadConfiguration(), remote: saved.remote)
+            try await run(text, logLevel: saved.logLevel)
+            setState(remote: newest, logLevel: saved.logLevel)
+            scheduleRefresh()
             return SbrResponse(groups: core.groups())
         }
+    }
+
+    /// Run `config` on the core: validated first, a no-op when unchanged, and
+    /// new interface settings applied when its tun inbound asks for them.
+    private func run(_ config: String, logLevel: String?) async throws {
+        guard let core else { throw SbrError("sbr is not running") }
+        let config = Self.withLogLevel(config, logLevel)
+        if try core.apply(config: config) == .needsNetworkSettings {
+            try await setTunnelNetworkSettings(try Sbr.tunnelNetworkSettings(config: config))
+            try core.reload(config: config)
+        }
+    }
+
+    // MARK: Remote profile refresh
+
+    private var state: (remote: SbrRemoteProfile?, logLevel: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (remote, logLevel)
+    }
+
+    private func setState(remote: SbrRemoteProfile?, logLevel: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.remote = remote
+        self.logLevel = logLevel
+    }
+
+    /// Re-arm the refresh timer from the profile's `updated` time: one sleep,
+    /// no polling. `retryIn` overrides it after a failed attempt.
+    private func scheduleRefresh(retryIn: TimeInterval? = nil) {
+        lock.lock()
+        defer { lock.unlock() }
+        refreshTask?.cancel()
+        refreshTask = nil
+        guard let remote else { return }
+        let interval = Double(max(remote.refreshMinutes, 5)) * 60
+        let due = retryIn ?? (remote.updated ?? .distantPast).addingTimeInterval(interval).timeIntervalSinceNow
+        refreshTask = Task { [weak self] in
+            if due > 0 { try? await Task.sleep(nanoseconds: UInt64(due * 1_000_000_000)) }
+            guard !Task.isCancelled, let self else { return }
+            await self.refreshRemote()
+        }
+    }
+
+    private func refreshRemote() async {
+        guard let core, let remote = state.remote else { return }
+        let text: String
+        do {
+            text = try await core.fetchProfile(url: remote.url)
+        } catch {
+            logger.error("profile refresh failed: \(error.localizedDescription, privacy: .private)")
+            SbrRecentLogs.shared.append(.warn, "profile refresh failed: \(error.localizedDescription)")
+            scheduleRefresh(retryIn: 5 * 60)
+            return
+        }
+        do {
+            try await run(text, logLevel: state.logLevel)
+        } catch {
+            // The error can quote the profile; keep it out of the app's log view.
+            logger.error("downloaded profile rejected: \(error.localizedDescription, privacy: .private)")
+            SbrRecentLogs.shared.append(.warn, "downloaded profile is invalid; keeping the running one")
+            scheduleRefresh(retryIn: 5 * 60)
+            return
+        }
+        let now = Date()
+        Self.saveSnapshot(SbrProfileSnapshot(url: remote.url, text: text, updated: now))
+        lock.lock()
+        if self.remote?.url == remote.url { self.remote?.updated = now }
+        lock.unlock()
+        logger.info("profile refreshed")
+        SbrRecentLogs.shared.append(.info, "profile refreshed")
+        scheduleRefresh()
+    }
+
+    private static func savedState(_ pc: [String: Any]) -> (remote: SbrRemoteProfile?, logLevel: String?) {
+        let remote = (pc[SbrProviderKey.remote] as? Data).flatMap {
+            try? JSONDecoder().decode(SbrRemoteProfile.self, from: $0)
+        }
+        return (remote, pc[SbrProviderKey.logLevel] as? String)
+    }
+
+    /// `config` for `remote`, or the tunnel's own later download of it.
+    private static func newest(_ config: String, remote: SbrRemoteProfile?) -> (String, SbrRemoteProfile?) {
+        guard var remote, let snap = loadSnapshot(), snap.url == remote.url,
+              snap.updated > (remote.updated ?? .distantPast)
+        else { return (config, remote) }
+        remote.updated = snap.updated
+        return (snap.text, remote)
+    }
+
+    /// The config with its `log.level` replaced; unchanged if `level` is nil
+    /// or the config isn't plain JSON.
+    static func withLogLevel(_ config: String, _ level: String?) -> String {
+        guard let level,
+              var root = (try? JSONSerialization.jsonObject(with: Data(config.utf8))) as? [String: Any]
+        else { return config }
+        var log = root["log"] as? [String: Any] ?? [:]
+        log["level"] = level
+        root["log"] = log
+        guard let data = try? JSONSerialization.data(withJSONObject: root) else { return config }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static var snapshotURL: URL? { privateDirectory?.appendingPathComponent("remote-profile.json") }
+
+    private static func loadSnapshot() -> SbrProfileSnapshot? {
+        guard let url = snapshotURL, let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(SbrProfileSnapshot.self, from: data)
+    }
+
+    /// Holds server credentials: protected until first unlock, out of backups.
+    private static func saveSnapshot(_ snapshot: SbrProfileSnapshot) {
+        guard var url = snapshotURL, let data = try? JSONEncoder().encode(snapshot) else { return }
+        try? data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? url.setResourceValues(values)
     }
 
     /// The device is going to sleep. An idle sbr arms no timers, so there's
@@ -158,6 +303,8 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     override open func wake() {
         logger.debug("wake")
         core?.networkChanged()
+        // The refresh sleep may have been suspended along with the extension.
+        scheduleRefresh()
     }
 
     private func startPathMonitor() {

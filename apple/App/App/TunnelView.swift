@@ -58,6 +58,9 @@ struct TunnelView: View {
             .padding(.top, Theme.Space.l)
             .animation(Theme.settle, value: tunnel.status)
             if let route { routeLine(route) }
+            if !tunnel.isOn, let stop = tunnel.lastStop {
+                Text(stop).font(.sbr(.fine)).foregroundStyle(Color.sbrBad)
+            }
         }
     }
 

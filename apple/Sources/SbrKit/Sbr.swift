@@ -131,6 +131,54 @@ public final class Sbr: @unchecked Sendable {
         }
     }
 
+    public enum Applied: Int32, Sendable {
+        /// The same text is already running.
+        case unchanged = 0
+        case reloaded = 1
+        /// Valid, but its tun inbound wants different interface settings:
+        /// apply `tunnelNetworkSettings(config:)`, then `reload(config:)`.
+        case needsNetworkSettings = 2
+    }
+
+    /// Run `config` unless it is already running. Validated first: an
+    /// invalid config throws and leaves the current one running.
+    public func apply(config: String) throws -> Applied {
+        try withHandle { h in
+            var err: UnsafeMutablePointer<CChar>?
+            let r = sbr_apply_profile(h, config, &err)
+            if let message = Self.takeString(err) { throw SbrError(message) }
+            guard let applied = Applied(rawValue: r) else { throw SbrError("sbr_apply_profile failed") }
+            return applied
+        }
+    }
+
+    /// Download a remote profile (https only) through the running config's
+    /// route rules, so it leaves through the tunnel's outbounds rather than
+    /// the physical network, with no identifying headers. Not validated:
+    /// hand the text to `apply(config:)`.
+    public func fetchProfile(url: URL) async throws -> String {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
+            let box = Unmanaged.passRetained(FetchBox(cont)).toOpaque()
+            let started = (try? withHandle { h in
+                sbr_fetch_profile(h, url.absoluteString, { context, profile, error in
+                    guard let context else { return }
+                    let box = Unmanaged<FetchBox>.fromOpaque(context).takeRetainedValue()
+                    if let profile {
+                        box.cont.resume(returning: String(cString: profile))
+                    } else {
+                        box.cont.resume(throwing: SbrError(error.map { String(cString: $0) } ?? "download failed"))
+                    }
+                }, box)
+            }) ?? 0
+            if started == 0 {
+                Unmanaged<FetchBox>.fromOpaque(box).release()
+                cont.resume(throwing: SbrError(
+                    url.scheme?.lowercased() == "https" ? "sbr is not running" : "profile links must use https"
+                ))
+            }
+        }
+    }
+
     @discardableResult
     public func select(group: String, member: String) -> Bool {
         (try? withHandle { sbr_select($0, group, member) == 1 }) ?? false
@@ -179,6 +227,13 @@ public final class Sbr: @unchecked Sendable {
         defer { sbr_string_free(p) }
         return String(cString: p)
     }
+}
+
+/// The continuation handed to `sbr_fetch_profile`, which calls back exactly
+/// once; the callback takes the retain.
+private final class FetchBox {
+    let cont: CheckedContinuation<String, Error>
+    init(_ cont: CheckedContinuation<String, Error>) { self.cont = cont }
 }
 
 private func withOptionalCString<R>(_ s: String?, _ body: (UnsafePointer<CChar>?) throws -> R) rethrows -> R {

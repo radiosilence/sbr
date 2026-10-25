@@ -84,6 +84,36 @@ SbrInstance *sbr_start(const char *config_json, const char *base_dir, char **err
  * successful sbr_reload. */
 char *sbr_reload(SbrInstance *instance, const char *config_json);
 
+/* Called once per sbr_fetch_profile, from an sbr thread: `profile` is the
+ * downloaded text and `error` NULL, or `profile` NULL and `error` why. The
+ * error never names the URL or any host it led to, so it is safe to show or
+ * log. Both are only valid during the call. Do not call sbr_stop, sbr_reload or
+ * sbr_apply_profile from inside it. */
+typedef void (*SbrFetchCallback)(void *context, const char *profile, const char *error);
+
+/* Download a remote profile from `url` (https only) through the running
+ * config's route rules, as a connection arriving on its tun inbound would
+ * go, so it leaves through the tunnel's outbounds rather than around them.
+ * No User-Agent or other identifying header is sent. Returns 1 if started,
+ * and `callback` then runs exactly once (with an error if the instance stops
+ * or reloads first); 0 if `url` is not https or nothing is running, and
+ * `callback` is never called. The download is not validated: pass the text
+ * to sbr_apply_profile. */
+int32_t sbr_fetch_profile(SbrInstance *instance, const char *url, SbrFetchCallback callback, void *context);
+
+/* sbr_apply_profile results. */
+#define SBR_PROFILE_UNCHANGED 0
+#define SBR_PROFILE_RELOADED 1
+/* Valid, but its tun inbound wants different interface settings: apply
+ * sbr_tun_network_settings for it, then sbr_reload. */
+#define SBR_PROFILE_NEEDS_NETWORK_SETTINGS 2
+
+/* Run `config_json` unless it is exactly the running config: validate, then
+ * reload as sbr_reload does. Returns an SBR_PROFILE_* value, or -1 with
+ * `error_out` set. After -1 or SBR_PROFILE_NEEDS_NETWORK_SETTINGS the running
+ * config is untouched (barring a failure while starting, as for sbr_reload). */
+int32_t sbr_apply_profile(SbrInstance *instance, const char *config_json, char **error_out);
+
 /* Stop and free. In-flight connections are torn down. Blocks until done. */
 void sbr_stop(SbrInstance *instance);
 
