@@ -39,7 +39,8 @@ struct TunnelView: View {
         VStack(alignment: .leading, spacing: Theme.Space.s) {
             Text("sbr").font(.sbr(.display)).foregroundStyle(Color.sbrStrong)
                 .padding(.top, Theme.Space.xl)
-            Text(profiles.active?.name ?? "no profile").font(.sbr(.meta)).foregroundStyle(Color.sbrMuted)
+            Text("\(profiles.active?.name ?? "no profile") · build \(Self.build)")
+                .font(.sbr(.meta)).foregroundStyle(Color.sbrMuted)
             HStack(alignment: .firstTextBaseline, spacing: Theme.Space.m) {
                 Circle()
                     .fill(tunnel.isConnected ? Color.sbrAccent : Color.sbrRule)
@@ -122,6 +123,8 @@ struct TunnelView: View {
     private var groupsByTag: [String: SbrGroup] {
         Dictionary(tunnel.groups.map { ($0.tag, $0) }, uniquingKeysWith: { a, _ in a })
     }
+
+    static let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
 
     static func bytes(_ n: Double) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .binary)
