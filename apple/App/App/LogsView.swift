@@ -11,10 +11,18 @@ struct LogsView: View {
                 Text("logs").font(.sbr(.display)).foregroundStyle(Color.sbrStrong)
                     .padding(.top, Theme.Space.xl)
                     .padding(.bottom, Theme.Space.m)
-                Toggle(isOn: $tunnel.verbose) {
-                    Text("verbose").font(.sbr(.control))
+                HStack(spacing: Theme.Space.l) {
+                    Toggle(isOn: $tunnel.verbose) {
+                        Text("verbose").font(.sbr(.control))
+                    }
+                    .tint(.sbrAccent)
+                    #if !os(tvOS)
+                    ShareLink(item: tunnel.logs.joined(separator: "\n")) {
+                        Text("share").font(.sbr(.control))
+                    }
+                    .disabled(tunnel.logs.isEmpty)
+                    #endif
                 }
-                .tint(.sbrAccent)
                 .padding(.bottom, Theme.Space.m)
                 if tunnel.logs.isEmpty {
                     Text(tunnel.isConnected ? "nothing yet." : "connect to see the tunnel's logs.")

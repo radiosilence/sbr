@@ -77,6 +77,17 @@ struct CallbackLayer;
 
 impl<S: Subscriber> Layer<S> for CallbackLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        // Dependencies' chatter (rustls handshakes, h2 frames, events bridged
+        // from the `log` crate) would bury sbr's own lines at debug level.
+        let meta = event.metadata();
+        if *meta.level() > Level::WARN
+            && (meta.target() == "log"
+                || ["rustls", "h2", "quinn", "hyper"]
+                    .iter()
+                    .any(|t| meta.target().starts_with(t)))
+        {
+            return;
+        }
         let mut v = Message(String::new());
         event.record(&mut v);
         let level = match *event.metadata().level() {
