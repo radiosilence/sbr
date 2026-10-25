@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-/// Parse a Go `time.ParseDuration` string ("1h30m", "250ms", "1.5s").
+/// Parse a sing-box duration: Go `time.ParseDuration` ("1h30m", "250ms",
+/// "1.5s") plus sing-box's `d` (day) unit.
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let err = || format!("invalid duration {s:?}");
     let mut rest = s.trim();
@@ -32,6 +33,7 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
             "s" => 1.0,
             "m" => 60.0,
             "h" => 3600.0,
+            "d" => 86400.0,
             _ => return Err(err()),
         };
         total += n * scale;
@@ -100,7 +102,9 @@ mod tests {
         assert_eq!(parse_duration("1.5s").unwrap(), Duration::from_millis(1500));
         assert_eq!(parse_duration("0").unwrap(), Duration::ZERO);
         assert!(parse_duration("5").is_err());
-        assert!(parse_duration("5d").is_err());
+        assert_eq!(parse_duration("3d").unwrap(), Duration::from_secs(3 * 86400));
+        assert_eq!(parse_duration("1d12h").unwrap(), Duration::from_secs(36 * 3600));
+        assert!(parse_duration("5w").is_err());
         assert!(parse_duration("").is_err());
     }
 
