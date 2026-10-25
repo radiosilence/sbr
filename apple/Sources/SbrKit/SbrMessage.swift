@@ -17,8 +17,10 @@ public enum SbrRequest: Codable, Sendable {
     /// Run this config (a no-op when it is already running), or re-read the
     /// saved one when nil. The app also saves it into `providerConfiguration`
     /// so a restart uses it. With a config, `remote` and `logLevel` replace
-    /// the tunnel's: nil `remote` stops background refresh.
-    case reload(config: String?, remote: SbrRemoteProfile? = nil, logLevel: String? = nil)
+    /// the tunnel's: nil `remote` stops background refresh. `rules` replaces
+    /// the personal rules; connections to domains whose route changed close.
+    case reload(config: String?, remote: SbrRemoteProfile? = nil, logLevel: String? = nil,
+                rules: [SbrPersonalRule]? = nil)
     /// The remote profile the tunnel last downloaded itself, if any.
     case profile
 }

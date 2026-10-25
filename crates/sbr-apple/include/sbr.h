@@ -170,6 +170,11 @@ char *sbr_connections(SbrInstance *instance, uint32_t limit);
  * open, 0 otherwise. */
 int32_t sbr_close_connection(SbrInstance *instance, const char *id);
 
+/* Close every connection to `domain` (case-insensitive), and to its
+ * subdomains when `subdomains` is nonzero, matching the requested or sniffed
+ * domain. Returns how many were closed. */
+int32_t sbr_close_domain(SbrInstance *instance, const char *domain, int32_t subdomains);
+
 /* Bytes relayed so far (live) and currently open TCP connections. Any
  * out-pointer may be NULL. */
 void sbr_stats(SbrInstance *instance, uint64_t *up, uint64_t *down, uint64_t *active);

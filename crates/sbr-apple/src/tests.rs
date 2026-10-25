@@ -209,6 +209,9 @@ fn connections_snapshot_and_close() {
     assert_eq!(v["upload_total"], 12);
     assert_eq!(snapshot(0)["connections"].as_array().unwrap().len(), 3);
 
+    // Addressed by IP: no domain to match.
+    assert_eq!(unsafe { sbr_close_domain(i, c("127.0.0.1").as_ptr(), 1) }, 0);
+    assert_eq!(unsafe { sbr_close_domain(i, ptr::null(), 1) }, 0);
     let id = c(&id);
     assert_eq!(unsafe { sbr_close_connection(i, id.as_ptr()) }, 1);
     // The newest stream was the one closed: its client sees EOF.

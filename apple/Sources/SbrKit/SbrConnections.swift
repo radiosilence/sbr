@@ -66,4 +66,11 @@ extension Sbr {
     public func closeConnection(id: String) -> Bool {
         (try? withHandle { sbr_close_connection($0, id) == 1 }) ?? false
     }
+
+    /// Close every connection to `domain`, and its subdomains with
+    /// `subdomains`. Returns how many closed.
+    @discardableResult
+    public func closeConnections(domain: String, subdomains: Bool) -> Int {
+        Int((try? withHandle { sbr_close_domain($0, domain, subdomains ? 1 : 0) }) ?? 0)
+    }
 }

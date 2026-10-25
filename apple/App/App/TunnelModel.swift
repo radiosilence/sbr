@@ -63,9 +63,51 @@ final class TunnelModel: ObservableObject {
             Task {
                 try? await self.install()
                 if self.isConnected, let session = self.session {
-                    _ = try? await session.send(.reload(config: self.config, remote: self.remote, logLevel: self.logLevel))
+                    _ = try? await session.send(.reload(config: self.config, remote: self.remote, logLevel: self.logLevel,
+                                                         rules: self.rules))
                 }
             }
+        }
+    }
+
+    /// Personal routing rules, put into whatever profile runs.
+    @Published private(set) var rules = SbrPersonalRules.decode(UserDefaults.standard.data(forKey: "personalRules"))
+
+    /// Outbounds a personal rule can name in the active profile.
+    var routeChoices: [String] { config.map(SbrPersonalRules.choices) ?? [] }
+
+    /// Route `domain` and its subdomains through `outbound`, replacing any
+    /// rule for the same domain. Checked against the active profile first.
+    func addRule(domain: String, outbound: String) async {
+        guard let domain = SbrPersonalRule.normalize(domain) else {
+            errorMessage = "not a domain"
+            return
+        }
+        var next = rules.filter { $0.domains != [domain] }
+        next.insert(SbrPersonalRule(domains: [domain], outbound: outbound), at: 0)
+        if let config, let problem = Sbr.check(config: SbrPersonalRules.apply(next, to: config).config) {
+            errorMessage = problem
+            return
+        }
+        await setRules(next)
+    }
+
+    func removeRule(_ rule: SbrPersonalRule) async {
+        await setRules(rules.filter { $0.id != rule.id })
+    }
+
+    private func setRules(_ next: [SbrPersonalRule]) async {
+        rules = next
+        UserDefaults.standard.set(SbrPersonalRules.encode(next), forKey: "personalRules")
+        guard manager != nil, config != nil else { return }
+        do {
+            try await install()
+            if isConnected, let session {
+                groups = try await session.send(.reload(config: config, remote: remote, logLevel: logLevel, rules: next))
+                    .groups ?? groups
+            }
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -114,7 +156,8 @@ final class TunnelModel: ObservableObject {
         do {
             try await install()
             if isConnected, let session {
-                groups = try await session.send(.reload(config: config, remote: remote, logLevel: logLevel)).groups ?? groups
+                groups = try await session.send(.reload(config: config, remote: remote, logLevel: logLevel, rules: rules))
+                    .groups ?? groups
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -285,6 +328,7 @@ final class TunnelModel: ObservableObject {
         var pc: [String: Any] = [SbrProviderKey.config: config]
         if let remote { pc[SbrProviderKey.remote] = try JSONEncoder().encode(remote) }
         if let logLevel { pc[SbrProviderKey.logLevel] = logLevel }
+        pc[SbrProviderKey.personalRules] = SbrPersonalRules.encode(rules)
         pc[SbrProviderKey.tunStack] = userspaceTCP ? "gvisor" : "system"
         proto.providerConfiguration = pc
         Sbr.applyLeakProtection(to: proto, enabled: strict)

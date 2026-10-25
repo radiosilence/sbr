@@ -17,6 +17,9 @@ public enum SbrProviderKey {
     /// Replaces the config's `log.level` (for example "debug"), including in
     /// profiles the tunnel downloads itself.
     public static let logLevel = "logLevel"
+    /// JSON-encoded `[SbrPersonalRule]`, put into every config the tunnel
+    /// runs, including profiles it downloads itself.
+    public static let personalRules = "personalRules"
 }
 
 /// The config file shared between the app and its tunnel extension through

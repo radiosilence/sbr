@@ -639,6 +639,21 @@ pub unsafe extern "C" fn sbr_close_connection(instance: *mut SbrInstance, id: *c
     })
 }
 
+/// # Safety
+/// `instance` must be live; `domain` NULL or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sbr_close_domain(instance: *mut SbrInstance, domain: *const c_char, subdomains: i32) -> i32 {
+    guard(0, || {
+        let (Some(e), Some(domain)) = (engine_of(instance), unsafe { str_arg(domain) }) else {
+            return 0;
+        };
+        e.tracker
+            .close_domain(domain, subdomains != 0)
+            .try_into()
+            .unwrap_or(i32::MAX)
+    })
+}
+
 fn json_str(s: &str) -> String {
     let mut o = String::with_capacity(s.len() + 2);
     o.push('"');

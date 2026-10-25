@@ -31,6 +31,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     // Guarded by `lock`.
     private var remote: SbrRemoteProfile?
     private var logLevel: String?
+    private var rules: [SbrPersonalRule] = []
     private var refreshTask: Task<Void, Never>?
 
     /// The running core, if any.
@@ -94,8 +95,8 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         do {
             let saved = Self.savedState(providerConfiguration)
             let (text, remote) = Self.newest(try loadConfiguration(), remote: saved.remote)
-            setState(remote: remote, logLevel: saved.logLevel)
-            let config = Self.withLogLevel(text, saved.logLevel, stack: tunStack)
+            setState(remote: remote, logLevel: saved.logLevel, rules: saved.rules)
+            let config = prepared(text, logLevel: saved.logLevel, rules: saved.rules)
             try await setTunnelNetworkSettings(try Sbr.tunnelNetworkSettings(config: config))
             // The utun exists once the settings are applied.
             guard let fd = Sbr.findTunFileDescriptor() else { throw SbrError("utun file descriptor not found") }
@@ -132,7 +133,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         }
         pathMonitor?.cancel()
         pathMonitor = nil
-        setState(remote: nil, logLevel: nil)
+        setState(remote: nil, logLevel: nil, rules: [])
         scheduleRefresh()
         swapCore(nil)?.stop()
     }
@@ -178,13 +179,20 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             return SbrResponse(logs: SbrRecentLogs.shared.snapshot())
         case .profile:
             return SbrResponse()
-        case let .reload(config, remote, logLevel):
-            let saved = config == nil ? Self.savedState(providerConfiguration) : (remote: remote, logLevel: logLevel)
+        case let .reload(config, remote, logLevel, rules):
+            var saved = config == nil
+                ? Self.savedState(providerConfiguration)
+                : (remote: remote, logLevel: logLevel, rules: state.rules)
+            if let rules { saved.rules = rules }
+            let before = state.rules
             // A copy the tunnel downloaded after the app's wins: the app may
             // not have picked it up yet.
             let (text, newest) = Self.newest(try config ?? loadConfiguration(), remote: saved.remote)
-            try await run(text, logLevel: saved.logLevel)
-            setState(remote: newest, logLevel: saved.logLevel)
+            try await run(text, logLevel: saved.logLevel, rules: saved.rules)
+            setState(remote: newest, logLevel: saved.logLevel, rules: saved.rules)
+            for d in SbrPersonalRules.changedDomains(from: before, to: saved.rules) {
+                core.closeConnections(domain: d.domain, subdomains: d.subdomains)
+            }
             scheduleRefresh()
             return SbrResponse(groups: core.groups())
         }
@@ -192,9 +200,9 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Run `config` on the core: validated first, a no-op when unchanged, and
     /// new interface settings applied when its tun inbound asks for them.
-    private func run(_ config: String, logLevel: String?) async throws {
+    private func run(_ config: String, logLevel: String?, rules: [SbrPersonalRule]) async throws {
         guard let core else { throw SbrError("sbr is not running") }
-        let config = Self.withLogLevel(config, logLevel, stack: tunStack)
+        let config = prepared(config, logLevel: logLevel, rules: rules)
         if try core.apply(config: config) == .needsNetworkSettings {
             try await setTunnelNetworkSettings(try Sbr.tunnelNetworkSettings(config: config))
             try core.reload(config: config)
@@ -203,17 +211,18 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: Remote profile refresh
 
-    private var state: (remote: SbrRemoteProfile?, logLevel: String?) {
+    private var state: (remote: SbrRemoteProfile?, logLevel: String?, rules: [SbrPersonalRule]) {
         lock.lock()
         defer { lock.unlock() }
-        return (remote, logLevel)
+        return (remote, logLevel, rules)
     }
 
-    private func setState(remote: SbrRemoteProfile?, logLevel: String?) {
+    private func setState(remote: SbrRemoteProfile?, logLevel: String?, rules: [SbrPersonalRule]) {
         lock.lock()
         defer { lock.unlock() }
         self.remote = remote
         self.logLevel = logLevel
+        self.rules = rules
     }
 
     /// Re-arm the refresh timer from the profile's `updated` time: one sleep,
@@ -245,7 +254,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         do {
-            try await run(text, logLevel: state.logLevel)
+            try await run(text, logLevel: state.logLevel, rules: state.rules)
         } catch {
             // The error can quote the profile; keep it out of the app's log view.
             logger.error("downloaded profile rejected: \(error.localizedDescription, privacy: .private)")
@@ -263,11 +272,32 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         scheduleRefresh()
     }
 
-    private static func savedState(_ pc: [String: Any]) -> (remote: SbrRemoteProfile?, logLevel: String?) {
+    private static func savedState(_ pc: [String: Any])
+        -> (remote: SbrRemoteProfile?, logLevel: String?, rules: [SbrPersonalRule])
+    {
         let remote = (pc[SbrProviderKey.remote] as? Data).flatMap {
             try? JSONDecoder().decode(SbrRemoteProfile.self, from: $0)
         }
-        return (remote, pc[SbrProviderKey.logLevel] as? String)
+        return (remote, pc[SbrProviderKey.logLevel] as? String,
+                SbrPersonalRules.decode(pc[SbrProviderKey.personalRules] as? Data))
+    }
+
+    /// The config as the tunnel runs it: overrides applied, then the personal
+    /// rules. A rule naming an outbound the profile lacks is skipped; rules
+    /// that make the config invalid are dropped as a whole, with a warning.
+    private func prepared(_ config: String, logLevel: String?, rules: [SbrPersonalRule]) -> String {
+        let base = Self.withLogLevel(config, logLevel, stack: tunStack)
+        let (withRules, skipped) = SbrPersonalRules.apply(rules, to: base)
+        for r in skipped {
+            SbrRecentLogs.shared.append(.warn, "personal rule for \(r.domains.joined(separator: " ")) skipped: no outbound \(r.outbound)")
+        }
+        guard withRules != base else { return base }
+        if let problem = Sbr.check(config: withRules) {
+            logger.error("personal rules rejected: \(problem, privacy: .private)")
+            SbrRecentLogs.shared.append(.warn, "personal rules are invalid; running without them")
+            return base
+        }
+        return withRules
     }
 
     /// `config` for `remote`, or the tunnel's own later download of it.

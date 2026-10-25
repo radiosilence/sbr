@@ -144,17 +144,6 @@ pub fn dup_fd(fd: i32) -> Result<i32, String> {
     Ok(fd)
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn probes() {
-        #[cfg(target_os = "linux")]
-        assert!(super::memory_footprint() > 0);
-        // No NE here: nothing in our fd table is a utun.
-        assert_eq!(super::find_utun_fd(), None);
-    }
-}
-
 /// User plus system CPU time this process has used, in microseconds.
 pub fn cpu_time_us() -> u64 {
     // SAFETY: getrusage fills a zeroed rusage for this process.
@@ -164,4 +153,15 @@ pub fn cpu_time_us() -> u64 {
     }
     let us = |t: libc::timeval| t.tv_sec as u64 * 1_000_000 + t.tv_usec as u64;
     us(ru.ru_utime) + us(ru.ru_stime)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn probes() {
+        #[cfg(target_os = "linux")]
+        assert!(super::memory_footprint() > 0);
+        // No NE here: nothing in our fd table is a utun.
+        assert_eq!(super::find_utun_fd(), None);
+    }
 }
