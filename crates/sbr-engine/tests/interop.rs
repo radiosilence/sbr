@@ -191,6 +191,30 @@ async fn wireguard_vs_sing_box() {
     assert_eq!(probe().await.unwrap().unwrap(), rtt);
 }
 
+/// On a multi-thread runtime sends go through the egress thread; a network
+/// change swaps the socket under live flows, and the peer follows us.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wireguard_egress_thread_and_rebind_vs_sing_box() {
+    let bin = need_sing_box!();
+    let (_sb, p) = wg_server(&bin).await;
+    let sbr = start(&wg_client(p)).await;
+    let echo = echo().await;
+    let via = std::net::SocketAddr::from(([10, 66, 0, 1], echo.port()));
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        let s = socks_connect(port(&sbr, "in"), via).await;
+        set.spawn(bulk_echo(s, 4 << 20));
+    }
+    while let Some(r) = set.join_next().await {
+        r.unwrap();
+    }
+    let before = socks_connect(port(&sbr, "in"), via).await;
+    sbr.engine.network_changed();
+    bulk_echo(before, 2 << 20).await;
+    let after = socks_connect(port(&sbr, "in"), via).await;
+    bulk_echo(after, 2 << 20).await;
+}
+
 /// shadowsocks → detour shadowtls (v1/v2/v3) → sing-box shadowtls → ss.
 #[tokio::test]
 async fn shadowtls_with_shadowsocks_vs_sing_box() {
