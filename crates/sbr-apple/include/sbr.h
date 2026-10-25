@@ -85,8 +85,9 @@ SbrInstance *sbr_start(const char *config_json, const char *base_dir, char **err
 char *sbr_reload(SbrInstance *instance, const char *config_json);
 
 /* Called once per sbr_fetch_profile, from an sbr thread: `profile` is the
- * downloaded text and `error` NULL, or `profile` NULL and `error` why. Both
- * are only valid during the call. Do not call sbr_stop, sbr_reload or
+ * downloaded text and `error` NULL, or `profile` NULL and `error` why. The
+ * error never names the URL or any host it led to, so it is safe to show or
+ * log. Both are only valid during the call. Do not call sbr_stop, sbr_reload or
  * sbr_apply_profile from inside it. */
 typedef void (*SbrFetchCallback)(void *context, const char *profile, const char *error);
 

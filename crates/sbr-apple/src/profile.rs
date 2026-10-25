@@ -38,8 +38,30 @@ pub async fn fetch(engine: &Engine, inbound: (Arc<str>, &'static str), url: &Url
         .anonymous()
         .get(&via, url, &[], MAX_SIZE)
         .await
-        .map_err(|e| format!("profile download failed: {e}"))?;
+        .map_err(|e| format!("profile download failed: {}", redact(&e)))?;
     String::from_utf8(r.body.to_vec()).map_err(|_| "profile is not UTF-8".to_owned())
+}
+
+/// The URL is a credential, and errors from the dial, DNS and TLS layers can
+/// name the host (or a redirect target's). Only the HTTP client's own fixed
+/// messages pass through; everything else is reduced to its kind.
+fn redact(e: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    let msg = e.to_string();
+    let fixed = msg.starts_with("unexpected status: ")
+        || msg.starts_with("bad redirect from ")
+        || [
+            "too many redirects",
+            "refusing a redirect from https to http",
+            "HTTP request timed out",
+        ]
+        .contains(&msg.as_str());
+    match e.kind() {
+        _ if fixed => msg,
+        ErrorKind::PermissionDenied => "rejected by route rules".to_owned(),
+        ErrorKind::InvalidData => "TLS or HTTP protocol error".to_owned(),
+        kind => kind.to_string(),
+    }
 }
 
 /// What applying a profile did. Values match `SBR_PROFILE_*` in sbr.h.

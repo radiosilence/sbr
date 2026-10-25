@@ -467,3 +467,73 @@ fn host_traffic_is_routed_as_the_tun_inbound() {
     let o = Options::parse(CFG).unwrap();
     assert_eq!(profile::host_inbound(&o), ("in".into(), "mixed"));
 }
+
+/// Answers every connection with `response` once its request head is in.
+fn raw_server(response: String) -> SocketAddr {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let a = l.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for mut s in l.incoming().flatten() {
+            let mut head = Vec::new();
+            let mut b = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && s.read(&mut b).unwrap_or(0) == 1 {
+                head.push(b[0]);
+            }
+            let _ = s.write_all(response.as_bytes());
+        }
+    });
+    a
+}
+
+#[test]
+fn profile_fetch_errors_never_reveal_the_url() {
+    let i = start(CFG, sbr_start_options_default());
+    let not_found = raw_server("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into());
+    let redirect = raw_server(
+        "HTTP/1.1 302 Found\r\nLocation: http://hop-secret.invalid/next?key=s3cret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .into(),
+    );
+    let closing = TcpListener::bind("127.0.0.1:0").unwrap();
+    let closing_port = closing.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for s in closing.incoming() {
+            drop(s);
+        }
+    });
+    let cases = [
+        (
+            format!("http://{not_found}/tok-path?key=s3cret"),
+            "unexpected status: 404",
+        ),
+        (
+            "http://host-secret.invalid/tok-path?key=s3cret".to_owned(),
+            "profile download failed",
+        ),
+        (
+            format!("http://{redirect}/tok-path?key=s3cret"),
+            "profile download failed",
+        ),
+        (
+            format!("https://localhost:{closing_port}/tok-path?key=s3cret"),
+            "profile download failed",
+        ),
+    ];
+    for (url, expect) in cases {
+        let e = fetch_blocking(i, &url).unwrap_err();
+        assert!(e.contains(expect), "{url}: {e}");
+        let port = Url::parse(&url).unwrap().port.to_string();
+        for secret in [
+            "secret",
+            "s3cret",
+            "tok-path",
+            ".invalid",
+            "localhost",
+            "127.0.0.1",
+            "next",
+            port.as_str(),
+        ] {
+            assert!(!e.contains(secret), "{url}: {e:?} reveals {secret:?}");
+        }
+    }
+    unsafe { sbr_stop(i) };
+}
