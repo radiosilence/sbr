@@ -559,7 +559,7 @@ async fn group_delay(State(api): State<Api>, Path(name): Path<String>, Query(q):
             Some(u) => u.url_test(true).await,
             None => {
                 let members = o.as_group().map(|g| g.members()).unwrap_or_default();
-                let r = test_outbounds(&env, &members, url.as_ref(), Duration::ZERO, true).await;
+                let r = test_outbounds(&env, &members, url.as_ref(), Duration::ZERO, true, &|| {}).await;
                 for m in &members {
                     env.recheck_containing(&real_tag(m.as_ref()));
                 }
