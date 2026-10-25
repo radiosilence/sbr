@@ -146,7 +146,7 @@ pub(crate) fn parse_tls(parent: &mut Obj, key: &str, diag: &mut Diag) -> Result<
         ];
         if let Some((k, _)) = on.iter().find(|(_, on)| *on) {
             return Err(Error::at(
-                &o.sub("enabled"),
+                &o.sub(k),
                 format!("{k} is enabled but tls is not; set \"enabled\": true"),
             ));
         }
