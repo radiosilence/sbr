@@ -42,7 +42,7 @@ That is the whole extension. The base class:
    `UTUN_OPT_IFNAME` name against "utun", like WireGuard-apple and sing-box) and
    starts sbr with that fd.
 4. Forwards sbr's logs to `Logger` (`Sbr.forwardLogs`). Messages are private by default.
-5. Watches `NWPathMonitor` and calls `sbr_network_changed` when the set of physical
+5. Watches `NWPathMonitor` and calls `sbr_network_migrate` when the set of physical
    interfaces changes. `wake()` calls it too, because UDP NAT mappings are likely gone
    after sleep. `sleep()` returns immediately: an idle sbr arms no timers, so there is
    nothing to pause.

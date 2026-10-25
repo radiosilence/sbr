@@ -229,6 +229,12 @@ public final class Sbr: @unchecked Sendable {
         try? withHandle { sbr_network_changed($0) }
     }
 
+    /// The default path moved to another network: hysteria2 connections
+    /// migrate to it, other path-bound state is dropped.
+    public func networkMigrate() {
+        try? withHandle { sbr_network_migrate($0) }
+    }
+
     func withHandle<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
         lock.lock()
         defer { lock.unlock() }

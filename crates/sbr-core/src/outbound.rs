@@ -44,6 +44,12 @@ pub trait Outbound: Send + Sync {
     }
     /// The host's network path changed: drop sockets bound to the old one.
     fn network_changed(&self) {}
+    /// The host moved to a new network path and this outbound can carry its
+    /// live connections across (QUIC). Resolves to true when they moved, or
+    /// there were none. `None`: not supported; `network_changed` applies.
+    fn migrate(&self) -> Option<BoxFuture<'_, bool>> {
+        None
+    }
 }
 
 /// `selector` / `urltest`.

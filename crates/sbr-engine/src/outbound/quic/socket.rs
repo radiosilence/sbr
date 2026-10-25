@@ -15,7 +15,7 @@ use std::future::Future;
 use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -26,7 +26,7 @@ use quinn::udp::{RecvMeta, Transmit};
 use quinn::{AsyncUdpSocket, Runtime, TokioRuntime, UdpPoller};
 use sbr_core::dial::{self, DialOptions};
 use sbr_core::{BoxPacketConn, Destination};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
 /// quic-go's desired socket buffer size, also what sing-box asks for.
@@ -365,9 +365,10 @@ impl HopSocket {
         ranges: Vec<(u16, u16)>,
         interval: (Duration, Duration),
         detour: bool,
+        keep_peer: Option<SocketAddr>,
     ) -> io::Result<Arc<Self>> {
         let (sock, target) = dial(random_port(&ranges)).await?;
-        let peer = if detour { PLACEHOLDER_PEER } else { target };
+        let peer = keep_peer.unwrap_or(if detour { PLACEHOLDER_PEER } else { target });
         let this = Arc::new(Self {
             legs: Mutex::new((Arc::new(Leg { sock, target }), None)),
             generation: AtomicU64::new(0),
@@ -507,6 +508,81 @@ impl AsyncUdpSocket for HopSocket {
 
     fn max_receive_segments(&self) -> usize {
         self.current().sock.max_receive_segments()
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+/// Notes the first datagram received, so a migration knows the server
+/// reached the new socket.
+pub(crate) struct Witness {
+    inner: Socket,
+    heard: AtomicBool,
+    notify: Notify,
+}
+
+impl Witness {
+    pub(crate) fn new(inner: Socket) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            heard: AtomicBool::new(false),
+            notify: Notify::new(),
+        })
+    }
+
+    pub(crate) async fn heard(&self) {
+        if !self.heard.load(Ordering::Acquire) {
+            self.notify.notified().await;
+        }
+    }
+}
+
+impl fmt::Debug for Witness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Witness")
+    }
+}
+
+impl AsyncUdpSocket for Witness {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+        self.inner.clone().create_io_poller()
+    }
+
+    fn try_send(&self, t: &Transmit) -> io::Result<()> {
+        self.inner.try_send(t)
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut Context,
+        bufs: &mut [IoSliceMut<'_>],
+        meta: &mut [RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        let r = self.inner.poll_recv(cx, bufs, meta);
+        if matches!(r, Poll::Ready(Ok(n)) if n > 0)
+            && !self.heard.load(Ordering::Relaxed)
+            && !self.heard.swap(true, Ordering::AcqRel)
+        {
+            // A stored permit: `heard` may start waiting after this.
+            self.notify.notify_one();
+        }
+        r
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    fn max_transmit_segments(&self) -> usize {
+        self.inner.max_transmit_segments()
+    }
+
+    fn max_receive_segments(&self) -> usize {
+        self.inner.max_receive_segments()
+    }
+
+    fn may_fragment(&self) -> bool {
+        self.inner.may_fragment()
     }
 }
 

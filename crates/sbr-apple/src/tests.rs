@@ -90,6 +90,7 @@ fn lifecycle_over_the_c_abi() {
         sbr_stats(i, ptr::null_mut(), ptr::null_mut(), &mut active);
         assert_eq!(active, 0);
         sbr_network_changed(i);
+        sbr_network_migrate(i);
         sbr_stop(i);
 
         // NULL instances are no-ops, not crashes.

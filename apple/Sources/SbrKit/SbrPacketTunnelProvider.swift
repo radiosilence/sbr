@@ -493,7 +493,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             }
             guard let last = self.lastPath, last != signature else { return } // first report, or no change
             self.logger.info("network changed: \(last, privacy: .public) -> \(signature, privacy: .public)")
-            if path.status == .satisfied { self.core?.networkChanged() }
+            if path.status == .satisfied { self.core?.networkMigrate() }
         }
         monitor.start(queue: pathQueue)
         pathMonitor = monitor

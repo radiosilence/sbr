@@ -65,7 +65,7 @@ pub struct Hysteria2 {
 
 struct Session {
     conn: Connection,
-    _endpoint: Endpoint,
+    endpoint: Endpoint,
     usage: Arc<Usage>,
     udp_enabled: bool,
     udp: Arc<Sessions<u32>>,
@@ -197,7 +197,7 @@ impl Hysteria2 {
         }
         let session = Arc::new(Session {
             conn: conn.clone(),
-            _endpoint: endpoint,
+            endpoint,
             usage: Arc::default(),
             udp_enabled,
             udp: Arc::new(Sessions::new()),
@@ -255,6 +255,24 @@ impl Outbound for Hysteria2 {
     /// the server that costs no extra traffic once the session exists.
     fn probe_rtt(&self) -> Option<BoxFuture<'_, io::Result<std::time::Duration>>> {
         Some(Box::pin(async move { Ok(self.dial().await?.conn.rtt()) }))
+    }
+
+    fn migrate(&self) -> Option<BoxFuture<'_, bool>> {
+        if !self.dialer.migratable() {
+            return None;
+        }
+        Some(Box::pin(async move {
+            match self.pool.live() {
+                Some(s) => self.dialer.migrate(&s.endpoint, &s.conn).await,
+                None => true,
+            }
+        }))
+    }
+
+    fn network_changed(&self) {
+        if let Some(s) = self.pool.live() {
+            s.conn.close(0u32.into(), b"");
+        }
     }
 
     fn connect<'a>(&'a self, dest: &'a Destination) -> BoxFuture<'a, io::Result<Stream>> {

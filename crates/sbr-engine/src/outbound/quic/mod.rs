@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,7 +29,7 @@ use sbr_config::{QuicOptions, TlsOutbound};
 use sbr_core::{Destination, Host};
 use tokio::sync::Notify;
 
-use self::socket::{HopDial, HopSocket, PLACEHOLDER_PEER, PacketConnSocket, Salamander, Socket};
+use self::socket::{HopDial, HopSocket, PLACEHOLDER_PEER, PacketConnSocket, Salamander, Socket, Witness};
 use super::Upstream;
 
 pub(crate) use tls::client_config;
@@ -114,7 +114,12 @@ pub(crate) struct Dialer {
     pub tls: Arc<rustls::ClientConfig>,
     pub server_name: String,
     pub handshake_timeout: Duration,
+    migrations: AtomicU64,
 }
+
+/// How long a migrated connection may go without hearing from the server on
+/// its new path before it is given up.
+const MIGRATE_TIMEOUT: Duration = Duration::from_secs(4);
 
 impl Dialer {
     pub(crate) fn new(
@@ -138,13 +143,64 @@ impl Dialer {
             tls: t.config,
             server_name: t.server_name,
             handshake_timeout: tls.handshake_timeout.unwrap_or(DEFAULT_HANDSHAKE),
+            migrations: AtomicU64::new(0),
         })
     }
 
     /// A fresh endpoint on a fresh socket, and the handshake in progress.
     pub(crate) async fn start(&self, transport: TransportConfig) -> io::Result<(Endpoint, Connecting)> {
+        let (socket, peer) = self.socket(None).await?;
+        let endpoint =
+            Endpoint::new_with_abstract_socket(EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?;
+        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(self.tls.clone()).map_err(io_err)?;
+        let mut config = ClientConfig::new(Arc::new(crypto));
+        config.transport_config(Arc::new(transport));
+        let connecting = endpoint.connect_with(config, peer, &self.server_name).map_err(io_err)?;
+        Ok((endpoint, connecting))
+    }
+
+    /// Only a socket sbr owns can be moved; a detour's path is its own.
+    pub(crate) fn migratable(&self) -> bool {
+        matches!(self.upstream, Upstream::System(..))
+    }
+
+    /// Move a live connection to a fresh socket stack (same obfuscation and
+    /// hopping) on the current default path, keeping its streams. True once
+    /// the server answers on the new socket; otherwise the connection is
+    /// closed so the next use redials over the new path. A newer migration
+    /// supersedes this one and decides instead.
+    pub(crate) async fn migrate(&self, endpoint: &Endpoint, conn: &quinn::Connection) -> bool {
+        let generation = self.migrations.fetch_add(1, Ordering::AcqRel) + 1;
+        let r = async {
+            let (socket, _) = self.socket(Some(conn.remote_address())).await?;
+            let witness = Witness::new(socket);
+            endpoint.rebind_abstract(witness.clone())?;
+            tokio::select! {
+                _ = witness.heard() => Ok(()),
+                e = conn.closed() => Err(io_err(e)),
+                _ = tokio::time::sleep(MIGRATE_TIMEOUT) => Err(io_err("no reply on the new path")),
+            }
+        }
+        .await;
+        match r {
+            Ok(()) => true,
+            Err(_) if self.migrations.load(Ordering::Acquire) != generation => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "QUIC migration failed, closing the connection");
+                conn.close(VarInt::from_u32(0), b"");
+                false
+            }
+        }
+    }
+
+    /// The socket stack quinn talks through. `keep`: keep presenting this
+    /// server address (a migration) instead of resolving the server again.
+    async fn socket(&self, keep: Option<SocketAddr>) -> io::Result<(Socket, SocketAddr)> {
         let (socket, peer): (Socket, SocketAddr) = match &self.hop {
-            None => base_socket(&self.upstream, &self.server, self.server.port).await?,
+            None => match (keep, &self.upstream) {
+                (Some(peer), Upstream::System(opts, _)) => (socket::system(peer.ip(), opts)?, peer),
+                _ => base_socket(&self.upstream, &self.server, self.server.port).await?,
+            },
             Some(hop) => {
                 let upstream = self.upstream.clone();
                 let server = self.server.clone();
@@ -154,7 +210,7 @@ impl Dialer {
                     Box::pin(async move { base_socket(&upstream, &server, port).await })
                 });
                 let detour = matches!(self.upstream, Upstream::Detour(_));
-                let hop = HopSocket::new(dial, hop.ranges.clone(), hop.interval, detour).await?;
+                let hop = HopSocket::new(dial, hop.ranges.clone(), hop.interval, detour, keep).await?;
                 let peer = hop.peer();
                 (hop as Socket, peer)
             }
@@ -164,13 +220,7 @@ impl Dialer {
             None if self.scramble => initial::Scramble::new(socket),
             None => socket,
         };
-        let endpoint =
-            Endpoint::new_with_abstract_socket(EndpointConfig::default(), None, socket, Arc::new(quinn::TokioRuntime))?;
-        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(self.tls.clone()).map_err(io_err)?;
-        let mut config = ClientConfig::new(Arc::new(crypto));
-        config.transport_config(Arc::new(transport));
-        let connecting = endpoint.connect_with(config, peer, &self.server_name).map_err(io_err)?;
-        Ok((endpoint, connecting))
+        Ok((socket, peer))
     }
 }
 
@@ -299,6 +349,15 @@ impl<S: Pooled> Pool<S> {
         }
         let g = s.usage().acquire()?;
         Some((s, g))
+    }
+
+    /// The live connection, if any.
+    pub(crate) fn live(&self) -> Option<Arc<S>> {
+        self.current
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|s| s.conn().close_reason().is_none())
     }
 
     pub(crate) async fn get<F, Fut>(&self, dial: F) -> io::Result<(Arc<S>, UseGuard)>

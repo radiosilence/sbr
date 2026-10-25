@@ -709,6 +709,26 @@ pub unsafe extern "C" fn sbr_network_changed(instance: *mut SbrInstance) {
     })
 }
 
+/// The default path moved to another network: like `sbr_network_changed`,
+/// but hysteria2 connections migrate to the new path instead of dropping.
+/// Returns at once; the migration runs on the engine's runtime.
+///
+/// # Safety
+/// `instance` must be NULL or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sbr_network_migrate(instance: *mut SbrInstance) {
+    guard((), || {
+        // SAFETY: NULL or live per the contract.
+        let Some(i) = (unsafe { instance.as_ref() }) else {
+            return;
+        };
+        let running = i.lock().running.as_ref().map(|r| (r.engine.clone(), r.handle.clone()));
+        if let Some((engine, handle)) = running {
+            handle.spawn(async move { engine.network_migrate().await });
+        }
+    })
+}
+
 /// Record panics and fatal signals to the file at `path` (appended), so the
 /// host can report why the previous process died. Returns 0 on success.
 ///

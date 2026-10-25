@@ -1017,6 +1017,110 @@ async fn hysteria2_apernet_sni_censor() {
     assert!(shut.blocked.load(std::sync::atomic::Ordering::Relaxed));
 }
 
+/// A NAT between client and server: each client address gets its own
+/// upstream socket, so the server sees a new address when the client moves.
+/// `cut` blackholes every client address seen so far, as losing Wi-Fi does.
+struct Nat {
+    addr: SocketAddr,
+    clients: Arc<Mutex<Vec<(SocketAddr, bool)>>>,
+}
+
+impl Nat {
+    async fn start(server: SocketAddr) -> Self {
+        let front = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let addr = front.local_addr().unwrap();
+        let clients: Arc<Mutex<Vec<(SocketAddr, bool)>>> = Arc::default();
+        let (f, c) = (front.clone(), clients.clone());
+        tokio::spawn(async move {
+            let mut ups: std::collections::HashMap<SocketAddr, Arc<tokio::net::UdpSocket>> = Default::default();
+            let mut buf = vec![0u8; 65536];
+            while let Ok((n, from)) = f.recv_from(&mut buf).await {
+                let alive = {
+                    let mut c = c.lock().unwrap();
+                    match c.iter().find(|e| e.0 == from) {
+                        Some(e) => e.1,
+                        None => {
+                            c.push((from, true));
+                            true
+                        }
+                    }
+                };
+                if !alive {
+                    continue;
+                }
+                let up = match ups.get(&from) {
+                    Some(u) => u.clone(),
+                    None => {
+                        let u = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+                        u.connect(server).await.unwrap();
+                        let (u2, f2, c2) = (u.clone(), f.clone(), c.clone());
+                        tokio::spawn(async move {
+                            let mut b = vec![0u8; 65536];
+                            while let Ok(n) = u2.recv(&mut b).await {
+                                if c2.lock().unwrap().iter().any(|e| e.0 == from && e.1) {
+                                    let _ = f2.send_to(&b[..n], from).await;
+                                }
+                            }
+                        });
+                        ups.insert(from, u.clone());
+                        u
+                    }
+                };
+                let _ = up.send(&buf[..n]).await;
+            }
+        });
+        Self { addr, clients }
+    }
+
+    fn cut(&self) {
+        for e in self.clients.lock().unwrap().iter_mut() {
+            e.1 = false;
+        }
+    }
+
+    fn seen(&self) -> usize {
+        self.clients.lock().unwrap().len()
+    }
+}
+
+/// Roaming: a stream opened before the client's path dies keeps flowing
+/// after `network_migrate` moves the QUIC connection to a new socket, with
+/// the old path blackholed, salamander on and no new handshake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hysteria2_apernet_migration() {
+    let Some(bin) = find_bin("SBR_HYSTERIA", "hysteria") else {
+        return;
+    };
+    let hy = start_hysteria(&bin, 1, true).await;
+    let nat = Nat::start(SocketAddr::from(([127, 0, 0, 1], hy.ports[0]))).await;
+    let engine = engine(vec![hy.outbound("hy2", nat.addr.port(), &hy2_password())]);
+    let out = engine.outbound("hy2").unwrap().clone();
+    let s = out.connect(&Destination::from(common::echo().await)).await.unwrap();
+    let (mut r, mut w) = tokio::io::split(s);
+    let data = pattern(MIB, 3);
+    let mut got = vec![0u8; MIB];
+    w.write_all(&data[..64 * 1024]).await.unwrap();
+    r.read_exact(&mut got[..64 * 1024]).await.unwrap();
+    assert_eq!(nat.seen(), 1);
+
+    nat.cut();
+    engine.network_migrate().await;
+    assert_eq!(nat.seen(), 2, "the client should have moved to a new socket");
+    let writer = tokio::spawn(async move {
+        w.write_all(&data).await.unwrap();
+        (w, data)
+    });
+    tokio::time::timeout(Duration::from_secs(15), r.read_exact(&mut got))
+        .await
+        .expect("stream stalled after migration")
+        .unwrap();
+    let (_w, data) = writer.await.unwrap();
+    assert!(got == data, "data mismatch after migration");
+    // The same QUIC connection carries new streams too.
+    tcp_roundtrip(&out, common::echo().await, 64 * 1024).await.unwrap();
+    assert_eq!(nat.seen(), 2, "no reconnect");
+}
+
 // ---------------------------------------------------------------------------
 // The whole profile
 

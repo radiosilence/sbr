@@ -182,6 +182,13 @@ void sbr_runtime_stats(SbrInstance *instance, SbrRuntimeStats *out);
  * cache). Open TCP connections are left to survive or fail on their own. */
 void sbr_network_changed(SbrInstance *instance);
 
+/* The default path moved to another network (Wi-Fi <-> cellular). Like
+ * sbr_network_changed, except live hysteria2 connections move to a fresh
+ * socket on the new path, so the TCP and UDP flows they carry survive; one
+ * whose server does not answer there within 4 s is closed instead. Call
+ * sbr_set_default_interface first. Returns at once. */
+void sbr_network_migrate(SbrInstance *instance);
+
 /* Pin sbr's own sockets to a physical interface such as "en0" or "pdp_ip0",
  * or unpin with NULL. Process-wide. Call it when the default path changes. */
 void sbr_set_default_interface(const char *name);

@@ -296,6 +296,39 @@ impl Engine {
         info!(udp_sessions = udp, "network changed: reset path-bound state");
     }
 
+    /// The host moved to a new network path (Wi-Fi ↔ cellular). Like
+    /// `network_changed`, except outbounds that can migrate (hysteria2 over
+    /// sbr's own socket) move their live QUIC connection to a fresh socket on
+    /// the new path, so the TCP streams and UDP sessions they carry continue.
+    /// Where the server does not answer on the new path within a few seconds,
+    /// that connection is closed and its UDP sessions dropped, as a reset would.
+    pub async fn network_migrate(&self) {
+        let (mut moving, mut migrating) = (Vec::new(), Vec::new());
+        for o in &self.outbounds {
+            match o.migrate() {
+                Some(f) => {
+                    migrating.push(o.tag());
+                    moving.push(async move { (o.tag(), f.await) });
+                }
+                None => o.network_changed(),
+            }
+        }
+        let mut dropped = self.nat.retain(|c| migrating.contains(&c));
+        self.groups.network_changed();
+        crate::tls::network_changed();
+        let results = futures_util::future::join_all(moving).await;
+        let failed: Vec<&str> = results.iter().filter(|r| !r.1).map(|r| r.0).collect();
+        if !failed.is_empty() {
+            dropped += self.nat.retain(|c| !failed.contains(&c));
+        }
+        info!(
+            migrated = results.len() - failed.len(),
+            failed = ?failed,
+            udp_sessions_dropped = dropped,
+            "network changed: migrated QUIC connections"
+        );
+    }
+
     pub(crate) async fn relay<A, B>(&self, meta: &Metadata, mut client: A, mut remote: B) -> io::Result<()>
     where
         A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,

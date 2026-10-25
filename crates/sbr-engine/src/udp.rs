@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -58,6 +58,8 @@ type Key = (Arc<str>, SocketAddr);
 
 struct Session {
     tx: mpsc::Sender<(Destination, Bytes)>,
+    /// The leaf outbound carrying the session, once connected.
+    carrier: Arc<OnceLock<Arc<str>>>,
 }
 
 pub(crate) struct Nat {
@@ -117,6 +119,14 @@ impl Nat {
         s.clear();
         n
     }
+
+    /// Keep only sessions whose carrier passes `keep`; returns how many went.
+    pub(crate) fn retain(&self, keep: impl Fn(&str) -> bool) -> usize {
+        let mut s = self.sessions.lock().unwrap();
+        let n = s.len();
+        s.retain(|_, v| v.carrier.get().is_some_and(|c| keep(c)));
+        n - s.len()
+    }
 }
 
 impl Engine {
@@ -171,11 +181,18 @@ impl Engine {
             rx,
             queued: self.nat.queued.clone(),
         };
-        sessions.insert(key.clone(), Session { tx });
+        let carrier = Arc::new(OnceLock::new());
+        sessions.insert(
+            key.clone(),
+            Session {
+                tx,
+                carrier: carrier.clone(),
+            },
+        );
         let engine = self.clone();
         tokio::spawn(async move {
             let meta = Metadata::new(key.0.clone(), inbound_type, Network::Udp, key.1, dest);
-            if let Err(e) = engine.run_session(meta, first, rx, back).await {
+            if let Err(e) = engine.run_session(meta, first, rx, back, carrier).await {
                 debug!(source = %key.1, error = %e, "udp session ended");
             }
             let mut s = engine.nat.sessions.lock().unwrap();
@@ -191,6 +208,7 @@ impl Engine {
         first: Bytes,
         mut rx: Rx,
         back: Arc<dyn UdpWriteBack>,
+        carrier: Arc<OnceLock<Arc<str>>>,
     ) -> io::Result<()> {
         let source = meta.source;
         // DNS: FakeIP destination → domain before routing; replies must
@@ -301,7 +319,9 @@ impl Engine {
                 });
                 let epoch = Instant::now();
                 let last = Arc::new(AtomicU64::new(0));
-                let (reg, cancelled) = self.tracker.register(meta.clone(), self.chain(outbound), matched);
+                let chain = self.chain(outbound);
+                let _ = carrier.set(chain[0].clone());
+                let (reg, cancelled) = self.tracker.register(meta.clone(), chain, matched);
 
                 // Remote → client. Replies are reported from the address the
                 // client sent to: the FakeIP it used, the address before
