@@ -185,6 +185,11 @@ async fn main() {
     measure("sbr", client_port, n, secs, sink, source).await;
     i.shutdown();
     tokio::time::sleep(Duration::from_millis(300)).await;
+    if std::env::var_os("SBR_BENCH_ONLY").is_some() {
+        server.kill().unwrap();
+        server.wait().unwrap();
+        return;
+    }
 
     let mut sb = spawn_sing_box(&bin, "client", &client);
     wait_tcp(client_port).await;

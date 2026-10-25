@@ -121,7 +121,7 @@ impl WireGuard {
                     }
                 }
                 let v6 = peers.iter().any(|p| p.endpoint.is_some_and(|e| e.is_ipv6()));
-                Transport::Socket(bind(v6, cfg.listen_port, opts)?)
+                Transport::Socket(device::UdpIo::new(bind(v6, cfg.listen_port, opts)?, v6)?)
             }
             Upstream::Detour(out) => {
                 let (tx, rx) = mpsc::channel(1024);

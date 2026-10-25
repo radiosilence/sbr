@@ -35,7 +35,8 @@ Lookups are built for large rule-sets: hash sets per label for domains, Aho-Cora
 | | supported | not yet (rejected with a path) |
 |---|---|---|
 | inbounds | `mixed`, `socks` (5), `http`, users/auth | **`tun`**, socks4, UDP associate, TLS on http, everything else |
-| outbounds | `direct`, `block`, `socks` (5), `http` (CONNECT), `shadowsocks` (AEAD + 2022), `selector`, `urltest`\*, `detour` chains | vmess, vless (+reality), trojan, hysteria2, tuic, wireguard, anytls, shadowtls, naive, ssh, tor, … |
+| outbounds | `direct`, `block`, `socks` (4/4a/5, UDP associate, UoT), `http` (CONNECT), `shadowsocks` (AEAD + 2022, TCP + UDP, UoT v1/v2), `shadowtls` (v1/v2/v3), `anytls`, `selector`, `urltest`\*, `detour` chains | vmess, vless (+reality), trojan, hysteria2, tuic, naive, ssh, tor, SIP003 plugins, … |
+| endpoints | `wireguard` (userspace: boringtun + smoltcp, as an outbound) | `system: true`, flows opened by the peer, tailscale |
 | route | all default-rule fields above, logical and/or, invert, actions `route` / `reject` (default, drop) / `sniff`\*\*, inline + local *source* rule-sets | binary `.srs`, remote rule-sets, `protocol`/sniffing, `process_*`, `wifi_*`, `hijack-dns`, `resolve`, `route-options` |
 | dns | system resolver (warns) | the whole `dns` section |
 | experimental | ignored with warning | clash API, cache file |
@@ -53,6 +54,13 @@ This feeds **the same config file** to both cores. Setup: 4 streams of loopback 
 |---|---|---|
 | socks → direct | 30–33 Gbit/s | 34–37 Gbit/s |
 | socks → shadowsocks-2022 → server | 16.7–17.4 Gbit/s | 15.7–16.2 Gbit/s |
+
+WireGuard (`cargo run --release -p sbr-engine --example wg_throughput -- /path/to/sing-box-with_wireguard [streams] [seconds]`): sbr and sing-box as clients of the same sing-box peer, same 4-vCPU box, loopback:
+
+| streams | sbr up / down | sing-box up / down |
+|---|---|---|
+| 1 | 1.9 / 1.8–2.0 Gbit/s | 2.0–2.1 / 2.3 Gbit/s |
+| 4 | 2.7 / 4.1 Gbit/s | 2.3 / 1.7 Gbit/s |
 
 sing-box wins plain TCP relay **on Linux** because its `bufio` uses `splice(2)` zero-copy. Darwin has no splice, so on Apple targets that path is copy-vs-copy. sbr wins on encrypted relay. This is a single synthetic loopback test, so treat it as a smoke signal, not a verdict.
 

@@ -21,12 +21,18 @@ use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address};
 use tokio::sync::Notify;
 
-/// TCP socket buffers. Allocated zeroed, so the OS commits pages only as the
-/// ring is actually used; idle or small flows stay cheap even on iOS.
+/// TCP receive buffer (the window we advertise). Allocated zeroed, so the OS
+/// commits pages only as the ring is actually used; idle or small flows stay
+/// cheap even on iOS.
 #[cfg(any(target_os = "ios", target_os = "tvos", target_os = "watchos"))]
-pub const TCP_BUFFER: usize = 256 * 1024;
+pub const TCP_RX_BUFFER: usize = 256 * 1024;
 #[cfg(not(any(target_os = "ios", target_os = "tvos", target_os = "watchos")))]
-pub const TCP_BUFFER: usize = 1024 * 1024;
+pub const TCP_RX_BUFFER: usize = 1024 * 1024;
+/// TCP send buffer, which also caps bytes in flight. Measured on loopback
+/// against a sing-box peer: 256 KiB doubles upload over 1 MiB, whose bursts
+/// overrun the peer (smoltcp has no SACK and a 1 s minimum RTO, so every
+/// loss costs dearly).
+pub const TCP_TX_BUFFER: usize = 256 * 1024;
 
 const UDP_PACKETS: usize = 64;
 const UDP_BUFFER: usize = 128 * 1024;
@@ -236,10 +242,12 @@ impl Stack {
         let local = self.local_addr(remote)?;
         let lport = self.local_port(true)?;
         let mut s = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0; TCP_BUFFER]),
-            tcp::SocketBuffer::new(vec![0; TCP_BUFFER]),
+            tcp::SocketBuffer::new(vec![0; TCP_RX_BUFFER]),
+            tcp::SocketBuffer::new(vec![0; TCP_TX_BUFFER]),
         );
         s.set_nagle_enabled(false);
+        // Real tunnels lose packets; without congestion control smoltcp
+        // would keep bursting the whole window into the loss.
         s.set_congestion_control(tcp::CongestionControl::Cubic);
         // Abort if the peer stops acknowledging (dead tunnel), instead of
         // retransmitting forever.
