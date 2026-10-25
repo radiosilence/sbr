@@ -119,6 +119,15 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         heartbeat?.cancel()
         heartbeat = nil
         if let url = Self.heartbeatURL { try? FileManager.default.removeItem(at: url) }
+        // The system stopping us (rather than the user, sleep or an update)
+        // reads as "plugin failed" in the app; keep the reason for next start.
+        if ![.userInitiated, .providerDisabled, .configurationDisabled, .configurationRemoved, .sleep, .appUpdate,
+             .userLogout, .userSwitch].contains(reason)
+        {
+            let mb = Double(core?.stats().memoryFootprint ?? 0) / 1_048_576
+            Self.recordEnd(String(format: "stopped by the system: %@ (reason %d) with %.1f MB in use",
+                                  Self.describe(reason), reason.rawValue, mb))
+        }
         pathMonitor?.cancel()
         pathMonitor = nil
         setState(remote: nil, logLevel: nil)
@@ -330,6 +339,12 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     /// stopped cleanly, its last heartbeat: a memory kill leaves no other trace.
     private func reportPreviousSession() {
         let fm = FileManager.default
+        var abnormal = false
+        if let url = Self.endURL, let end = try? String(contentsOf: url, encoding: .utf8) {
+            SbrRecentLogs.shared.append(.error, "previous session \(end)")
+            try? fm.removeItem(at: url)
+            abnormal = true
+        }
         if let url = Self.crashURL {
             let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
             let lines = text.split(separator: "\n").suffix(5)
@@ -338,11 +353,54 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             }
             try? fm.removeItem(at: url)
             Sbr.setCrashFile(url)
-            if !lines.isEmpty { return }
+            abnormal = abnormal || !lines.isEmpty
         }
         if let url = Self.heartbeatURL, let beat = try? String(contentsOf: url, encoding: .utf8) {
-            SbrRecentLogs.shared.append(.warn, "previous session ended without stopping; last seen \(beat)")
+            if !abnormal {
+                SbrRecentLogs.shared.append(.warn, "previous session ended without stopping; last seen \(beat)")
+            }
             try? fm.removeItem(at: url)
+            abnormal = true
+        }
+        // What the tunnel was doing just before, oldest first.
+        if let url = Self.recentURL {
+            if abnormal, let text = try? String(contentsOf: url, encoding: .utf8) {
+                for line in text.split(separator: "\n") {
+                    SbrRecentLogs.shared.append(.info, "prev │ \(line)")
+                }
+            }
+            try? fm.removeItem(at: url)
+        }
+    }
+
+    private static var endURL: URL? { privateDirectory?.appendingPathComponent("end") }
+    private static var recentURL: URL? { privateDirectory?.appendingPathComponent("recent.log") }
+
+    private static func recordEnd(_ text: String) {
+        guard let url = endURL else { return }
+        try? text.write(to: url, atomically: true, encoding: .utf8)
+        saveRecent()
+    }
+
+    /// The last 40 log lines, so an abnormal end can show its lead-up.
+    private static func saveRecent() {
+        guard let url = recentURL else { return }
+        let lines = SbrRecentLogs.shared.snapshot().suffix(40)
+        try? lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private static func describe(_ r: NEProviderStopReason) -> String {
+        switch r {
+        case .providerFailed: "provider failed"
+        case .noNetworkAvailable: "no network"
+        case .unrecoverableNetworkChange: "unrecoverable network change"
+        case .authenticationCanceled: "authentication cancelled"
+        case .configurationFailed: "configuration failed"
+        case .idleTimeout: "idle timeout"
+        case .superceded: "another vpn took over"
+        case .connectionFailed: "connection failed"
+        case .internalError: "internal error"
+        default: "other"
         }
     }
 
@@ -356,6 +414,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
                     let mb = Double(core.stats().memoryFootprint) / 1_048_576
                     let beat = String(format: "%@ with %.1f MB in use", clock.string(from: Date()), mb)
                     try? beat.write(to: url, atomically: true, encoding: .utf8)
+                    Self.saveRecent()
                 }
                 try? await Task.sleep(nanoseconds: 10_000_000_000)
             }
