@@ -179,6 +179,41 @@ fn custom_server_settings() -> Value {
     })
 }
 
+/// The REALITY `dest`: a site with a certificate for the borrowed name and
+/// a browser's ALPN, which the REALITY server mirrors.
+async fn reality_dest() -> SocketAddr {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let ck = rcgen::generate_simple_self_signed(vec![REALITY_SNI.into()]).unwrap();
+    let certs = CertificateDer::pem_slice_iter(ck.cert.pem().as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let key = PrivateKeyDer::from_pem_slice(ck.signing_key.serialize_pem().as_bytes()).unwrap();
+    let mut cfg = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap();
+    cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (s, _) = l.accept().await.unwrap();
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                if let Ok(mut t) = acceptor.accept(s).await {
+                    let mut b = [0u8; 4096];
+                    while matches!(t.read(&mut b).await, Ok(n) if n > 0) {}
+                }
+            });
+        }
+    });
+    a
+}
+
 async fn start_xray(bin: &Path) -> Xray {
     let (private_key, public_key) = x25519(bin);
     let cert = rcgen::generate_simple_self_signed(vec![SNI.into()]).unwrap();
@@ -188,8 +223,7 @@ async fn start_xray(bin: &Path) -> Xray {
     let (cert_path, key_path) = (dir.join("cert.pem"), dir.join("key.pem"));
     std::fs::write(&cert_path, &cert_pem).unwrap();
     std::fs::write(&key_path, &key_pem).unwrap();
-    let (dc, dk) = common::self_signed();
-    let dest = common::tls_sink(&dc, &dk).await;
+    let dest = reality_dest().await;
 
     for _ in 0..3 {
         let ports = vec![

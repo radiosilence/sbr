@@ -30,6 +30,9 @@ struct TunnelView: View {
             .padding(.horizontal, Theme.Space.xl)
             .padding(.bottom, Theme.Space.xxl)
         }
+        // Groups, latency and traffic come from the tunnel, polled only while
+        // this tab is on screen.
+        .task { await tunnel.poll() }
     }
 
     private var header: some View {
