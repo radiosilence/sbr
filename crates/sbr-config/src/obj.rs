@@ -38,6 +38,11 @@ impl Obj {
         }
     }
 
+    /// Remaining keys, for map-shaped objects.
+    pub fn keys(&self) -> Vec<String> {
+        self.map.keys().cloned().collect()
+    }
+
     pub fn has(&self, key: &str) -> bool {
         self.map.contains_key(key)
     }

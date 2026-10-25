@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "rules": [
+    { "domain_suffix": ["example.org", ".only-sub.net"], "domain": "exact.example" },
+    { "ip_cidr": ["203.0.113.0/24", "2001:db8:1::/48"] },
+    { "domain_keyword": "tracker", "port": [443, 8443] },
+    { "type": "logical", "mode": "and", "rules": [{ "domain_suffix": "logic.test" }, { "port": 80 }] }
+  ]
+}

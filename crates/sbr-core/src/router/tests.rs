@@ -164,3 +164,85 @@ fn stepper_sniff_options_protocol() {
     m.destination_addresses.push("9.9.9.9".parse().unwrap());
     assert_eq!(r.route(&m), go(2));
 }
+
+#[test]
+fn clash_mode_matcher() {
+    let r = router(&format!(
+        r#"{{{OUTS},"route":{{"rules":[
+            {{"clash_mode":"direct","outbound":"b"}},
+            {{"clash_mode":"Global","outbound":"c"}}
+        ]}}}}"#
+    ));
+    let m = meta("x.com", 443);
+    assert_eq!(r.clash_mode().current(), "Rule");
+    assert_eq!(r.clash_mode().list(), ["Rule", "direct", "Global"].map(String::from));
+    assert_eq!(r.route(&m), go(0));
+    assert_eq!(
+        r.clash_mode().set("GLOBAL").as_deref(),
+        Some("Global"),
+        "case-insensitive"
+    );
+    assert_eq!(r.route(&m), go(2));
+    assert_eq!(r.clash_mode().set("Direct").as_deref(), Some("direct"));
+    assert_eq!(r.route(&m), go(1), "rule value compares case-insensitively");
+    assert_eq!(r.clash_mode().set("nope"), None);
+    assert_eq!(r.clash_mode().current(), "direct");
+}
+
+fn router_with(json: &str, load: impl Fn(&str) -> std::io::Result<Vec<u8>>) -> Router {
+    let o = sbr_config::Options::parse(json).unwrap();
+    let tags: Vec<String> = o.outbounds.iter().map(|o| o.tag.clone()).collect();
+    Router::new(
+        &o.route.rules,
+        &o.route.rule_sets,
+        o.final_outbound(),
+        |t| tags.iter().position(|x| x == t),
+        load,
+    )
+    .unwrap()
+}
+
+#[test]
+fn rule_sets_hot_swap() {
+    let r = router_with(
+        &format!(
+            r#"{{{OUTS},"route":{{
+            "rule_set":[{{"type":"remote","tag":"r","url":"https://x/r.srs"}}],
+            "rules":[{{"rule_set":"r","outbound":"b"}}]}}}}"#
+        ),
+        |_| unreachable!("remote sets are not loaded from disk"),
+    );
+    assert_eq!(r.route(&meta("a.com", 1)), go(0), "not downloaded yet: matches nothing");
+    let rules = sbr_config::parse_rule_set_source(r#"{"version":2,"rules":[{"domain":"a.com"}]}"#).unwrap();
+    r.update_rule_set("r", &rules).unwrap();
+    assert_eq!(r.route(&meta("a.com", 1)), go(1));
+    let rules = sbr_config::parse_rule_set_source(r#"{"version":2,"rules":[{"domain":"b.com"}]}"#).unwrap();
+    r.update_rule_set("r", &rules).unwrap();
+    assert_eq!(r.route(&meta("a.com", 1)), go(0));
+    assert_eq!(r.route(&meta("b.com", 1)), go(1));
+    assert!(r.update_rule_set("missing", &rules).is_err());
+}
+
+#[test]
+fn local_binary_rule_set() {
+    let set = sbr_config::srs::PlainRuleSet::from_json(
+        r#"{"version":2,"rules":[{"domain_suffix":"bin.test","ip_cidr":"203.0.113.0/24"}]}"#,
+    )
+    .unwrap();
+    let bytes = set.write().unwrap();
+    let r = router_with(
+        &format!(
+            r#"{{{OUTS},"route":{{
+            "rule_set":[{{"type":"local","tag":"b","path":"sets/b.srs"}}],
+            "rules":[{{"rule_set":"b","outbound":"c"}}]}}}}"#
+        ),
+        |p| {
+            assert_eq!(p, "sets/b.srs");
+            Ok(bytes.clone())
+        },
+    );
+    assert_eq!(r.route(&meta("www.bin.test", 443)), go(2));
+    assert_eq!(r.route(&meta("203.0.113.9", 443)), go(2));
+    assert_eq!(r.route(&meta("x.test", 443)), go(0));
+    assert_eq!(r.rules_info()[0].payload, "rule_set=b");
+}

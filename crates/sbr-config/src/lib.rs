@@ -7,8 +7,10 @@
 //! only exceptions are knobs that cannot change *where* traffic goes; those
 //! are accepted and reported in [`Options::warnings`].
 
+mod experimental;
 mod obj;
 mod route;
+pub mod srs;
 mod tls;
 pub mod types;
 
@@ -18,7 +20,9 @@ use std::time::Duration;
 use obj::{Diag, Obj};
 use serde_json::Value;
 
+pub use experimental::{CacheFileOptions, ClashApiOptions, Experimental};
 pub use route::*;
+pub use srs::parse_rule_set;
 pub use tls::{Ech, Multiplex, Reality, TlsOutbound, Transport, Utls};
 
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +50,8 @@ pub struct Options {
     pub inbounds: Vec<Inbound>,
     pub outbounds: Vec<Outbound>,
     pub route: RouteOptions,
+    /// `experimental`: clash API and cache file.
+    pub experimental: Experimental,
     /// Non-fatal notes about accepted-but-ignored settings.
     pub warnings: Vec<String>,
 }
@@ -262,11 +268,10 @@ impl Options {
         if root.raw("ntp").is_some() {
             diag.warnings.push("ntp: ignored by sbr".into());
         }
-        if let Some(exp) = root.raw("experimental") {
-            let mut exp = Obj::new(exp, "experimental")?;
-            exp.tolerate(&mut diag, &["cache_file", "clash_api", "v2ray_api", "debug"]);
-            exp.finish()?;
-        }
+        let experimental = match root.raw("experimental") {
+            Some(v) => experimental::parse(Obj::new(v, "experimental")?, &mut diag)?,
+            None => Experimental::default(),
+        };
         for key in [
             "endpoints",
             "services",
@@ -314,6 +319,7 @@ impl Options {
             inbounds,
             outbounds,
             route,
+            experimental,
             warnings: diag.warnings,
         };
         options.check_references()?;
@@ -390,6 +396,21 @@ impl Options {
         }
         if let Some(f) = &self.route.final_outbound {
             need("route.final".into(), f)?;
+        }
+        for rs in &self.route.rule_sets {
+            if let RuleSetSource::Remote(r) = &rs.source
+                && let Some(d) = &r.download_detour
+            {
+                need(format!("route.rule_set[{}].download_detour", rs.tag), d)?;
+            }
+        }
+        if let Some(d) = self
+            .experimental
+            .clash_api
+            .as_ref()
+            .and_then(|c| c.external_ui_download_detour.as_deref())
+        {
+            need("experimental.clash_api.external_ui_download_detour".into(), d)?;
         }
         let mut stack: Vec<(&Rule, String)> = self
             .route

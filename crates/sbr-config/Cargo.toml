@@ -10,3 +10,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 ipnet.workspace = true
+flate2.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true

@@ -87,7 +87,7 @@ impl Engine {
             &options.route.rule_sets,
             options.final_outbound(),
             |tag| outbounds.iter().position(|o| o.tag() == tag),
-            |path| std::fs::read_to_string(resolve_path(settings, path)),
+            |path| std::fs::read(resolve_path(settings, path)),
         )?;
         Ok(Self {
             outbounds,

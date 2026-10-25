@@ -6,16 +6,25 @@
 //! A `rule_set` whose body is a single plain rule merges its groups into the
 //! outer rule's, so `{"rule_set": "geosite-x", "port": 443}` behaves the way
 //! people expect.
+//!
+//! Rule-set contents are hot-swappable ([`Router::update_rule_set`]): each
+//! set lives behind an `ArcSwap`, so remote rule-set refreshes publish a new
+//! compiled set atomically while matching stays lock-free.
 
+mod describe;
 mod sets;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use sbr_config::{DomainStrategy, LogicalMode, Matchers, Protocol, RejectMethod, Rule, RuleAction, RuleKind, RuleSet};
+use arc_swap::ArcSwap;
+use sbr_config::{
+    DomainStrategy, LogicalMode, Matchers, Protocol, RejectMethod, Rule, RuleAction, RuleKind, RuleSet, RuleSetSource,
+};
 
 use crate::addr::is_private;
 use crate::session::{Metadata, Network};
+pub use describe::RuleInfo;
 pub use sets::{DomainSet, IpSet, PortSet};
 
 #[derive(Debug, thiserror::Error)]
@@ -121,41 +130,46 @@ impl RouteOptions {
 
 pub struct Router {
     rules: Vec<(Node, Action)>,
+    /// Parallel to `rules`: what the Clash API shows.
+    info: Vec<RuleInfo>,
     final_outbound: usize,
+    sets: HashMap<String, Arc<SetSlot>>,
+    clash_mode: Arc<ClashMode>,
 }
+
+/// One rule-set's current contents.
+type SetSlot = ArcSwap<CompiledSet>;
 
 impl Router {
     /// `outbound` maps tags to the caller's outbound indices. `load` reads
     /// local rule-set files (kept injectable so tests and iOS can supply
-    /// bytes from wherever they live).
+    /// bytes from wherever they live). Remote rule-sets start empty (they
+    /// match nothing) until [`Router::update_rule_set`] fills them.
     pub fn new(
         rules: &[Rule],
         rule_sets: &[RuleSet],
         final_tag: &str,
         outbound: impl Fn(&str) -> Option<usize>,
-        load: impl Fn(&str) -> std::io::Result<String>,
+        load: impl Fn(&str) -> std::io::Result<Vec<u8>>,
     ) -> Result<Self, BuildError> {
-        let mut sets = std::collections::HashMap::new();
+        let mut sets: HashMap<String, Arc<SetSlot>> = HashMap::new();
         for rs in rule_sets {
             let rules = match &rs.source {
-                sbr_config::RuleSetSource::Inline(r) => r.clone(),
-                sbr_config::RuleSetSource::LocalSource(path) => {
-                    let text = load(path).map_err(|e| BuildError::RuleSet(rs.tag.clone(), format!("{path}: {e}")))?;
-                    sbr_config::parse_rule_set_source(&text)
+                RuleSetSource::Inline(r) => r.clone(),
+                RuleSetSource::Local { path, format } => {
+                    let data = load(path).map_err(|e| BuildError::RuleSet(rs.tag.clone(), format!("{path}: {e}")))?;
+                    sbr_config::parse_rule_set(&data, *format)
                         .map_err(|e| BuildError::RuleSet(rs.tag.clone(), e.to_string()))?
                 }
+                RuleSetSource::Remote(_) => Vec::new(),
             };
-            let nodes = rules
-                .iter()
-                .enumerate()
-                .map(|(i, r)| Node::compile(r, &format!("rule_set[{}].rules[{i}]", rs.tag), &sets))
-                .collect::<Result<Vec<_>, _>>()?;
-            let mergeable = matches!(nodes.as_slice(), [Node::Default(d)] if !d.invert && d.rule_set.is_none());
-            sets.insert(rs.tag.clone(), Arc::new(CompiledSet { nodes, mergeable }));
+            let set = CompiledSet::compile(&rs.tag, &rules, &sets)?;
+            sets.insert(rs.tag.clone(), Arc::new(ArcSwap::from_pointee(set)));
         }
 
         let resolve = |tag: &str| outbound(tag).ok_or_else(|| BuildError::Outbound(tag.to_owned()));
         let mut compiled = Vec::with_capacity(rules.len());
+        let mut info = Vec::with_capacity(rules.len());
         for (i, r) in rules.iter().enumerate() {
             let action = match &r.action {
                 RuleAction::Route { outbound, options } => Action::Route {
@@ -179,17 +193,56 @@ impl Router {
                 RuleAction::None => continue,
             };
             compiled.push((Node::compile(r, &format!("route.rules[{i}]"), &sets)?, action));
+            info.push(RuleInfo::new(r));
         }
         Ok(Self {
             rules: compiled,
+            info,
             final_outbound: resolve(final_tag)?,
+            sets,
+            clash_mode: Arc::new(ClashMode::new(None, ClashMode::modes_in(rules))),
         })
+    }
+
+    /// Set the Clash API `default_mode` (sing-box default: `Rule`).
+    pub fn with_default_mode(mut self, mode: Option<&str>, rules: &[Rule]) -> Self {
+        self.clash_mode = Arc::new(ClashMode::new(mode, ClashMode::modes_in(rules)));
+        self
+    }
+
+    pub fn clash_mode(&self) -> &Arc<ClashMode> {
+        &self.clash_mode
+    }
+
+    /// Atomically replace a rule-set's contents. Connections being routed
+    /// right now finish against whichever version they loaded.
+    pub fn update_rule_set(&self, tag: &str, rules: &[Rule]) -> Result<(), BuildError> {
+        let slot = self
+            .sets
+            .get(tag)
+            .ok_or_else(|| BuildError::RuleSet(tag.to_owned(), "not found".into()))?;
+        let set = CompiledSet::compile(tag, rules, &self.sets)?;
+        slot.store(Arc::new(set));
+        Ok(())
+    }
+
+    /// Rule `index` (as returned by [`Router::next`]) for display.
+    pub fn rule_info(&self, index: usize) -> Option<&RuleInfo> {
+        self.info.get(index)
+    }
+
+    pub fn rules_info(&self) -> &[RuleInfo] {
+        &self.info
     }
 
     /// The first rule at or after `from` that matches, with its index.
     /// Callers run non-final actions and continue from `index + 1`.
     pub fn next(&self, meta: &Metadata, from: usize) -> Option<(usize, &Action)> {
-        let ctx = Ctx::default();
+        let mode = self.clash_mode.current.load();
+        let ctx = Ctx {
+            ip_cidr_match_source: false,
+            clash_mode: &mode.lower,
+        };
         self.rules
             .iter()
             .enumerate()
@@ -238,15 +291,113 @@ impl Router {
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct Ctx {
+#[derive(Clone, Copy)]
+struct Ctx<'a> {
     /// Set inside a rule-set referenced with `rule_set_ip_cidr_match_source`.
     ip_cidr_match_source: bool,
+    /// The current Clash mode, lowercased.
+    clash_mode: &'a str,
 }
 
 struct CompiledSet {
     nodes: Vec<Node>,
     mergeable: bool,
+}
+
+impl CompiledSet {
+    fn compile(tag: &str, rules: &[Rule], sets: &HashMap<String, Arc<SetSlot>>) -> Result<Self, BuildError> {
+        let nodes = rules
+            .iter()
+            .enumerate()
+            .map(|(i, r)| Node::compile(r, &format!("rule_set[{tag}].rules[{i}]"), sets))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mergeable = matches!(nodes.as_slice(), [Node::Default(d)] if !d.invert && d.rule_set.is_none());
+        Ok(Self { nodes, mergeable })
+    }
+}
+
+/// The Clash API mode shared by the API, the router's `clash_mode` matcher
+/// and (later) DNS rules. Matching reads it lock-free.
+pub struct ClashMode {
+    list: Vec<String>,
+    current: ArcSwap<ModeName>,
+}
+
+struct ModeName {
+    display: String,
+    lower: String,
+}
+
+impl ClashMode {
+    /// sing-box `clashmode.NewManager`: the default (`Rule` unless set) is
+    /// always selectable.
+    pub fn new(default: Option<&str>, mut list: Vec<String>) -> Self {
+        let default = default.filter(|d| !d.is_empty()).unwrap_or("Rule").to_owned();
+        if !list.contains(&default) {
+            list.insert(0, default.clone());
+        }
+        Self {
+            list,
+            current: ArcSwap::from_pointee(ModeName {
+                lower: default.to_lowercase(),
+                display: default,
+            }),
+        }
+    }
+
+    /// sing-box `CalculateModeList` over route rules: custom modes sorted,
+    /// then `Rule`, `Global`, `Direct` in that order when used.
+    pub fn modes_in(rules: &[Rule]) -> Vec<String> {
+        fn walk(r: &Rule, out: &mut Vec<String>) {
+            match &r.kind {
+                RuleKind::Default(m) => out.extend(m.clash_mode.iter().cloned()),
+                RuleKind::Logical { rules, .. } => rules.iter().for_each(|r| walk(r, out)),
+            }
+        }
+        let mut found = Vec::new();
+        rules.iter().for_each(|r| walk(r, &mut found));
+        const PREDEFINED: [&str; 3] = ["Rule", "Global", "Direct"];
+        let mut list: Vec<String> = found
+            .iter()
+            .filter(|m| !PREDEFINED.contains(&m.as_str()))
+            .cloned()
+            .collect();
+        list.sort();
+        list.dedup();
+        list.extend(
+            PREDEFINED
+                .iter()
+                .filter(|p| found.iter().any(|m| m == *p))
+                .map(|p| p.to_string()),
+        );
+        list
+    }
+
+    pub fn current(&self) -> String {
+        self.current.load().display.clone()
+    }
+
+    pub fn list(&self) -> &[String] {
+        &self.list
+    }
+
+    /// Switch mode; unknown modes are ignored (exact match first, then
+    /// case-insensitive). Returns the new mode if it changed.
+    pub fn set(&self, mode: &str) -> Option<String> {
+        let found = self
+            .list
+            .iter()
+            .find(|m| *m == mode)
+            .or_else(|| self.list.iter().find(|m| m.eq_ignore_ascii_case(mode)))?;
+        if self.current.load().display == *found {
+            return None;
+        }
+        self.current.store(Arc::new(ModeName {
+            display: found.clone(),
+            lower: found.to_lowercase(),
+        }));
+        Some(found.clone())
+    }
 }
 
 enum Node {
@@ -274,7 +425,9 @@ struct DefaultRule {
     dest_ip: IpSet,
     dest_ip_is_private: bool,
     dest_port: PortSet,
-    rule_set: Option<(Vec<Arc<CompiledSet>>, bool)>,
+    rule_set: Option<(Vec<Arc<SetSlot>>, bool)>,
+    /// Lowercased.
+    clash_mode: Option<Box<str>>,
 }
 
 const SRC_ADDR: u8 = 1;
@@ -307,11 +460,7 @@ impl Groups {
 }
 
 impl Node {
-    fn compile(
-        r: &Rule,
-        path: &str,
-        sets: &std::collections::HashMap<String, Arc<CompiledSet>>,
-    ) -> Result<Node, BuildError> {
+    fn compile(r: &Rule, path: &str, sets: &HashMap<String, Arc<SetSlot>>) -> Result<Node, BuildError> {
         Ok(match &r.kind {
             RuleKind::Default(m) => Node::Default(Box::new(DefaultRule::compile(m, r.invert, path, sets)?)),
             RuleKind::Logical { mode, rules } => Node::Logical {
@@ -345,7 +494,7 @@ impl DefaultRule {
         m: &Matchers,
         invert: bool,
         path: &str,
-        sets: &std::collections::HashMap<String, Arc<CompiledSet>>,
+        sets: &HashMap<String, Arc<SetSlot>>,
     ) -> Result<Self, BuildError> {
         let rule_set = if m.rule_set.is_empty() {
             None
@@ -378,6 +527,7 @@ impl DefaultRule {
             dest_ip_is_private: m.ip_is_private,
             dest_port: PortSet::new(&m.port, &m.port_range),
             rule_set,
+            clash_mode: m.clash_mode.as_deref().map(|c| c.to_lowercase().into()),
         };
         let empty = r.inbound.is_empty()
             && r.auth_user.is_empty()
@@ -391,7 +541,8 @@ impl DefaultRule {
             && r.dest_ip.is_empty()
             && !r.dest_ip_is_private
             && r.dest_port.is_empty()
-            && r.rule_set.is_none();
+            && r.rule_set.is_none()
+            && r.clash_mode.is_none();
         Ok(DefaultRule { empty, ..r })
     }
 
@@ -404,8 +555,9 @@ impl DefaultRule {
     }
 
     /// The AND-ed, non-grouped fields.
-    fn items_match(&self, meta: &Metadata) -> bool {
-        (self.inbound.is_empty() || self.inbound.contains(&*meta.inbound))
+    fn items_match(&self, meta: &Metadata, ctx: Ctx) -> bool {
+        self.clash_mode.as_deref().is_none_or(|m| m == ctx.clash_mode)
+            && (self.inbound.is_empty() || self.inbound.contains(&*meta.inbound))
             && (self.network.is_empty() || self.network.contains(&meta.network))
             && (self.protocol.is_empty() || meta.protocol.is_some_and(|p| self.protocol.contains(&p)))
             && (self.auth_user.is_empty() || meta.user.as_deref().is_some_and(|u| self.auth_user.contains(u)))
@@ -450,7 +602,7 @@ impl DefaultRule {
     }
 
     fn matches_inner(&self, meta: &Metadata, ctx: Ctx) -> bool {
-        if !self.items_match(meta) {
+        if !self.items_match(meta, ctx) {
             return false;
         }
         let outer = self.groups(meta, ctx);
@@ -459,13 +611,15 @@ impl DefaultRule {
         };
         let nested = Ctx {
             ip_cidr_match_source: *match_source,
+            ..ctx
         };
-        sets.iter().any(|set| {
+        sets.iter().any(|slot| {
+            let set = slot.load();
             if set.mergeable {
                 let Node::Default(branch) = &set.nodes[0] else {
                     unreachable!()
                 };
-                branch.items_match(meta) && outer.merge(branch.groups(meta, nested)).done()
+                branch.items_match(meta, nested) && outer.merge(branch.groups(meta, nested)).done()
             } else {
                 outer.done() && set.nodes.iter().any(|n| n.matches(meta, nested))
             }
