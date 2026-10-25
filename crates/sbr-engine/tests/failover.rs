@@ -473,7 +473,8 @@ async fn fallback_site(limit: usize) -> u16 {
                     }
                     served += 1;
                     let r = b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 19\r\n\r\n404 page not found\n";
-                    if t.write_all(r).await.is_err() {
+                    // Flushed: tokio-rustls may hold sealed records until then.
+                    if t.write_all(r).await.is_err() || t.flush().await.is_err() {
                         return;
                     }
                 }

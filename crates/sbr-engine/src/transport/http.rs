@@ -323,6 +323,7 @@ impl HttpUpgradeClient {
     pub async fn connect(&self) -> io::Result<Stream> {
         let mut s = self.dialer.connect().await?;
         s.write_all(&self.request).await?;
+        s.flush().await?;
         let (status, head, rest) = read_response(&mut s).await?;
         let upgraded = status == 101
             && header(&head, "connection").is_some_and(|v| v.eq_ignore_ascii_case("upgrade"))

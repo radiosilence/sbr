@@ -212,8 +212,24 @@ async fn shadowsocks_2022() {
             let (mut s, _) = listener.accept().await.unwrap();
             tokio::spawn(async move {
                 let addr = s.handshake().await.unwrap();
-                let mut remote = TcpStream::connect(addr.to_string()).await.unwrap();
-                let _ = tokio::io::copy_bidirectional(&mut s, &mut remote).await;
+                let remote = TcpStream::connect(addr.to_string()).await.unwrap();
+                let (mut rr, mut rw) = remote.into_split();
+                let (mut sr, mut sw) = tokio::io::split(s);
+                // Not `copy_bidirectional`: the crate's writer miscounts a
+                // retried write that grew (see `WriteFix` in the outbound),
+                // so the echo leg retries with the same slice via `write_all`.
+                let up = tokio::io::copy(&mut sr, &mut rw);
+                let down = async {
+                    let mut b = vec![0u8; 16 * 1024];
+                    loop {
+                        let n = rr.read(&mut b).await?;
+                        if n == 0 {
+                            return sw.shutdown().await;
+                        }
+                        sw.write_all(&b[..n]).await?;
+                    }
+                };
+                let _ = tokio::join!(up, down);
             });
         }
     });

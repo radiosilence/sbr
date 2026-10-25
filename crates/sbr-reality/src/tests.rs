@@ -67,7 +67,11 @@ async fn rustls_echo(cfg: Arc<ServerConfig>, key_update_after: Option<usize>) ->
                 tls.shutdown().await.unwrap();
                 return;
             }
+            // tokio-rustls keeps sealed records it could not send yet until
+            // the next write or flush; without the flush the tail of the
+            // echo could wait forever while we block in `read`.
             tls.write_all(&buf[..n]).await.unwrap();
+            tls.flush().await.unwrap();
             total += n;
             if let Some(after) = key_update_after
                 && !updated
