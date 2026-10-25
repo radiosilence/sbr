@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::buf::CHUNK;
+use super::buf::{CHUNK, Pool};
 use super::wire::{self, ACK, FIN, Opts, Out, PSH, RST, SYN, Seg};
 use super::{Ctx, Shared};
 
@@ -119,6 +119,9 @@ pub struct Tcb {
     rcv_shift: u8,
     rx_cap: usize,
     tx_cap: usize,
+    pool: Arc<Pool>,
+    /// This connection's share of `Pool::promise`.
+    promised: usize,
     ooo: Vec<(u32, Vec<u8>)>,
     last_ooo: Option<u32>,
     /// The peer's FIN, seen ahead of a gap.
@@ -182,6 +185,7 @@ impl Tcb {
         tx_cap: usize,
         shared: Arc<Shared>,
         defer: Option<Instant>,
+        pool: Arc<Pool>,
     ) -> Self {
         let v6 = local.is_ipv6();
         let ts_ok = seg.ts.is_some();
@@ -214,6 +218,8 @@ impl Tcb {
             rcv_shift,
             rx_cap,
             tx_cap,
+            pool,
+            promised: 0,
             ooo: Vec::new(),
             last_ooo: None,
             fin_at: None,
@@ -494,7 +500,25 @@ impl Tcb {
         }
     }
 
+    /// Keep `Pool::promise` in step with the open window.
+    fn sync_promise(&mut self) {
+        let open = if lt(self.rcv_adv, self.rcv_nxt) || self.rx_done() {
+            0
+        } else {
+            self.rcv_adv.wrapping_sub(self.rcv_nxt) as usize
+        };
+        if open != self.promised {
+            self.pool.promise(self.promised, open);
+            self.promised = open;
+        }
+    }
+
     fn on_data(&mut self, seg: &Seg, payload: &[u8], cx: &mut Ctx<'_>) {
+        self.on_data_inner(seg, payload, cx);
+        self.sync_promise();
+    }
+
+    fn on_data_inner(&mut self, seg: &Seg, payload: &[u8], cx: &mut Ctx<'_>) {
         if !matches!(self.state, State::Established | State::FinWait1 | State::FinWait2) {
             return;
         }
@@ -1075,8 +1099,9 @@ impl Tcb {
             o.ws(self.rcv_shift);
         }
         // Windows in a SYN are never scaled.
-        let wnd = self.rx_cap.min(65535) as u16;
+        let wnd = self.rx_cap.min(65535).min(cx.pool.headroom().max(CHUNK)) as u16;
         self.rcv_adv = self.rcv_nxt.wrapping_add(wnd as u32);
+        self.sync_promise();
         let off = wire::payload_offset(v6, &o);
         cx.buf.clear();
         cx.buf.resize(off, 0);
@@ -1137,14 +1162,18 @@ impl Tcb {
                     flags |= PSH;
                 }
             }
-            let wnd = self.window(g.rx.len(), cx.pool.headroom().max(g.rx.slack()));
+            let wnd = self.window(g.rx.len(), cx.pool.headroom());
             g.adv_free = wnd as usize;
             wnd
         };
         let wire_wnd = if flags & RST != 0 {
             0
         } else {
-            (wnd.div_ceil(1 << self.rcv_shift)).min(65535) as u16
+            // Rounded down: rounding up would creep the right edge forward on
+            // every ACK, past what `window` allowed. (We still accept up to
+            // `rcv_adv`, so the few bytes shaved off are not a retraction the
+            // peer can trip over.)
+            (wnd >> self.rcv_shift).min(65535) as u16
         };
         wire::finish(
             cx.buf,
@@ -1165,6 +1194,7 @@ impl Tcb {
         } else {
             let adv = self.rcv_nxt.wrapping_add((wire_wnd as u32) << self.rcv_shift);
             self.rcv_adv = max_seq(self.rcv_adv, adv);
+            self.sync_promise();
         }
         self.ack_due = false;
         self.ack_now = false;
@@ -1190,6 +1220,12 @@ impl Tcb {
             .min(cur.saturating_add(mem.min(u32::MAX as usize) as u32).max(floor))
             .max(cur);
         wnd.min(65535 << self.rcv_shift)
+    }
+}
+
+impl Drop for Tcb {
+    fn drop(&mut self) {
+        self.pool.promise(self.promised, 0);
     }
 }
 

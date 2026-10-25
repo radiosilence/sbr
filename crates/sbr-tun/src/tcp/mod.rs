@@ -61,7 +61,9 @@ pub struct TcpConfig {
     pub defer_handshake: bool,
     /// Cap on what all connections' buffers hold together (0: none). At the
     /// cap, receive windows stop opening and writes wait, except that each
-    /// connection may always buffer one 16 KiB chunk each way.
+    /// connection may always buffer one chunk (`buf::CHUNK`: 4 KiB on mobile,
+    /// 16 KiB elsewhere) each way, so the true ceiling is the cap plus four
+    /// chunks per connection, counting partly filled ones.
     pub memory_limit: usize,
 }
 
@@ -497,6 +499,7 @@ impl Tcp {
             self.cfg.tx_buffer,
             shared,
             self.cfg.defer_handshake.then_some(now),
+            self.env.pool.clone(),
         );
         self.slots[i as usize].tcb = Some(Box::new(t));
         self.table.insert((remote, local), i);

@@ -12,7 +12,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
 
-pub const CHUNK: usize = 16 * 1024;
+/// Allocation unit. Smaller on mobile: a connection holding one byte
+/// each way still holds a chunk each way, and the extension may have
+/// hundreds of connections.
+pub const CHUNK: usize = if super::MOBILE { 4 * 1024 } else { 16 * 1024 };
 
 type Chunk = Box<[u8]>;
 
@@ -21,6 +24,9 @@ pub struct Pool {
     keep: usize,
     /// Bytes of chunks held by buffers.
     used: AtomicUsize,
+    /// Receive window advertised but not yet filled, across connections:
+    /// memory the apps may already be sending into.
+    promised: AtomicUsize,
     limit: usize,
     /// Writers waiting for memory under the limit.
     waiters: Mutex<Vec<Waker>>,
@@ -35,6 +41,7 @@ impl Pool {
             free: Mutex::new(Vec::new()),
             keep: keep_bytes / CHUNK,
             used: AtomicUsize::new(0),
+            promised: AtomicUsize::new(0),
             limit,
             waiters: Mutex::new(Vec::new()),
             waiting: AtomicBool::new(false),
@@ -46,7 +53,18 @@ impl Pool {
         if self.limit == 0 {
             return usize::MAX;
         }
-        self.limit.saturating_sub(self.used.load(Ordering::Relaxed))
+        self.limit
+            .saturating_sub(self.used.load(Ordering::Relaxed))
+            .saturating_sub(self.promised.load(Ordering::Relaxed))
+    }
+
+    /// A connection's outstanding window went from `old` to `new` bytes.
+    pub fn promise(&self, old: usize, new: usize) {
+        if new > old {
+            self.promised.fetch_add(new - old, Ordering::Relaxed);
+        } else {
+            self.promised.fetch_sub(old - new, Ordering::Relaxed);
+        }
     }
 
     /// Wake `w` when memory is freed.

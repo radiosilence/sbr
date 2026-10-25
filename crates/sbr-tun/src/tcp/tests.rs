@@ -942,7 +942,9 @@ fn memory_limit_bounds_all_buffers_together() {
     let data = pattern(256 << 10, 4);
     let mut up = vec![0; n];
     let mut down = vec![0; n];
-    let bound = limit + 2 * n * buf::CHUNK;
+    // The cap, plus what each connection may always hold: a chunk each way
+    // (the floor) and a partly filled chunk each way.
+    let bound = limit + 4 * n * buf::CHUNK;
     let mut peak = 0;
     let until = sim.now + Duration::from_secs(10);
     sim.run(Duration::from_secs(11), |sim| {
