@@ -242,13 +242,21 @@ impl AsyncRead for H2Stream {
             let h = &this.hdr[..this.hdr_len];
             if h.len() > 6 && h[h.len() - 1] & 0x80 == 0 {
                 let msg_len = u32::from_be_bytes([h[1], h[2], h[3], h[4]]) as usize;
+                let bad = || Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, "gun: bad message")));
+                // The message length is 32 bits, so a longer varint is malformed
+                // (and would overflow the shifts below).
+                if h.len() - 6 > 5 {
+                    return bad();
+                }
                 let mut len = 0usize;
                 for (i, b) in h[6..].iter().enumerate() {
                     len |= ((b & 0x7f) as usize) << (7 * i);
                 }
-                let used = 1 + (h.len() - 6) + len;
-                if h[5] != 0x0a || msg_len < used {
-                    return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, "gun: bad message")));
+                let Some(used) = len.checked_add(1 + (h.len() - 6)).filter(|u| *u <= msg_len) else {
+                    return bad();
+                };
+                if h[5] != 0x0a {
+                    return bad();
                 }
                 this.msg_left = len;
                 this.msg_skip = msg_len - used;

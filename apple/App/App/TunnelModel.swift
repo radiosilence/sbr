@@ -11,8 +11,18 @@ final class TunnelModel: ObservableObject {
     @Published private(set) var downloadRate: Double = 0
     @Published private(set) var testing: Set<String> = []
     @Published var errorMessage: String?
+    /// "Block traffic outside the tunnel": `includeAllNetworks`. Applied the
+    /// next time the tunnel connects.
+    @Published var strict = UserDefaults.standard.bool(forKey: "strict") {
+        didSet {
+            UserDefaults.standard.set(strict, forKey: "strict")
+            Task { try? await self.install() }
+        }
+    }
 
     private var manager: NETunnelProviderManager?
+    /// The active profile's config, carried in the VPN configuration.
+    private var config: String?
     private var statusObserver: NSObjectProtocol?
 
     private var session: NETunnelProviderSession? { manager?.connection as? NETunnelProviderSession }
@@ -52,11 +62,17 @@ final class TunnelModel: ObservableObject {
         }
     }
 
-    /// The active profile changed on disk: hot-reload a running tunnel.
-    func reload() async {
-        guard isConnected, let session else { return }
+    /// The active profile changed: save it into the VPN configuration (so a
+    /// restart uses it) and hot-reload a running tunnel.
+    func apply(config: String?) async {
+        guard config != self.config else { return }
+        self.config = config
+        guard manager != nil, config != nil else { return }
         do {
-            groups = try await session.send(.reload).groups ?? groups
+            try await install()
+            if isConnected, let session {
+                groups = try await session.send(.reload(config: config)).groups ?? groups
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -123,8 +139,9 @@ final class TunnelModel: ObservableObject {
         let proto = (m.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = AppConfig.tunnelBundleIdentifier
         proto.serverAddress = "sbr"
-        // The tunnel reads config.json from the App Group container.
-        proto.providerConfiguration = [SbrProviderKey.appGroup: AppConfig.appGroup]
+        guard let config else { throw SbrError("no profile selected") }
+        proto.providerConfiguration = [SbrProviderKey.config: config]
+        Sbr.applyLeakProtection(to: proto, enabled: strict)
         m.protocolConfiguration = proto
         m.localizedDescription = "sbr"
         m.isEnabled = true

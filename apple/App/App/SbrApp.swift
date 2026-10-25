@@ -19,6 +19,10 @@ struct SbrApp: App {
                 .task {
                     profiles.load()
                     await tunnel.load()
+                    await tunnel.apply(config: profiles.activeText)
+                }
+                .onChange(of: profiles.activeText) { _, text in
+                    Task { await tunnel.apply(config: text) }
                 }
                 .onOpenURL { url in
                     guard let link = ProfileLink(url) else { return }
@@ -26,17 +30,14 @@ struct SbrApp: App {
                 }
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else { return }
-                    Task {
-                        if await profiles.refreshStale() { await tunnel.reload() }
-                    }
+                    Task { _ = await profiles.refreshStale() }
                 }
         }
     }
 
     private func importLink(_ link: ProfileLink) async {
         do {
-            let p = try await profiles.add(remote: link.url, name: link.name)
-            if profiles.activeID == p.id { await tunnel.reload() }
+            try await profiles.add(remote: link.url, name: link.name)
         } catch {
             tunnel.errorMessage = error.localizedDescription
         }
@@ -45,6 +46,5 @@ struct SbrApp: App {
 
 /// Per-target values injected through Info.plist by project.yml.
 enum AppConfig {
-    static let appGroup = Bundle.main.object(forInfoDictionaryKey: "SbrAppGroup") as? String ?? ""
     static let tunnelBundleIdentifier = Bundle.main.object(forInfoDictionaryKey: "SbrTunnelBundleIdentifier") as? String ?? ""
 }

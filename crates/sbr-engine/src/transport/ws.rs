@@ -430,7 +430,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsStream<S> {
                     };
                     this.rpos += len;
                     match opcode {
-                        0x9 => this.frame(0xa, &payload[..len]),
+                        // Answer only the latest ping while a reply is still
+                        // unsent (RFC 6455 5.5.3), so a peer that pings and
+                        // never reads cannot grow the write buffer.
+                        0x9 if this.wpos == this.wbuf.len() => this.frame(0xa, &payload[..len]),
                         0x8 => {
                             // Echo the close (RFC 6455 5.5.1) and report EOF.
                             let code = if len >= 2 { &payload[..2] } else { &[0x03, 0xe8][..] };

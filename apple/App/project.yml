@@ -1,4 +1,4 @@
-# XcodeGen spec: `xcodegen generate` (see README.md). SBR_TEAM_ID overrides the team.
+# XcodeGen spec: `xcodegen generate` (see README.md).
 #
 # Targets
 #   Sbr                        iOS 17+, macOS 14+, tvOS 17+ app (SwiftUI)
@@ -13,7 +13,7 @@ options:
 
 settings:
   base:
-    DEVELOPMENT_TEAM: ${SBR_TEAM_ID:-2256Q92VF2}
+    DEVELOPMENT_TEAM: 2256Q92VF2
     # Everything else derives from this.
     SBR_BUNDLE_ID: cc.blit.sbr
     # App Groups: "group." IDs on iOS/tvOS, team-prefixed on macOS (which also
@@ -58,7 +58,6 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: cc.blit.sbr.profile
             CFBundleURLSchemes: [sing-box, sbr]
-        SbrAppGroup: $(SBR_APP_GROUP)
         SbrTunnelBundleIdentifier: $(SBR_BUNDLE_ID).tunnel
     settings:
       base:
@@ -67,6 +66,12 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: App/App.entitlements
         "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": App/App-macOS.entitlements
+      configs:
+        # App Store builds sign with the API-provisioned distribution profile.
+        Release:
+          "CODE_SIGN_STYLE[sdk=iphoneos*]": Manual
+          "CODE_SIGN_IDENTITY[sdk=iphoneos*]": Apple Distribution
+          "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": sbr App Store
 
   SbrTunnel:
     type: app-extension
@@ -95,6 +100,11 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID).tunnel
         CODE_SIGN_ENTITLEMENTS: Tunnel/Tunnel.entitlements
         "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": Tunnel/Tunnel-macOS.entitlements
+      configs:
+        Release:
+          "CODE_SIGN_STYLE[sdk=iphoneos*]": Manual
+          "CODE_SIGN_IDENTITY[sdk=iphoneos*]": Apple Distribution
+          "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": sbr tunnel App Store
 
   SbrMac:
     type: application

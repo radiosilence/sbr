@@ -125,14 +125,9 @@ impl Device {
     /// and UDP both tolerate.
     pub fn try_send(&self, buf: &mut [u8], len: usize) -> io::Result<()> {
         let start = self.frame(buf, len);
+        let frame = &buf[start..HEADROOM + len];
         // SAFETY: writing from a valid buffer range.
-        let n = unsafe {
-            libc::write(
-                self.fd.as_raw_fd(),
-                buf[start..].as_ptr().cast(),
-                HEADROOM + len - start,
-            )
-        };
+        let n = unsafe { libc::write(self.fd.as_raw_fd(), frame.as_ptr().cast(), frame.len()) };
         if n < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
     }
 
@@ -627,7 +622,8 @@ mod platform {
     /// One `recvmsg_x` for up to `batch.target` packets.
     #[cfg(not(target_os = "tvos"))]
     pub fn recv_batch_x(fd: RawFd, batch: &mut super::RecvBatch) -> io::Result<usize> {
-        let n = batch.target;
+        // The header arrays below hold 64; never let the kernel write past them.
+        let n = batch.target.min(64);
         let mut iov: [libc::iovec; 64] = unsafe { std::mem::zeroed() };
         let mut hdrs: [MsgHdrX; 64] = unsafe { std::mem::zeroed() };
         for ((iov, hdr), buf) in iov.iter_mut().zip(hdrs.iter_mut()).zip(batch.bufs.iter_mut()).take(n) {

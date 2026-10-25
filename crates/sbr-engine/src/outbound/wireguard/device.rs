@@ -621,6 +621,9 @@ impl Io {
             data[1..4].fill(0);
         }
         let mut handshake_response = false;
+        // Cookie replies carry no proof of the peer's identity (anyone who
+        // knows its public key can forge one), so they never move the endpoint.
+        let mut roam = true;
         let idx = match Tunn::parse_incoming_packet(data) {
             Ok(Packet::HandshakeInit(p)) => hint
                 .or_else(|| {
@@ -636,7 +639,10 @@ impl Io {
                 handshake_response = true;
                 Some((p.receiver_idx >> 8) as usize)
             }
-            Ok(Packet::PacketCookieReply(p)) => Some((p.receiver_idx >> 8) as usize),
+            Ok(Packet::PacketCookieReply(p)) => {
+                roam = false;
+                Some((p.receiver_idx >> 8) as usize)
+            }
             Ok(Packet::PacketData(p)) => Some((p.receiver_idx >> 8) as usize),
             Err(_) => None,
         };
@@ -650,6 +656,8 @@ impl Io {
         let delivered = match peer.tunn.decapsulate(from.map(|a| a.ip()), data, &mut out) {
             TunnResult::WriteToNetwork(pkt) => {
                 let n = pkt.len();
+                // Our own cookie reply (rate limiting) answered an unverified initiation.
+                roam &= pkt.first() != Some(&3);
                 send_wire(transport, peer, idx, &mut out[..n]).await;
                 // A completed handshake releases packets queued behind it.
                 while let TunnResult::WriteToNetwork(pkt) = peer.tunn.decapsulate(None, &[], &mut self.scratch) {
@@ -672,7 +680,7 @@ impl Io {
             self.shared.handshake.send_replace(Some((Instant::now(), rtt)));
         }
         // Authenticated: follow the peer if it roamed.
-        if from.is_some() && peer.endpoint != from {
+        if roam && from.is_some() && peer.endpoint != from {
             peer.endpoint = from;
         }
         match delivered {

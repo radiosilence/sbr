@@ -1,6 +1,8 @@
 //! Shared helpers for the e2e and interop tests.
 #![allow(dead_code)]
 
+pub mod censor;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};

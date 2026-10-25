@@ -21,6 +21,9 @@ use tokio::sync::watch;
 
 /// Max wire length of a name.
 const NAME_MAX: usize = 255;
+/// Answers with more records than this are not cached. Real answers carry a
+/// handful; round-robin pools a few dozen.
+const MAX_CACHED_RECORDS: usize = 64;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Key {
@@ -152,7 +155,11 @@ impl Cache {
     }
 
     pub fn put(&self, k: Key, msg: Arc<Message>, ttl: u32, now: Instant) {
-        if ttl == 0 {
+        // The LRU is bounded in entries, not bytes, and a decoded record is
+        // several times its wire size: an attacker-controlled zone answering
+        // with thousands of records per name would make each entry huge.
+        let records = msg.answers.len() + msg.authorities.len() + msg.additionals.len();
+        if ttl == 0 || records > MAX_CACHED_RECORDS {
             return;
         }
         let h = self.hash(&k);

@@ -298,6 +298,24 @@ fn api_config(echo_port: u16, extra_outbounds: &str, ui: &str) -> String {
 }
 
 #[tokio::test]
+async fn clash_api_without_secret_refuses_cross_origin() {
+    let i = start(
+        r#"{"outbounds":[{"type":"direct","tag":"direct"}],
+            "experimental":{"clash_api":{"external_controller":"127.0.0.1:0"}}}"#,
+        Settings::default(),
+    )
+    .await;
+    let api = i.clash_api.unwrap();
+    let (st, _, _) = http(api, "GET", "/version", &[], "").await;
+    assert_eq!(st, 200);
+    let own = format!("http://{api}");
+    let (st, _, _) = http(api, "GET", "/version", &[("Origin", &own)], "").await;
+    assert_eq!(st, 200);
+    let (st, _, _) = http(api, "GET", "/connections", &[("Origin", "https://evil.example")], "").await;
+    assert_eq!(st, 403);
+}
+
+#[tokio::test]
 async fn clash_api_endpoints() {
     let target = echo().await;
     let i = start(&api_config(target.port(), "", ""), Settings::default()).await;

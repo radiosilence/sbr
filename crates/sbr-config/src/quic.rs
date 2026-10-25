@@ -21,6 +21,10 @@ pub struct QuicOptions {
     pub max_concurrent_streams: u32,
     pub initial_packet_size: u16,
     pub disable_path_mtu_discovery: bool,
+    /// sbr extension, named after quic-go's
+    /// `QUIC_GO_DISABLE_CLIENTHELLO_SCRAMBLING`: send the ClientHello in
+    /// the Initial packets unsplit.
+    pub disable_client_hello_scrambling: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +90,7 @@ fn parse_quic(o: &mut Obj) -> Result<QuicOptions> {
         max_concurrent_streams: o.get("max_concurrent_streams")?,
         initial_packet_size: o.get("initial_packet_size")?,
         disable_path_mtu_discovery: o.bool("disable_path_mtu_discovery")?,
+        disable_client_hello_scrambling: o.bool("disable_client_hello_scrambling")?,
     };
     if q.initial_packet_size != 0 && q.initial_packet_size < 1200 {
         return Err(Error::at(
@@ -267,7 +272,8 @@ pub(crate) fn parse_hysteria2(o: &mut Obj, diag: &mut Diag) -> Result<Hysteria2O
 /// RFC 4122 text form (`8-4-4-4-12`, any case).
 fn parse_uuid(s: &str, path: &str) -> Result<[u8; 16]> {
     let hex: String = s.chars().filter(|c| *c != '-').collect();
-    let bad = || Error::at(path, format!("invalid uuid {s:?}"));
+    // The UUID is the credential: never echo it into errors (they reach logs and the UI).
+    let bad = || Error::at(path, "invalid uuid");
     if hex.len() != 32 || s.len() != 36 {
         return Err(bad());
     }
