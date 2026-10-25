@@ -29,7 +29,14 @@ Read this before adding a protocol, inbound or service.
 
 1. Config: add a variant to `OutboundKind` and an arm in `parse_outbound` (`sbr-config/src/lib.rs`). Put the struct and parser in their own file if they're more than a few fields. Reuse `parse_dial`, `parse_server`, `parse_tls`, `parse_transport`, `parse_multiplex`.
 2. Engine: `crates/sbr-engine/src/outbound/<proto>.rs` implementing `sbr_core::Outbound` (`connect`, and `connect_udp` if the protocol carries UDP). Register it in `Builder::build`.
-3. Tests: an e2e test against a real server implementation (an in-process server written for the test, or the protocol's reference crate). Byte-exactness matters more than coverage numbers. At least one test must push ≥1 MB through and compare.
+3. Tests: an e2e test against a real server implementation (an in-process server written for the test, or the protocol's reference crate). Byte-exactness matters more than coverage numbers. At least one test must push ≥1 MB through and compare. For a path users depend on, add a `soak_*` test (`tests/common/soak.rs`): 128 MiB with random write sizes and reader stalls, which is what exposes writers that lose bytes or strand them across `Pending`.
+
+## Writing `AsyncWrite` wrappers
+
+Two mistakes have each caused bulk transfers to hang:
+
+- Reporting more than was accepted. After `Pending`, a caller may retry with a *different* (`tokio::io::copy`: longer) buffer. A writer that sealed or framed the first buffer must report that length, not the retry's.
+- Leaving bytes buffered with nobody to flush them. tokio-rustls (and REALITY's record layer) returns `Ok` while sealed records still wait for the socket; they go out on the next write or `poll_flush`. Any code that writes and then waits for a reply must flush, and a wrapper's `poll_flush` must reach the stream underneath.
 
 ## Performance rules
 

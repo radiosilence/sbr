@@ -151,8 +151,23 @@ impl Hysteria2 {
             .body(())
             .map_err(|e| fail(&e))?;
         let mut stream = send.send_request(req).await.map_err(|e| fail(&e))?;
-        stream.finish().await.map_err(|e| fail(&e))?;
-        let resp = stream.recv_response().await.map_err(|e| fail(&e))?;
+        // A server rejecting us answers and closes at once, and its close can
+        // reset our side of the stream before `finish` completes: the request
+        // is already out, so the response (or how the server ended) decides.
+        let _ = stream.finish().await;
+        let resp = stream.recv_response().await.map_err(|e| {
+            // Torn down cleanly before a 233 arrived: the server said no.
+            let clean = e.is_h3_no_error()
+                || matches!(&e, h3::error::StreamError::RemoteTerminate { code, .. } if *code == h3::error::Code::H3_NO_ERROR);
+            if clean {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("hysteria2: authentication failed, server closed the connection ({e})"),
+                )
+            } else {
+                fail(&e)
+            }
+        })?;
         drop(stream);
         if resp.status().as_u16() != STATUS_AUTH_OK {
             conn.close(0u32.into(), b"");
