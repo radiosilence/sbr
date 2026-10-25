@@ -65,6 +65,7 @@ const MOBILE_WINDOW_CAP: u64 = if cfg!(any(target_os = "ios", target_os = "tvos"
 
 pub(crate) fn transport(q: &QuicOptions, d: Tuning, cc: Arc<dyn ControllerFactory + Send + Sync>) -> TransportConfig {
     let mut t = TransportConfig::default();
+    #[allow(clippy::unnecessary_min_or_max, reason = "the cap is u64::MAX off iOS and tvOS")]
     let conn = q
         .connection_receive_window
         .unwrap_or(d.conn_window)
