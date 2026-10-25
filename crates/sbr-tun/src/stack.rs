@@ -112,7 +112,7 @@ impl Stack {
         ];
         for (slot, pair) in fams.iter_mut().zip(pairs) {
             let Some((addr, next)) = pair else { continue };
-            let listener = TcpListener::bind(SocketAddr::new(addr, 0)).await?;
+            let listener = listen(SocketAddr::new(addr, 0), device.name())?;
             let port = listener.local_addr()?.port();
             let fam = Arc::new(Family {
                 addr,
@@ -184,6 +184,100 @@ impl Drop for Stack {
     fn drop(&mut self) {
         self.tasks.abort_all();
     }
+}
+
+/// The NAT listener on the interface address. Its replies go to the NAT
+/// source, which only exists inside the TUN. On Apple platforms a Network
+/// Extension's own sockets are scoped to the physical interface and never
+/// enter its tunnel, so without `IP_BOUND_IF` the kernel's SYN-ACKs left by
+/// the cellular or Wi-Fi interface and no TCP connection completed.
+fn listen(addr: SocketAddr, interface: &str) -> io::Result<TcpListener> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::fd::FromRawFd;
+        let index = std::ffi::CString::new(interface)
+            // SAFETY: a valid NUL-terminated string.
+            .map(|n| unsafe { libc::if_nametoindex(n.as_ptr()) })
+            .unwrap_or(0);
+        if index == 0 {
+            return Err(io::Error::other(format!("tun: no interface index for {interface:?}")));
+        }
+        let domain = if addr.is_ipv4() { libc::AF_INET } else { libc::AF_INET6 };
+        // SAFETY: plain socket creation; the fd is owned by `std` below.
+        let fd = unsafe { libc::socket(domain, libc::SOCK_STREAM, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a fresh socket that nothing else owns.
+        let std_listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+        let (level, name) = if addr.is_ipv4() {
+            (libc::IPPROTO_IP, libc::IP_BOUND_IF)
+        } else {
+            (libc::IPPROTO_IPV6, libc::IPV6_BOUND_IF)
+        };
+        let index = index as libc::c_int;
+        let int_len = size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: setsockopt with a c_int option value.
+        if unsafe { libc::setsockopt(fd, level, name, (&raw const index).cast(), int_len) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let (storage, len) = sockaddr(addr);
+        // SAFETY: `storage` holds a sockaddr of `len` bytes for this family.
+        if unsafe { libc::bind(fd, (&raw const storage).cast(), len) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: a bound stream socket.
+        if unsafe { libc::listen(fd, 1024) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        std_listener.set_nonblocking(true)?;
+        TcpListener::from_std(std_listener)
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let _ = interface;
+        let l = std::net::TcpListener::bind(addr)?;
+        l.set_nonblocking(true)?;
+        TcpListener::from_std(l)
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn sockaddr(addr: SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
+    // SAFETY: all-zero is a valid sockaddr_storage.
+    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let len = match addr {
+        SocketAddr::V4(a) => {
+            let sin = libc::sockaddr_in {
+                sin_len: size_of::<libc::sockaddr_in>() as u8,
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: a.port().to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from_ne_bytes(a.ip().octets()),
+                },
+                sin_zero: [0; 8],
+            };
+            // SAFETY: sockaddr_in fits in sockaddr_storage.
+            unsafe { std::ptr::write((&raw mut storage).cast(), sin) };
+            size_of::<libc::sockaddr_in>()
+        }
+        SocketAddr::V6(a) => {
+            let sin6 = libc::sockaddr_in6 {
+                sin6_len: size_of::<libc::sockaddr_in6>() as u8,
+                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                sin6_port: a.port().to_be(),
+                sin6_flowinfo: a.flowinfo(),
+                sin6_addr: libc::in6_addr {
+                    s6_addr: a.ip().octets(),
+                },
+                sin6_scope_id: a.scope_id(),
+            };
+            // SAFETY: sockaddr_in6 fits in sockaddr_storage.
+            unsafe { std::ptr::write((&raw mut storage).cast(), sin6) };
+            size_of::<libc::sockaddr_in6>()
+        }
+    };
+    (storage, len as libc::socklen_t)
 }
 
 /// Send `buf[HEADROOM..]`, treating a full interface queue as a drop.
