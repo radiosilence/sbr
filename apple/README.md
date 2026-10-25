@@ -192,6 +192,11 @@ in flight or a back-off on an error path:
 - `max_connections` defaults to 512 on iOS/tvOS: at most 16 MB of relay buffers. Past
   the cap, new TCP connections are refused cleanly (SOCKS/HTTP get an error, and TUN will
   get a RST) and new UDP flows are dropped. The same number caps UDP NAT sessions.
+- The TUN's TCP: under `stack: system` the kernel holds those buffers, outside the
+  extension's footprint. Under `stack: gvisor` (userspace TCP) they are the extension's:
+  128 KiB each way per connection at most, nothing for idle connections, and 8 MiB for all
+  connections together (plus at most four 4 KiB chunks per connection), so 512 busy
+  connections stay under 16 MiB. `TcpConfig` in `sbr-tun` holds the limits.
 - `sbr_runtime_stats` reports `phys_footprint` (`TASK_VM_INFO`, the figure jetsam uses)
   and `os_proc_available_memory()` (headroom before the kill) so the app can show them.
 - **Reported:** each UDP session's reader allocates a 64 KiB receive buffer

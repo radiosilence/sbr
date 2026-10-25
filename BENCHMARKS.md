@@ -25,8 +25,37 @@ Takeaways:
   generator and sink.
 
 Reproduce: `cargo build --release -p sbr-engine --examples`, then
-`throughput 4 5 <sb>`, `tun_bench 4 5 <sb>` (root), `proxy_bench <sb> 4 5`,
+`throughput 4 5 <sb>`, `tun_bench 4 5 <sb>` (root; both TCP stacks, each direction), `proxy_bench <sb> 4 5`,
 `quic_throughput <sb> 4 5`, `wg_throughput <sb> 4 5`.
+
+## TUN: system stack vs userspace TCP
+
+Run 2026-10-25 in an OrbStack Linux VM (8 vCPUs) on an Apple M1 Pro. The host was
+shared with other builds (load average about 7), so absolute numbers are loose; the
+two stacks ran back to back in each round, which is what the comparison rests on.
+`tun_bench 4 5`: four streams for 5 s from apps through the TUN, the engine and
+`direct` to a loopback server, three rounds, min–max. "CPU" is whole-machine
+CPU-seconds per GB from `/proc/stat`, which also counts the kernel's softirq work
+that the system stack's second trip through the kernel TCP costs.
+
+| MTU | path | system Gbit/s | system CPU s/GB | userspace Gbit/s | userspace CPU s/GB |
+|---|---|---|---|---|---|
+| 9000 | up | 16.0–16.6 | 0.65–0.68 | **22.4–22.8** | **0.47–0.48** |
+| 9000 | down | 15.2–15.7 | 0.67–0.70 | **19.1–19.5** | **0.53–0.55** |
+| 1280 | up | 6.8–7.0 | 1.35–1.40 | **11.9–12.3** | **0.75–0.78** |
+| 1280 | down | 6.6–6.7 | 1.32–1.34 | **9.8–10.2** | **0.95–1.01** |
+
+- The userspace stack is ahead everywhere, by the most at MTU 1280 (the user's
+  profile), where per-packet costs dominate: 1.5–1.75× the throughput at about 40%
+  less CPU per byte. The system stack sends every segment through the kernel twice
+  (app socket to TUN, then TUN to the NAT listener), the userspace stack once.
+- Both rates are far above 1 Gbit/s, so a phone's radio, not the stack, is the
+  limit. What matters there is CPU per byte, and that favours the userspace stack.
+- Not measured: a real Darwin utun. Creating one needs root (or a Network
+  Extension), so macOS and iOS numbers wait for a device run. The Darwin batch read
+  path (`recvmsg_x`) is exercised by `sbr-tun/tests/user_stack.rs` over a socketpair.
+
+Reproduce (root, Linux): `tun_bench 4 5`, and `SBR_BENCH_MTU=1280 tun_bench 4 5`.
 
 ## Against the servers jaritanet runs (macOS)
 
