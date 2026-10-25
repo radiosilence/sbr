@@ -154,6 +154,62 @@ final class TunnelModel: ObservableObject {
         }
     }
 
+    /// A connection with its rate over the last poll and when bytes last moved.
+    struct LiveConnection: Identifiable, Hashable {
+        var connection: SbrConnection
+        var uploadRate: Double = 0
+        var downloadRate: Double = 0
+        var lastActive: Date
+        var id: String { connection.id }
+    }
+
+    @Published private(set) var connections: [LiveConnection] = []
+    @Published private(set) var connectionsTotal = 0
+
+    /// Poll the tunnel's connections once a second while the connections
+    /// tab is visible. Rows sort by when bytes last moved, newest first.
+    func pollConnections() async {
+        var previous: [String: LiveConnection] = [:]
+        var lastAt = Date()
+        while !Task.isCancelled {
+            if isConnected, let session, let snapshot = try? await session.send(.connections).connections {
+                let now = Date()
+                let dt = max(now.timeIntervalSince(lastAt), 0.001)
+                lastAt = now
+                let rows = snapshot.connections.map { c in
+                    guard let p = previous[c.id] else {
+                        return LiveConnection(connection: c, lastActive: c.startDate)
+                    }
+                    let up = c.upload &- p.connection.upload, down = c.download &- p.connection.download
+                    return LiveConnection(
+                        connection: c,
+                        uploadRate: Double(up) / dt,
+                        downloadRate: Double(down) / dt,
+                        lastActive: up + down > 0 ? now : p.lastActive
+                    )
+                }
+                previous = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+                connections = rows.sorted { ($0.lastActive, $0.connection.start) > ($1.lastActive, $1.connection.start) }
+                connectionsTotal = snapshot.total
+            } else if !isConnected {
+                previous = [:]
+                connections = []
+                connectionsTotal = 0
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    }
+
+    func closeConnection(id: String) async {
+        guard let session else { return }
+        connections.removeAll { $0.id == id }
+        do {
+            _ = try await session.send(.closeConnection(id: id))
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     /// The profile as the tunnel runs it: with `verbose`, its log level is
     /// raised to debug.
     private var installedConfig: String? {

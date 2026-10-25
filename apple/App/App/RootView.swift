@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum Tab: String, CaseIterable {
-    case tunnel, profiles, logs
+    case tunnel, connections, profiles, logs
 }
 
 /// kōan's phone shell: content on the flat ground, and a flat tab row with
@@ -16,6 +16,7 @@ struct RootView: View {
             Group {
                 switch tab {
                 case .tunnel: TunnelView()
+                case .connections: ConnectionsView()
                 case .profiles: ProfilesView()
                 case .logs: LogsView()
                 }

@@ -65,6 +65,21 @@ runs a latency test of that group and of any urltest groups inside it
 The header shows where traffic currently goes: the leaf of the outermost
 selector and its latency.
 
+## Connections
+
+The connections tab is the native counterpart of a Clash dashboard's
+connections page. While it is on screen the app polls the tunnel once a second
+(`SbrRequest.connections`, which calls `sbr_connections`) and derives each
+connection's rate from the change since the previous poll. Rows sort by when
+bytes last moved, so idle keep-alives sink below live transfers. The snapshot
+holds at most the 200 newest connections, which keeps the message small inside
+the extension's ~50 MB; the header says when more are open than are listed.
+
+Tap a row for its destination, sniffed domain and protocol, rule and route.
+Swipe it, long-press it or use the button in its details to close it
+(`SbrRequest.closeConnection`, which calls `sbr_close_connection`). The filter
+matches every word against the host, address, route, rule, inbound and network.
+
 ## Logs
 
 The tunnel logs to the unified log under its bundle ID, with categories
