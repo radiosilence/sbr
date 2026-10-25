@@ -56,8 +56,11 @@ is the actual target:
    servers next to sing-box. Both build from Go source via proxy.golang.org.
    Then try the real server, with the user's consent and their profile.
 4. **Speed** (the user asked for "faster everywhere"):
-   - WireGuard upload: parallel encrypt workers (`outbound/wireguard/device.rs`;
-     boringtun encrypts into caller buffers, so shard per peer or per batch).
+   - WireGuard upload on Darwin: done (connected socket plus an egress thread;
+     see `BENCHMARKS.md`). Linux was not re-measured after that change. There
+     the device task does GSO sends, so the egress thread matters less and
+     crypto matters more. Parallel AEAD would need boringtun to expose its
+     session keys.
    - hysteria2: profile first; quinn GSO is already on. Check Brutal window,
      send buffer and pacing (`outbound/quic/brutal.rs`).
    - Linux-only: `splice(2)` for raw TCP↔TCP relay, and TUN offload

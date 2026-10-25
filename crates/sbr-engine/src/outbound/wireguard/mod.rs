@@ -66,7 +66,7 @@ impl WireGuard {
         if cfg.workers > 1 {
             debug!(
                 tag,
-                "wireguard: `workers` is a hint; sbr runs one device task per endpoint"
+                "wireguard: `workers` is ignored; sbr runs one device task and at most one egress thread per endpoint"
             );
         }
         Ok(Self {
@@ -114,6 +114,7 @@ impl WireGuard {
             });
         }
 
+        let mut rebind = None;
         let transport = match &self.upstream {
             Upstream::System(opts, dns) => {
                 for (peer, p) in peers.iter_mut().zip(&cfg.peers) {
@@ -126,7 +127,25 @@ impl WireGuard {
                     }
                 }
                 let v6 = peers.iter().any(|p| p.endpoint.is_some_and(|e| e.is_ipv6()));
-                Transport::Socket(device::UdpIo::new(bind(v6, cfg.listen_port, opts)?, v6)?)
+                // A client of one server: nobody else may send to us, so the
+                // socket can be connected. A listening endpoint must accept
+                // any source.
+                let only = match &peers[..] {
+                    [p] if cfg.listen_port == 0 => p.endpoint,
+                    _ => None,
+                };
+                if cfg.listen_port == 0 {
+                    // A new path wants a new socket: a connected one keeps the
+                    // old source address. The peer follows us to the new port
+                    // on our next authenticated packet.
+                    let opts = opts.clone();
+                    rebind = Some(Box::new(move || device::UdpIo::new(bind(v6, 0, &opts)?, v6, only)) as _);
+                }
+                Transport::Socket(Arc::new(device::UdpIo::new(
+                    bind(v6, cfg.listen_port, opts)?,
+                    v6,
+                    only,
+                )?))
             }
             Upstream::Detour(out) => {
                 let (tx, rx) = mpsc::channel(1024);
@@ -161,6 +180,7 @@ impl WireGuard {
             transport,
             private,
             public,
+            rebind,
         };
         let task = tokio::spawn(dev.run());
         Ok(Running { shared, task })
@@ -228,6 +248,13 @@ impl Outbound for WireGuard {
     /// The round trip of the last handshake (boringtun times it): a real
     /// measurement to the peer at the cost of one handshake. A recent one is
     /// reused, so probing an active endpoint sends nothing.
+    fn network_changed(&self) {
+        if let Some(r) = self.running.get() {
+            r.shared.rebind.store(true, Ordering::Relaxed);
+            r.shared.kick.notify_one();
+        }
+    }
+
     fn probe_rtt(&self) -> Option<BoxFuture<'_, io::Result<Duration>>> {
         Some(Box::pin(async move {
             let shared = self.running().await?;
