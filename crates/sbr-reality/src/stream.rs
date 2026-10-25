@@ -16,9 +16,10 @@ use crate::record::{
 const HS_NEW_SESSION_TICKET: u8 = 4;
 const HS_KEY_UPDATE: u8 = 24;
 
-/// Write at most this much ciphertext per underlying write: two full records
-/// halve the syscalls for large writes without holding much memory.
-const MAX_WRITE_BATCH: usize = 2 * MAX_WRITE_RECORD;
+/// Write at most this much ciphertext per underlying write: a 64 KiB relay
+/// write goes out in one syscall. The buffer only grows this large when the
+/// caller writes this much at once (iOS relays 16 KiB).
+const MAX_WRITE_BATCH: usize = 4 * MAX_WRITE_RECORD;
 
 /// Rotate AES-GCM write keys well before the RFC 8446 §5.5 limit (2^24.5 records).
 const REKEY_AFTER_RECORDS: u64 = 1 << 23;
@@ -42,6 +43,11 @@ pub struct TlsStream<S> {
     /// KeyUpdate to send before the next application data: Some(request_update).
     key_update: Option<bool>,
     read_closed: bool,
+    /// An error met while handing out further buffered records, reported
+    /// on the next read.
+    read_error: Option<io::Error>,
+    /// Decrypt one record per read (XTLS Vision may leave TLS after any record).
+    one_record: bool,
     write_closed: bool,
     alpn: Option<Vec<u8>>,
     group: u16,
@@ -72,6 +78,8 @@ impl<S> TlsStream<S> {
             wpos: 0,
             key_update: None,
             read_closed: false,
+            read_error: None,
+            one_record: false,
             write_closed: false,
             alpn,
             group,
@@ -112,6 +120,13 @@ impl<S> TlsStream<S> {
         self.plaintext = 0..0;
         out.extend_from_slice(&self.rb.take_unread());
         out
+    }
+
+    /// Decrypt at most one record per read, so that [`TlsStream::take_buffered`]
+    /// never holds decrypted bytes past the record just read. Off by default:
+    /// a read then drains every complete record already buffered.
+    pub fn limit_to_records(&mut self, on: bool) {
+        self.one_record = on;
     }
 
     /// Queues a KeyUpdate (update_requested) sent before the next write or flush:
@@ -213,7 +228,27 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<S> {
                 let start = this.plaintext.start;
                 buf.put_slice(this.rb.slice(start..start + n));
                 this.plaintext.start += n;
+                // Records already in the buffer go out in the same read: one
+                // call per record would multiply the caller's writes.
+                while !this.one_record && this.plaintext.is_empty() && buf.remaining() > 0 && !this.read_closed {
+                    match this.process_record() {
+                        Ok(true) => {
+                            let n = this.plaintext.len().min(buf.remaining());
+                            let start = this.plaintext.start;
+                            buf.put_slice(this.rb.slice(start..start + n));
+                            this.plaintext.start += n;
+                        }
+                        Ok(false) => break,
+                        Err(e) => {
+                            this.read_error = Some(e);
+                            break;
+                        }
+                    }
+                }
                 return Poll::Ready(Ok(()));
+            }
+            if let Some(e) = this.read_error.take() {
+                return Poll::Ready(Err(e));
             }
             if this.read_closed {
                 return Poll::Ready(Ok(()));

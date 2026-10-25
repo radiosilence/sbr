@@ -33,15 +33,16 @@ impl TlsConn {
     /// Make sure the TLS layer never consumes bytes past the record it is
     /// working on (Vision may switch to raw after any record).
     pub fn limit_reads(&mut self) {
-        // sbr-reality's record layer already decrypts one record at a time.
-        if let Self::Rustls(t) = self {
-            t.get_mut().0.limit_to_records();
+        match self {
+            Self::Rustls(t) => t.get_mut().0.limit_to_records(),
+            Self::Browser(b) => b.limit_to_records(true),
         }
     }
 
     pub fn unlimit_reads(&mut self) {
-        if let Self::Rustls(t) = self {
-            t.get_mut().0.unlimit();
+        match self {
+            Self::Rustls(t) => t.get_mut().0.unlimit(),
+            Self::Browser(b) => b.limit_to_records(false),
         }
     }
 
