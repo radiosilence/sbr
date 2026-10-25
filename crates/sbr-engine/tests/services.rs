@@ -633,11 +633,14 @@ async fn urltest_picks_fastest_and_sleeps_when_idle() {
     let g = i.engine.groups().urltest("auto").unwrap().clone();
     // The initial check runs in the background at start.
     let mut picked = String::new();
-    for _ in 0..50 {
+    for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let (_, v) = api_json(api, "GET", "/proxies/auto", "").await;
         picked = v["now"].as_str().unwrap_or("").to_owned();
-        if picked == "inner" && i.engine.groups().history("fast").is_some() {
+        // Members are probed one at a time and the first to answer is
+        // adopted, so the inner group settles on the fastest afterwards.
+        let (_, inner) = api_json(api, "GET", "/proxies/inner", "").await;
+        if picked == "inner" && inner["now"] == "fast" && i.engine.groups().history("fast").is_some() {
             break;
         }
     }

@@ -149,9 +149,18 @@ impl Apps {
             b[..4].copy_from_slice(&(libc::AF_INET as u32).to_be_bytes());
         }
         b.extend_from_slice(pkt);
-        // SAFETY: writing a valid buffer to a valid fd.
-        let n = unsafe { libc::write(self.fd.as_raw_fd(), b.as_ptr().cast(), b.len()) };
-        assert_eq!(n as usize, b.len(), "socketpair write");
+        // A full datagram socketpair reports EAGAIN on Linux (macOS blocks):
+        // wait for the stack to drain it, as a TUN's queue would.
+        loop {
+            // SAFETY: writing a valid buffer to a valid fd.
+            let n = unsafe { libc::write(self.fd.as_raw_fd(), b.as_ptr().cast(), b.len()) };
+            if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            assert_eq!(n as usize, b.len(), "socketpair write");
+            break;
+        }
     }
 
     /// Poll smoltcp, exchange packets, and wait briefly for more.
