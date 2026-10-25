@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hickory_proto::op::Message;
-use sbr_core::{BoxFuture, Destination, PacketConn};
+use sbr_core::{BoxFuture, Destination, Host, PacketConn};
 use tokio::task::AbortHandle;
 
 use super::stream::{Pending, StreamTransport, encode_with_id};
@@ -56,10 +56,19 @@ impl Udp {
         let pc: Arc<dyn PacketConn> = Arc::from(pc);
         let pending = Arc::new(Pending::default());
         let reader = {
-            let (pc, pending) = (pc.clone(), pending.clone());
+            let (pc, pending, server) = (pc.clone(), pending.clone(), dest.clone());
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 65535];
-                while let Ok((n, _)) = pc.recv_from(&mut buf).await {
+                while let Ok((n, from)) = pc.recv_from(&mut buf).await {
+                    // The socket is unconnected: drop datagrams that are not
+                    // from the server, so an off-path injector must also spoof
+                    // its address. A proxy may report the source by name, so
+                    // only addresses are compared.
+                    if let (Host::Ip(a), Host::Ip(b)) = (&from.host, &server.host)
+                        && (a.to_canonical() != b.to_canonical() || from.port != server.port)
+                    {
+                        continue;
+                    }
                     if let Ok(m) = msg::decode(&buf[..n]) {
                         pending.deliver(m);
                     }
