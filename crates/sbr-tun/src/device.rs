@@ -70,9 +70,10 @@ impl Device {
         loop {
             let mut guard = self.fd.readable().await?;
             let fd = self.fd.as_raw_fd();
-            #[cfg(target_vendor = "apple")]
+            #[cfg(all(target_vendor = "apple", not(target_os = "tvos")))]
             let r = platform::recv_batch_x(fd, batch);
-            #[cfg(not(target_vendor = "apple"))]
+            // tvOS has no syscall(2), so no recvmsg_x: drain with read(2) instead.
+            #[cfg(any(not(target_vendor = "apple"), target_os = "tvos"))]
             let r = recv_batch_read(fd, batch, off);
             match r {
                 Ok(0) => {
@@ -202,7 +203,7 @@ impl RecvBatch {
     }
 }
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(any(not(target_vendor = "apple"), target_os = "tvos"))]
 fn recv_batch_read(fd: RawFd, batch: &mut RecvBatch, off: usize) -> io::Result<usize> {
     let mut n = 0;
     while n < batch.target {
@@ -563,6 +564,7 @@ mod platform {
     }
 
     const UTUN_OPT_MAX_PENDING_PACKETS: libc::c_int = 16;
+    #[cfg(not(target_os = "tvos"))]
     const SYS_RECVMSG_X: libc::c_int = 480;
 
     /// Raise the control socket's receive buffer, then let utun queue as
@@ -613,6 +615,7 @@ mod platform {
     }
 
     /// `struct msghdr_x` (<sys/socket.h>, private).
+    #[cfg(not(target_os = "tvos"))]
     #[repr(C)]
     struct MsgHdrX {
         msg: libc::msghdr,
@@ -620,6 +623,7 @@ mod platform {
     }
 
     /// One `recvmsg_x` for up to `batch.target` packets.
+    #[cfg(not(target_os = "tvos"))]
     pub fn recv_batch_x(fd: RawFd, batch: &mut super::RecvBatch) -> io::Result<usize> {
         let n = batch.target;
         let mut iov: [libc::iovec; 64] = unsafe { std::mem::zeroed() };
