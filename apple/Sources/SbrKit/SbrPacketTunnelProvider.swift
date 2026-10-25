@@ -118,6 +118,8 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         logger.info("stopping (reason \(reason.rawValue))")
         heartbeat?.cancel()
         heartbeat = nil
+        memoryPressure?.cancel()
+        memoryPressure = nil
         if let url = Self.heartbeatURL { try? FileManager.default.removeItem(at: url) }
         // The system stopping us (rather than the user, sleep or an update)
         // reads as "plugin failed" in the app; keep the reason for next start.
@@ -409,16 +411,45 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         heartbeat?.cancel()
         heartbeat = Task { [weak self] in
             let clock = ISO8601DateFormatter()
+            var peak: UInt64 = 0
+            var tick = 0
             while !Task.isCancelled {
-                if let self, let url = Self.heartbeatURL, let core = self.core {
-                    let mb = Double(core.stats().memoryFootprint) / 1_048_576
-                    let beat = String(format: "%@ with %.1f MB in use", clock.string(from: Date()), mb)
-                    try? beat.write(to: url, atomically: true, encoding: .utf8)
-                    Self.saveRecent()
+                // Sampled every second, saved with the interval's peak every
+                // 5 s: a memory kill can follow a spike within seconds.
+                if let self, let core = self.core {
+                    peak = max(peak, core.stats().memoryFootprint)
+                    if tick % 5 == 0, let url = Self.heartbeatURL {
+                        let beat = String(format: "%@ with %.1f MB in use (peak %.1f MB)", clock.string(from: Date()),
+                                          Double(core.stats().memoryFootprint) / 1_048_576, Double(peak) / 1_048_576)
+                        try? beat.write(to: url, atomically: true, encoding: .utf8)
+                        Self.saveRecent()
+                        peak = 0
+                    }
                 }
-                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                tick += 1
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
+        startMemoryPressureWatch()
+    }
+
+    private var memoryPressure: DispatchSourceMemoryPressure?
+
+    /// The system warns before it kills a process for memory; record when.
+    private func startMemoryPressureWatch() {
+        memoryPressure?.cancel()
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .global())
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            let level = source.data.contains(.critical) ? "critical" : "warning"
+            let mb = Double(self.core?.stats().memoryFootprint ?? 0) / 1_048_576
+            let line = String(format: "memory pressure %@ at %.1f MB", level, mb)
+            self.logger.warning("\(line, privacy: .public)")
+            SbrRecentLogs.shared.append(.warn, line)
+            Self.saveRecent()
+        }
+        source.resume()
+        memoryPressure = source
     }
 
     private var tunStack: String? {

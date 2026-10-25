@@ -22,6 +22,10 @@ use crate::Engine;
 
 /// sing-box `C.UDPTimeout`.
 pub const UDP_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long a UDP session whose outbound could not connect keeps answering
+/// the client's retries with unreachable, after its last packet.
+const FAILED_UDP_HOLD: Duration = Duration::from_secs(10);
+
 /// DNS sessions are short-lived (sing-box `ProtocolTimeouts["dns"]`).
 const DNS_TIMEOUT: Duration = Duration::from_secs(10);
 const QUEUE: usize = 128;
@@ -276,8 +280,15 @@ impl Engine {
                 let conn: Arc<dyn sbr_core::PacketConn> = match out.connect_udp(&first_dest).await {
                     Ok(c) => Arc::from(c),
                     Err(e) => {
+                        // Keep the session as a dead end for a while: each
+                        // retry is answered at once instead of being routed,
+                        // dialled and logged again. QUIC clients retry many
+                        // times a second.
                         warn!(dest = %first_dest, outbound = out.tag(), error = %e, "udp connect failed");
                         back.unreachable(&meta.destination, source);
+                        while let Ok(Some(p)) = tokio::time::timeout(FAILED_UDP_HOLD, rx.recv()).await {
+                            back.unreachable(&p.0, source);
+                        }
                         return Err(e);
                     }
                 };

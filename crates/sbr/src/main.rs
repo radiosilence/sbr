@@ -112,7 +112,10 @@ fn main() -> Result<()> {
                     anyhow::Ok(())
                 })
             };
-            match std::env::var("SBR_STACK_KIB").ok().and_then(|k| k.parse::<usize>().ok()) {
+            match std::env::var("SBR_STACK_KIB")
+                .ok()
+                .and_then(|k| k.parse::<usize>().ok())
+            {
                 Some(kib) => std::thread::Builder::new()
                     .name("sbr".into())
                     .stack_size(kib << 10)
