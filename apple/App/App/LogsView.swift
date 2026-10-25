@@ -24,7 +24,7 @@ struct LogsView: View {
                     Text(line)
                         .font(.sbr(.fine))
                         .foregroundStyle(line.contains("ERROR") || line.contains(" error ") ? Color.sbrBad : line.contains("WARN") || line.contains(" warn ") ? Color.sbrInk : Color.sbrMuted)
-                        .textSelection(.enabled)
+                        .sbrSelectable()
                         .padding(.vertical, 3)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
