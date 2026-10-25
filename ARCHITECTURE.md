@@ -16,7 +16,7 @@ Read this before adding a protocol, inbound or service.
   - `dispatch.rs`: `Engine::handle_tcp(meta, impl InboundStream)` does rules → sniff → connect → `ready()`/`fail()` → relay. Inbounds only parse their handshake.
   - `udp.rs`: `Engine::handle_udp(inbound, type, UdpPacket, Arc<dyn UdpWriteBack>)`, a full-cone NAT session per client source, routed on the first packet.
   - `outbound/`: one module per protocol, registered in `outbound/mod.rs::Builder::build`. Protocols reach their server through `Upstream` (system dialer with DNS, or a `detour` outbound), so detour chains work for free.
-  - `inbound/`: proxy inbounds; `tun` lives in the `sbr-tun` crate plus `inbound/tun.rs`.
+  - `inbound/`: proxy inbounds; `tun` lives in the `sbr-tun` crate plus `inbound/tun.rs` (see [TUN TCP stacks](#tun-tcp-stacks)).
   - `track.rs`: live connection registry (Clash API, `interrupt_exist_connections`). `handle_tcp` and the UDP session register once connected; closing a connection aborts its relay.
   - `outbound/group.rs`: `selector`, `urltest` and `GroupEnv` (delay history, probes, health glue). New protocols with a `server` should be added to `server_of` in `outbound/mod.rs` so URL-less `urltest` can measure them, and to `probe_target_of` if their servers front a website on their own address.
   - `health.rs`: per-leaf health (the state machine, unit-tested with an injected clock), the relay watcher that reports stalls and resets, and its thresholds. `fetch.rs::data_probe` is the active check.
@@ -37,6 +37,30 @@ Two mistakes have each caused bulk transfers to hang:
 
 - Reporting more than was accepted. After `Pending`, a caller may retry with a *different* (`tokio::io::copy`: longer) buffer. A writer that sealed or framed the first buffer must report that length, not the retry's.
 - Leaving bytes buffered with nobody to flush them. tokio-rustls (and REALITY's record layer) returns `Ok` while sealed records still wait for the socket; they go out on the next write or `poll_flush`. Any code that writes and then waits for a reply must flush, and a wrapper's `poll_flush` must reach the stream underneath.
+
+## TUN TCP stacks
+
+`sbr-tun` has two ways to terminate the TUN's TCP. Both feed the same `on_tcp(Accepted)` callback, so dispatch and sniffing do not know which one ran; UDP takes the same path under both (datagrams handed up after fragment reassembly, replies written straight to the fd).
+
+- **System** (`stack.rs`, `nat.rs`): SYNs are rewritten onto a kernel listener on the TUN address and the kernel runs TCP. It costs a header rewrite per packet, but every connection depends on the kernel routing the listener's replies back into the TUN. In an iOS Network Extension the extension's own sockets are scoped to the physical interface; the listener needs `IP_BOUND_IF`, and TCP has still been seen dying on devices after extension restarts while UDP kept working.
+- **Userspace** (`tcp/`): sbr terminates TCP itself and never opens a socket on the TUN side, so nothing depends on kernel routing or interface scoping there. Outbound connections still use the kernel, as they must.
+
+Which one runs: `stack: gvisor` selects userspace; `system`, `mixed` and an unset `stack` select system. sing-box's `mixed` is system TCP with gVisor UDP, and sbr's UDP path is the same under every value, so `mixed` maps to system TCP. `Settings::tun_stack` overrides the config for embedders (an sbr extension; `sbr-apple` leaves it unset).
+
+### Why a purpose-built TCP
+
+Candidates were smoltcp 0.14 (already used by the WireGuard outbound), netstack-smoltcp and ipstack (wrappers and a minimal TCP built for tun2proxy-style forwarding), lwIP bindings, and writing one. The deciding constraint is the iOS extension's ~50 MB memory ceiling: with the kernel stack, socket buffers are kernel memory and do not count against the extension, but with any userspace stack every byte buffered does.
+
+- smoltcp allocates each socket's ring buffers up front at a fixed size, and pages stay committed once touched, so a few hundred connections that each saw one burst keep their full buffers. Its sender has no SACK-based recovery and a fixed 1 s minimum RTO (a compile-time constant), so a lost tail segment stalls a flow for a second. Its interface walks every socket on each egress poll. It is correct and well tested, which is why the tests use it as the independent peer.
+- netstack-smoltcp inherits smoltcp's TCP. ipstack's TCP has a much smaller feature set (no SACK, simplified congestion control and retransmission) and less history under loss. lwIP is mature but C, with its own memory pools to size and a cross-compile for every Apple target.
+- A TCP that only ever answers SYNs, on a link to the same host, is a small subset of TCP: no active open, no path MTU discovery, no options beyond MSS, window scale, SACK and timestamps. `tcp/tcb.rs` implements that subset against the RFCs it cites (RFC 9293, 7323, 2018, 6675, 5681, 6582, 6298, 5961), and the rest of the stack is shaped around the memory and power rules:
+  - **Elastic buffers** (`tcp/buf.rs`): send and receive queues are chains of pooled chunks, held only while they hold bytes. An idle connection costs no buffer memory whatever its window. Per-connection caps (`TcpConfig::rx_buffer`/`tx_buffer`, 128 KiB each on iOS) bound one flow; `TcpConfig::memory_limit` (8 MiB on iOS) bounds all of them together. At the limit, receive windows stop opening and writes wait. Windows already advertised are reserved against the limit, so connections cannot jointly promise more than it.
+  - **No idle wakeups**: one deadline heap; a connection with nothing in flight has no timer. ACKs are sent once per received batch rather than on a delayed-ACK timer, and immediately for out-of-order data, gap fills and FINs.
+  - **Recovery without timeouts**: SACK scoreboard and RFC 6675-style pipe accounting, NewReno partial ACKs for peers without SACK, a 200 ms minimum RTO. In the loss tests about nine in ten losses are repaired by fast retransmit.
+  - **One task owns all state**: the TUN packet loop runs every state machine; a `Stream` shares only its two byte queues and some flags under a mutex held for copies. There is no lock order to get wrong and no cross-thread segment reordering.
+  - **Better failure signals than the kernel path**: a segment for an unknown connection (for example, one opened before the tunnel restarted) gets a RST instead of being dropped, so apps fail over at once. With `TcpConfig::defer_handshake` (on by default) the engine gets each connection on the app's SYN and the SYN-ACK waits for the outbound to connect (`InboundStream::ready`); a failed connect or a rejecting rule resets the app's connect instead of killing an established connection. Trade-off: the app's connect() takes as long as the outbound's, and a config that sniffs before routing must complete the handshake first, since sniffing needs the app's first bytes.
+
+Tests: `tcp/tests.rs` runs the stack against smoltcp on a simulated link with a virtual clock (seeded loss, reordering and duplication, small and zero windows, hundreds of connections, half-close both ways, resets both ways, the memory limit, the deferred handshake); `sbr-tun/tests/user_stack.rs` drives the real packet loop over a socketpair without root; `sbr-engine/tests/tun.rs` runs every end-to-end case against the Linux kernel's TCP on both stacks (root).
 
 ## Performance rules
 

@@ -134,9 +134,18 @@ No clear winner at this noise level. rustls reads ciphertext 4 KiB at a time and
 
 sing-box wins plain TCP relay **on Linux** because its `bufio` uses `splice(2)` zero-copy. Darwin has no splice, so on Apple targets that path is copy-vs-copy. sbr wins on encrypted relay. This is a single synthetic loopback test, so treat it as a smoke signal, not a verdict.
 
-## TUN system stack: fragments
+## TUN: two TCP stacks
 
-A UDP tunnel nested inside sbr's (OpenVPN or AWS Client VPN over UDP, at the usual MTU 1280) sends datagrams larger than the TUN MTU, so the kernel fragments them. sing-box's kernel `system` stack drops these, which is why such profiles use `stack: mixed`. sbr's system stack reassembles IPv4 and IPv6 fragments (`crates/sbr-tun/src/frag.rs`) and fragments its own replies that exceed the MTU, acting as the sending host; that applies to IPv6 too, since sbr is the source of those packets.
+`stack: system` (and `mixed`, and an unset `stack`) lets the kernel run the TUN's TCP through a NAT onto a local listener. `stack: gvisor` runs sbr's own userspace TCP (`crates/sbr-tun/src/tcp`), which needs no socket on the TUN side and so no kernel routing or interface scoping to get replies back into the tunnel. sing-box's `mixed` means system TCP with gVisor UDP; sbr's UDP path is the same under every value, so `mixed` runs system TCP. Embedders can override the config with `Settings::tun_stack` (an sbr extension). [ARCHITECTURE.md](ARCHITECTURE.md#tun-tcp-stacks) explains the design and why it is not smoltcp.
+
+Where the userspace stack behaves differently, on purpose:
+- A segment for a connection it does not know, such as one an app opened before the tunnel restarted, gets a reset, so the app reconnects at once. The system stack drops it and the app waits out its own timeouts.
+- With the default `defer_handshake`, the app's connect completes only once the outbound has connected, and a failed connect or a `reject` rule resets it, so apps fall back immediately instead of watching an established connection die. A config that sniffs before routing still completes the handshake first, because sniffing needs the app's first bytes. A `reject` with `drop` answers nothing at all, like a black hole.
+- Buffers live in the process (the kernel's do not count against an iOS extension). They are elastic, so idle connections hold none, capped per connection (128 KiB each way on iOS, 1 MiB elsewhere) and, on iOS, at 8 MiB for all connections together.
+
+## TUN: fragments
+
+A UDP tunnel nested inside sbr's (OpenVPN or AWS Client VPN over UDP, at the usual MTU 1280) sends datagrams larger than the TUN MTU, so the kernel fragments them. sing-box's kernel `system` stack drops these, which is why such profiles use `stack: mixed`. sbr reassembles them under both TCP stacks: it reassembles IPv4 and IPv6 fragments (`crates/sbr-tun/src/frag.rs`) and fragments its own replies that exceed the MTU, acting as the sending host; that applies to IPv6 too, since sbr is the source of those packets.
 
 The reassembly table holds at most 128 datagrams and 2 MiB, and a datagram not completed within 5 s is discarded. The timeout is checked when fragments arrive rather than by a timer, so an idle table costs no wakeups. Any overlap abandons the datagram (RFC 5722, applied to IPv4 as well); exact duplicates are ignored. TCP fragments, which the kernel does not normally produce at the TUN MTU, are reassembled, translated, and fragmented again under sbr's own IP ID, because every translated flow shares one address pair and the apps' IDs could collide in the kernel's reassembly. IPv6 Hop-by-Hop, Routing (with no segments left) and Destination Options headers are skipped to reach TCP or UDP.
 
@@ -230,8 +239,8 @@ Every push and pull request to `main` runs `cargo fmt`, clippy and the tests on 
 ## Roadmap (in order of what unblocks the iOS app)
 
 1. **TUN inbound.** Takes the utun fd from `NEPacketTunnelProvider` (`packetFlow`'s socket). Two stacks, like sing-box:
-   - `system`: rewrite TCP SYNs to a local listener and let the kernel run TCP. This is the fast path and works on macOS and iOS.
-   - a userspace stack (smoltcp) for when `system` can't be used.
+   - `system`: rewrite TCP SYNs to a local listener and let the kernel run TCP.
+   - `gvisor`: sbr's userspace TCP, independent of kernel routing on the TUN side (done; not yet the iOS default).
    UDP NAT table, then FakeIP.
 2. **DNS.** Done except QUIC-based servers (`quic`, `h3`) and FakeIP persistence in the cache file.
 3. ~~**TLS layer** → trojan, vless, vmess, http over TLS, reality~~ (done; `multiplex` next).

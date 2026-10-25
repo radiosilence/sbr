@@ -5,6 +5,8 @@
 //!
 //!     cargo run --release -p sbr-engine --example tun_bench -- [streams] [seconds] [/path/to/sing-box]
 //!
+//! `SBR_BENCH_MTU` sets the TUN MTU (default 9000).
+//!
 //! CPU is reported per GB moved, both for this process (which includes the
 //! in-process load generator and sink, identical across stacks) and for the
 //! whole machine from /proc/stat (which also counts the kernel's softirq
@@ -20,11 +22,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 fn config(iface: &str, net: &str, stack: &str) -> String {
+    let mtu = std::env::var("SBR_BENCH_MTU").unwrap_or_else(|_| "9000".into());
     format!(
         r#"{{
         "log": {{"level": "error"}},
         "inbounds": [{{"type": "tun", "tag": "tun-in", "interface_name": "{iface}", "address": ["{net}.1/30"],
-                      "mtu": 9000, "auto_route": true, "route_address": ["198.18.99.0/24"], "stack": "{stack}"}}],
+                      "mtu": {mtu}, "auto_route": true, "route_address": ["198.18.99.0/24"], "stack": "{stack}"}}],
         "outbounds": [{{"type": "direct", "tag": "direct"}}],
         "route": {{"rules": [{{"ip_cidr": "198.18.99.0/24", "action": "route-options", "override_address": "127.0.0.1"}}]}}
     }}"#
@@ -136,7 +139,8 @@ async fn main() {
     let secs: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
     let port = serve().await;
     let me = std::process::id();
-    println!("{n} streams × {secs}s through the TUN at MTU 9000, server on loopback");
+    let mtu = std::env::var("SBR_BENCH_MTU").unwrap_or_else(|_| "9000".into());
+    println!("{n} streams × {secs}s through the TUN at MTU {mtu}, server on loopback");
 
     let mut k = 0;
     for stack in ["system", "gvisor"] {
