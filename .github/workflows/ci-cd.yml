@@ -88,11 +88,14 @@ jobs:
           cache-on-failure: true
       - name: Install the interop servers
         env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
-        # Each test suite reads its own variable; Homebrew's sing-box carries
-        # every build tag they need (with_quic, with_utls).
+        # Homebrew is updated first: the runner image's formulae lag by months,
+        # and the tests follow current servers (the Xray those formulae held
+        # failed the XHTTP and REALITY tests). Each test suite reads its own
+        # variable; Homebrew's sing-box carries every build tag they need
+        # (with_quic, with_utls).
         run: |
+          brew update --quiet
           brew install sing-box xray hysteria
           bin=$(brew --prefix)/bin
           {
