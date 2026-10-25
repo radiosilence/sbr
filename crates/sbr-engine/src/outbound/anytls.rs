@@ -875,10 +875,12 @@ mod tests {
         let (c, s) = tokio::io::duplex(4096);
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
         let server = tokio::spawn(async move { acceptor.accept(s).await.unwrap() });
-        let tls = TlsConnector::from(Arc::new(client_cfg))
-            .connect(ServerName::try_from("localhost").unwrap(), Box::new(c) as Stream)
-            .await
-            .unwrap();
+        let tls: Tls = Box::new(
+            TlsConnector::from(Arc::new(client_cfg))
+                .connect(ServerName::try_from("localhost").unwrap(), Box::new(c) as Stream)
+                .await
+                .unwrap(),
+        );
         let mut server = server.await.unwrap();
         let (_r, w) = tokio::io::split(tls);
         let mut writer = Writer {
