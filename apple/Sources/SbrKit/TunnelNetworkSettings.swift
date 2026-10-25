@@ -34,8 +34,13 @@ extension Sbr {
     /// address after the tun's first IPv4 address (match-all) so system DNS
     /// enters the tunnel where `hijack-dns` answers it.
     ///
-    /// `strict_route` has no per-route equivalent here: set
-    /// `NETunnelProviderProtocol.includeAllNetworks` in the app for that.
+    /// With `auto_route` and no IPv6 address in the config, the tunnel still
+    /// claims `::/0` on a ULA address: the engine has no IPv6 stack for it, so
+    /// IPv6 flows fail (and clients fall back to IPv4 through the tunnel)
+    /// instead of leaving by the physical interface.
+    ///
+    /// `strict_route` has no per-route equivalent here; see
+    /// `Sbr.applyLeakProtection(to:)` for the provider-level switches.
     public static func tunnelNetworkSettings(
         config: String,
         tunnelRemoteAddress: String = "127.0.0.1"
@@ -69,6 +74,10 @@ extension Sbr {
                 NEIPv6Route(destinationAddress: $0.address, networkPrefixLength: NSNumber(value: $0.prefix))
             }
             settings.ipv6Settings = ip
+        } else if plan.auto_route {
+            let ip = NEIPv6Settings(addresses: ["fdfe:dcba:9876::1"], networkPrefixLengths: [126])
+            ip.includedRoutes = [.default()]
+            settings.ipv6Settings = ip
         }
         if !plan.dns_servers.isEmpty {
             let dns = NEDNSSettings(servers: plan.dns_servers)
@@ -78,5 +87,19 @@ extension Sbr {
             settings.dnsSettings = dns
         }
         return settings
+    }
+}
+
+extension Sbr {
+    /// Route everything through the tunnel, including connections that
+    /// predate it, and refuse the "local network" exemption that TunnelCrack's
+    /// LocalNet attack abuses. Off by default until it's proven on devices:
+    /// some VPNs have seen their own extension's sockets stall under it.
+    public static func applyLeakProtection(to proto: NETunnelProviderProtocol, enabled: Bool) {
+        #if !os(tvOS)
+        proto.includeAllNetworks = enabled
+        proto.excludeLocalNetworks = false
+        proto.enforceRoutes = enabled
+        #endif
     }
 }
