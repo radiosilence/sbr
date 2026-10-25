@@ -50,7 +50,7 @@ module SbrCore {
 }
 MAP
 
-# One (fat, stripped) archive per xcframework slice.
+# One (fat) archive per xcframework slice.
 slice() {
   local name=$1; shift
   mkdir -p "$OUT/$name"
