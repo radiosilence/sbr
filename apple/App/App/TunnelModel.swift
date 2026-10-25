@@ -41,9 +41,9 @@ final class TunnelModel: ObservableObject {
     /// Run the tunnel on sbr's userspace TCP stack (the default) rather than
     /// the kernel's, which iOS stops under sustained load. Applied by
     /// reconnecting.
-    @Published var userspaceTCP = UserDefaults.standard.object(forKey: "userspaceTCP") as? Bool ?? true {
+    @Published var userspaceTCP = UserDefaults.standard.object(forKey: "tcpStackUserspace") as? Bool ?? true {
         didSet {
-            UserDefaults.standard.set(userspaceTCP, forKey: "userspaceTCP")
+            UserDefaults.standard.set(userspaceTCP, forKey: "tcpStackUserspace")
             Task {
                 try? await self.install()
                 if self.isOn, let manager = self.manager {
