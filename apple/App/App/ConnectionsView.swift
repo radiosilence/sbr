@@ -30,7 +30,9 @@ struct ConnectionsView: View {
                 }
             }
             .listStyle(.plain)
+            #if !os(tvOS)
             .scrollContentBackground(.hidden)
+            #endif
             .environment(\.defaultMinListRowHeight, 0)
             .animation(Theme.normal, value: shown.map(\.id))
         }
