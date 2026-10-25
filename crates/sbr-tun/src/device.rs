@@ -81,8 +81,10 @@ impl Device {
                     continue;
                 }
                 Ok(n) => {
-                    for i in 0..n {
-                        batch.lens[i] = batch.lens[i].saturating_sub(if self.af_header { HEADROOM } else { 0 });
+                    if self.af_header {
+                        for len in &mut batch.lens[..n] {
+                            *len = len.saturating_sub(HEADROOM);
+                        }
                     }
                     let _ = off;
                     batch.adapt(n);
@@ -628,14 +630,14 @@ mod platform {
         let n = batch.target;
         let mut iov: [libc::iovec; 64] = unsafe { std::mem::zeroed() };
         let mut hdrs: [MsgHdrX; 64] = unsafe { std::mem::zeroed() };
-        for i in 0..n {
-            iov[i] = libc::iovec {
-                iov_base: batch.bufs[i].as_mut_ptr().cast(),
-                iov_len: batch.bufs[i].len(),
+        for ((iov, hdr), buf) in iov.iter_mut().zip(hdrs.iter_mut()).zip(batch.bufs.iter_mut()).take(n) {
+            *iov = libc::iovec {
+                iov_base: buf.as_mut_ptr().cast(),
+                iov_len: buf.len(),
             };
             // Older kernels validate the whole header, so it must be zeroed (it is).
-            hdrs[i].msg.msg_iov = &mut iov[i];
-            hdrs[i].msg.msg_iovlen = 1;
+            hdr.msg.msg_iov = iov;
+            hdr.msg.msg_iovlen = 1;
         }
         // SAFETY: recvmsg_x(fd, msghdr_x *, count, flags); arrays outlive the call.
         #[allow(deprecated)]
