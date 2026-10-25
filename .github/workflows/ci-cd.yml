@@ -17,13 +17,14 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# The macOS runners are few, so a run nobody will look at gives way to the
-# next: a pull request's newer push cancels its older run, and a newer push to
-# main cancels an older one, whose TestFlight build it supersedes. A manual run
-# is never cancelled.
+# A pull request's newer push cancels its older run. Main is pushed to more
+# often than a full run takes, so cancelling there would leave main never
+# tested and the caches never saved: a newer push waits for the run in
+# progress instead, and replaces any run still waiting, so the newest commit
+# is the one tested next. A manual run is never cancelled.
 concurrency:
   group: "ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.run_id) || 'main' }}"
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ── CI ──────────────────────────────────────────────────────────────────
