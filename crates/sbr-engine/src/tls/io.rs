@@ -4,6 +4,9 @@
 //!   anti-censorship feature of sing-box `common/tlsfragment`: the first TLS
 //!   record is split inside the SNI host name, across TCP segments, TLS
 //!   records, or both.
+//! - Noticing a connection cut before the server sent a byte (a reset or
+//!   close in answer to the ClientHello), which is what SNI filtering looks
+//!   like from the client, so the automatic mode can turn fragmentation on.
 //! - Record-at-a-time reads, which XTLS Vision needs: when the server
 //!   switches a VLESS connection to "direct" mode, everything after the TLS
 //!   record carrying that command is raw inner traffic. Feeding rustls one
@@ -13,6 +16,8 @@
 use std::future::Future as _;
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
@@ -37,6 +42,9 @@ pub struct TlsIo {
     fd: Option<i32>,
     frag: Option<Fragmenter>,
     reader: RecordReader,
+    /// Set if the connection is reset or closed before the first byte from
+    /// the server arrives; dropped once one does.
+    cut_early: Option<Arc<AtomicBool>>,
 }
 
 impl TlsIo {
@@ -46,7 +54,14 @@ impl TlsIo {
             fd,
             frag: frag.map(|opts| Fragmenter { opts, plan: None }),
             reader: RecordReader::default(),
+            cut_early: None,
         }
+    }
+
+    /// Report a cut before the server's first byte through `flag`.
+    pub fn watch_cut(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cut_early = Some(flag);
+        self
     }
 
     /// Hand rustls whole TLS records only (see the module docs).
@@ -80,21 +95,53 @@ impl TlsIo {
 impl AsyncRead for TlsIo {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, out: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        this.reader.poll_read(&mut this.inner, cx, out)
+        let Some(flag) = &this.cut_early else {
+            return this.reader.poll_read(&mut this.inner, cx, out);
+        };
+        let before = out.filled().len();
+        let r = ready!(this.reader.poll_read(&mut this.inner, cx, out));
+        match &r {
+            Ok(()) if out.filled().len() > before => this.cut_early = None,
+            Ok(()) if out.remaining() > 0 => flag.store(true, Ordering::Relaxed),
+            Err(e) if is_cut(e) => flag.store(true, Ordering::Relaxed),
+            _ => {}
+        }
+        Poll::Ready(r)
     }
+}
+
+fn is_cut(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::UnexpectedEof
+    )
 }
 
 impl AsyncWrite for TlsIo {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        if let Some(f) = &mut this.frag {
-            let r = ready!(f.poll_write(&mut this.inner, this.fd, cx, buf));
-            this.frag = None;
-            if let Some(r) = r {
-                return Poll::Ready(r);
-            }
+        let r = match &mut this.frag {
+            Some(f) => match ready!(f.poll_write(&mut this.inner, this.fd, cx, buf)) {
+                Some(r) => {
+                    this.frag = None;
+                    r
+                }
+                None => {
+                    this.frag = None;
+                    ready!(Pin::new(&mut this.inner).poll_write(cx, buf))
+                }
+            },
+            None => ready!(Pin::new(&mut this.inner).poll_write(cx, buf)),
+        };
+        if let (Err(e), Some(flag)) = (&r, &this.cut_early)
+            && is_cut(e)
+        {
+            flag.store(true, Ordering::Relaxed);
         }
-        Pin::new(&mut this.inner).poll_write(cx, buf)
+        Poll::Ready(r)
     }
 
     fn poll_write_vectored(
@@ -102,7 +149,7 @@ impl AsyncWrite for TlsIo {
         cx: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        if self.frag.is_some() {
+        if self.frag.is_some() || self.cut_early.is_some() {
             let first = bufs.iter().find(|b| !b.is_empty()).map_or(&[][..], |b| &b[..]);
             return self.poll_write(cx, first);
         }
@@ -381,18 +428,41 @@ pub(crate) fn index_server_name(b: &[u8]) -> Option<(usize, &[u8])> {
     None
 }
 
-/// Split points, like sing-box: one random cut inside the first label of
-/// the host name (its public-suffix handling leaves only that label).
+/// Where to cut the host name: at a random point strictly inside each label
+/// but the last, so no record and no segment carries a whole label of the
+/// registered name (`www.example.com` → `w|ww.exa|mple.com`). A filter that
+/// matches the name as a substring of one record or one packet then finds
+/// nothing. sing-box cuts the first label only. Labels of one character
+/// cannot be cut inside; with no other label, the cut goes before the name.
+fn cuts(idx: usize, name: &[u8]) -> Vec<usize> {
+    let labels: Vec<&[u8]> = name.split(|c| *c == b'.').collect();
+    let mut out = Vec::new();
+    let mut at = idx;
+    for l in &labels[..labels.len().saturating_sub(1).max(1)] {
+        if l.len() >= 2 {
+            out.push(at + 1 + rand_u32() as usize % (l.len() - 1));
+        }
+        at += l.len() + 1;
+    }
+    if out.is_empty() {
+        out.push(idx);
+    }
+    out
+}
+
+/// Records are cut at every point from [`cuts`]; TCP segments at the first
+/// only, since each segment boundary costs a wait for the ACK.
 fn plan(b: &[u8], opts: FragmentOptions) -> Option<Plan> {
     let (idx, name) = index_server_name(b)?;
-    let first = name.split(|c| *c == b'.').next().filter(|l| !l.is_empty())?;
-    let cut = idx + (rand_u32() as usize % first.len());
-    let cuts = [cut];
+    let mut cuts = cuts(idx, name);
+    if !opts.split_record {
+        cuts.truncate(1);
+    }
     let mut data = Vec::with_capacity(b.len() + 5 * (cuts.len() + 1));
     let mut ends = Vec::new();
     let mut prev = 5;
     for (i, &c) in cuts.iter().chain(std::iter::once(&b.len())).enumerate() {
-        let piece = &b[if i == 0 { 5 } else { prev }..c];
+        let piece = &b[prev..c];
         prev = c;
         if opts.split_record {
             data.extend_from_slice(&b[..3]);
@@ -404,13 +474,11 @@ fn plan(b: &[u8], opts: FragmentOptions) -> Option<Plan> {
             }
             data.extend_from_slice(piece);
         }
-        if opts.split_packet {
+        if opts.split_packet && i == 0 {
             ends.push(data.len());
         }
     }
-    if !opts.split_packet {
-        ends.push(data.len());
-    }
+    ends.push(data.len());
     Some(Plan {
         data,
         ends,
@@ -472,21 +540,34 @@ mod tests {
             split_record: true,
             fallback_delay: Duration::ZERO,
         };
-        let p = plan(&ch, opts).unwrap();
-        assert_eq!(p.ends, vec![p.data.len()]);
-        // Two records whose bodies concatenate to the original handshake.
-        let mut body = Vec::new();
-        let mut d = &p.data[..];
-        let mut records = 0;
-        while !d.is_empty() {
-            assert_eq!(&d[..3], &ch[..3]);
-            let n = u16::from_be_bytes([d[3], d[4]]) as usize;
-            body.extend_from_slice(&d[5..5 + n]);
-            d = &d[5 + n..];
-            records += 1;
+        for _ in 0..50 {
+            let p = plan(&ch, opts).unwrap();
+            assert_eq!(p.ends, vec![p.data.len()]);
+            // Three records whose bodies concatenate to the original
+            // handshake; none holds a whole label but the last.
+            let mut body = Vec::new();
+            let mut d = &p.data[..];
+            let mut records = 0;
+            while !d.is_empty() {
+                assert_eq!(&d[..3], &ch[..3]);
+                let n = u16::from_be_bytes([d[3], d[4]]) as usize;
+                let rec = &d[5..5 + n];
+                for label in [&b"www"[..], b"example"] {
+                    assert!(!rec.windows(label.len()).any(|w| w == label));
+                }
+                body.extend_from_slice(rec);
+                d = &d[5 + n..];
+                records += 1;
+            }
+            assert_eq!(records, 3);
+            assert_eq!(body, &ch[5..]);
         }
-        assert_eq!(records, 2);
-        assert_eq!(body, &ch[5..]);
+
+        // One-character labels cannot be cut: the cut goes before the name.
+        let ch1 = client_hello("a.b");
+        let (i, _) = index_server_name(&ch1).unwrap();
+        assert_eq!(cuts(i, b"a.b"), vec![i]);
+        assert_eq!(cuts(i, b"localhost").len(), 1);
 
         let p = plan(
             &ch,
@@ -499,5 +580,20 @@ mod tests {
         .unwrap();
         assert_eq!(p.data, ch);
         assert_eq!(p.ends.len(), 2);
+
+        // Both: three records, still one segment boundary, after the first.
+        let p = plan(
+            &ch,
+            FragmentOptions {
+                split_packet: true,
+                split_record: true,
+                fallback_delay: Duration::ZERO,
+            },
+        )
+        .unwrap();
+        assert_eq!(p.data.len(), ch.len() + 10);
+        assert_eq!(p.ends.len(), 2);
+        let first = u16::from_be_bytes([p.data[3], p.data[4]]) as usize;
+        assert_eq!(p.ends[0], 5 + first);
     }
 }

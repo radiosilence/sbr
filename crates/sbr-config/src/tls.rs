@@ -30,6 +30,8 @@ pub struct TlsOutbound {
     pub fragment: bool,
     pub fragment_fallback_delay: Option<Duration>,
     pub record_fragment: bool,
+    /// sbr extension: no automatic ClientHello fragmentation.
+    pub disable_auto_fragment: bool,
     pub handshake_timeout: Option<Duration>,
     pub utls: Option<Utls>,
     pub reality: Option<Reality>,
@@ -122,6 +124,7 @@ pub(crate) fn parse_tls(parent: &mut Obj, key: &str, diag: &mut Diag) -> Result<
         fragment: o.bool("fragment")?,
         fragment_fallback_delay: o.duration("fragment_fallback_delay")?,
         record_fragment: o.bool("record_fragment")?,
+        disable_auto_fragment: o.bool("disable_auto_fragment")?,
         handshake_timeout: o.duration("handshake_timeout")?,
         utls: None,
         reality: None,

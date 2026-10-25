@@ -76,6 +76,25 @@ pub fn addresses(req: &Message, addrs: &[IpAddr], ttl: u32) -> Message {
     m
 }
 
+/// Drop the address hints of a family the strategy excludes from HTTPS/SVCB
+/// answers. Clients (Safari, Network.framework) dial those hints directly, so
+/// an `ipv4_only` resolver that only filtered AAAA still handed out IPv6.
+pub fn filter_hints(m: &mut Message, keep_v4: bool, keep_v6: bool) {
+    use hickory_proto::rr::rdata::svcb::SvcParamKey;
+    for rec in m.answers.iter_mut().chain(m.additionals.iter_mut()) {
+        let svcb = match &mut rec.data {
+            RData::HTTPS(h) => &mut h.0,
+            RData::SVCB(s) => s,
+            _ => continue,
+        };
+        svcb.svc_params.retain(|(k, _)| match k {
+            SvcParamKey::Ipv4Hint => keep_v4,
+            SvcParamKey::Ipv6Hint => keep_v6,
+            _ => true,
+        });
+    }
+}
+
 pub fn rcode(m: &Message) -> u16 {
     u16::from(m.metadata.response_code)
 }
@@ -228,6 +247,38 @@ pub fn predefined_record(rec: &DnsRecord, question: &Query) -> io::Result<Record
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hints_of_an_excluded_family_are_dropped() {
+        use hickory_proto::rr::rdata::HTTPS;
+        use hickory_proto::rr::rdata::svcb::{Alpn, IpHint, SVCB, SvcParamKey, SvcParamValue};
+        let q = query("a.test", TYPE_HTTPS).unwrap();
+        let mut m = status(&q, 0);
+        let svcb = SVCB::new(
+            1,
+            Name::root(),
+            vec![
+                (SvcParamKey::Alpn, SvcParamValue::Alpn(Alpn(vec!["h3".into()]))),
+                (
+                    SvcParamKey::Ipv4Hint,
+                    SvcParamValue::Ipv4Hint(IpHint(vec![A::new(1, 2, 3, 4)])),
+                ),
+                (
+                    SvcParamKey::Ipv6Hint,
+                    SvcParamValue::Ipv6Hint(IpHint(vec![AAAA::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)])),
+                ),
+            ],
+        );
+        m.answers.push(Record::from_rdata(
+            Name::from_ascii("a.test.").unwrap(),
+            60,
+            RData::HTTPS(HTTPS(svcb)),
+        ));
+        filter_hints(&mut m, true, false);
+        let RData::HTTPS(h) = &m.answers[0].data else { panic!() };
+        let keys: Vec<_> = h.0.svc_params.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, [SvcParamKey::Alpn, SvcParamKey::Ipv4Hint]);
+    }
 
     #[test]
     fn ttl_rules() {

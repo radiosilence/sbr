@@ -570,6 +570,12 @@ async fn xray_vless_reality_vision() {
     if let Err(e) = udp_roundtrip(&out, uecho, &udp_sizes).await {
         failures.push(format!("plain VLESS UDP over a Vision user: {e}"));
     }
+    // Like Xray's own client, Vision refuses QUIC so clients fall back to TCP.
+    let vision = engine.outbound(&format!("reality-{}", FINGERPRINTS[0])).unwrap().clone();
+    let quic = Destination::from(SocketAddr::new(uecho.ip(), 443));
+    if vision.connect_udp(&quic).await.is_ok() {
+        failures.push("Vision carried UDP/443".into());
+    }
     assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
 }
 
@@ -639,6 +645,40 @@ async fn xray_rejections() {
     // The server is still healthy for a valid client afterwards.
     let out = engine.outbound("admin").unwrap().clone();
     tcp_roundtrip(&out, techo, 64 * 1024).await.unwrap();
+}
+
+/// REALITY behind a filter that resets the borrowed SNI: Xray accepts the
+/// ClientHello split across records and segments, and the automatic mode
+/// finds that split on its own. Also the configured form, unfiltered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn xray_reality_fragmented_client_hello() {
+    let Some(bin) = find_bin("SBR_XRAY", "xray") else {
+        return;
+    };
+    let xray = start_xray(&bin).await;
+    let techo = common::echo().await;
+    let censor = common::sni_censor::start(
+        ([127, 0, 0, 1], xray.port).into(),
+        SERVER_NAMES[0],
+        common::sni_censor::Records::Joined,
+    )
+    .await;
+    let mut auto = xray.outbound("auto", ADMIN_UUID, SERVER_NAMES[0], "chrome");
+    auto["server_port"] = json!(censor.port);
+    auto["tls"]["fragment_fallback_delay"] = json!("50ms");
+    let mut both = xray.outbound("both", ADMIN_UUID, SERVER_NAMES[1], "firefox");
+    both["tls"]["fragment"] = json!(true);
+    both["tls"]["record_fragment"] = json!(true);
+    both["tls"]["fragment_fallback_delay"] = json!("20ms");
+    let engine = engine(vec![auto, both]);
+
+    let out = engine.outbound("auto").unwrap().clone();
+    tcp_roundtrip(&out, techo, MIB).await.unwrap();
+    vision_paths(&out).await.unwrap();
+    assert_eq!(censor.resets(), 2, "unsplit, then records only");
+    let out = engine.outbound("both").unwrap().clone();
+    tcp_roundtrip(&out, techo, MIB).await.unwrap();
+    vision_paths(&out).await.unwrap();
 }
 
 async fn probe_dest(port: u16, sni: &str, root_pem: &str) -> Result<String, String> {

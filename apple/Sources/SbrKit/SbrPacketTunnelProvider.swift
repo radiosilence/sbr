@@ -307,6 +307,14 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         scheduleRefresh()
     }
 
+    private var includeAllNetworks: Bool {
+        #if os(tvOS)
+        false
+        #else
+        (protocolConfiguration as? NETunnelProviderProtocol)?.includeAllNetworks ?? false
+        #endif
+    }
+
     private func startPathMonitor() {
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
@@ -315,6 +323,13 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             let interfaces = path.availableInterfaces.filter { $0.type != .other }.map(\.name)
             let signature = path.status == .satisfied ? interfaces.joined(separator: ",") : "unsatisfied"
             defer { self.lastPath = signature }
+            // With includeAllNetworks the extension's own sockets aren't
+            // reliably exempt from its tunnel, so pin them to the physical
+            // path, as desktop auto_route does.
+            if self.includeAllNetworks, path.status == .satisfied {
+                Sbr.setDefaultInterface(interfaces.first)
+                if self.lastPath == nil { self.core?.networkChanged() }
+            }
             guard let last = self.lastPath, last != signature else { return } // first report, or no change
             self.logger.info("network changed: \(last, privacy: .public) -> \(signature, privacy: .public)")
             if path.status == .satisfied { self.core?.networkChanged() }

@@ -5,6 +5,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 pub const PROTO_TCP: u8 = 6;
 pub const PROTO_UDP: u8 = 17;
+pub const PROTO_ICMP: u8 = 1;
+pub const PROTO_ICMPV6: u8 = 58;
 
 /// A parsed view of an IP packet carrying TCP or UDP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,6 +310,51 @@ pub fn build_udp(out: &mut Vec<u8>, src: SocketAddr, dst: SocketAddr, payload: &
     wr16(out, l4 + 6, ck);
 }
 
+/// An ICMP "port unreachable" (ICMPv6 type 1 code 4) telling `client` that
+/// its UDP flow to `remote` has nowhere to go, quoting the IP and UDP headers
+/// such a datagram would have carried. Sent as `remote`, like a router would,
+/// so the client's stack fails the socket at once: a QUIC client falls back
+/// to TCP instead of waiting out its handshake timeout.
+pub fn build_udp_unreachable(out: &mut Vec<u8>, remote: SocketAddr, client: SocketAddr) {
+    // The quoted datagram: what the client sent, headers only.
+    let mut quoted = Vec::with_capacity(48);
+    build_udp(&mut quoted, client, remote, &[]);
+    out.clear();
+    match (remote.ip(), client.ip()) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => {
+            let total = 20 + 8 + quoted.len();
+            out.extend_from_slice(&[0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, PROTO_ICMP, 0, 0]);
+            wr_len(out, 2, total as u16);
+            out.extend_from_slice(&s.octets());
+            out.extend_from_slice(&d.octets());
+            let ipck = !fold(sum16(&out[..20], 0));
+            wr16(out, 10, ipck);
+            let l4 = out.len();
+            out.extend_from_slice(&[3, 3, 0, 0, 0, 0, 0, 0]);
+            out.extend_from_slice(&quoted);
+            let ck = !fold(sum16(&out[l4..], 0));
+            wr16(out, l4 + 2, ck);
+        }
+        (IpAddr::V6(s), IpAddr::V6(d)) => {
+            let len = 8 + quoted.len();
+            out.extend_from_slice(&[0x60, 0, 0, 0]);
+            out.extend_from_slice(&(len as u16).to_be_bytes());
+            out.extend_from_slice(&[PROTO_ICMPV6, 64]);
+            out.extend_from_slice(&s.octets());
+            out.extend_from_slice(&d.octets());
+            let mut pseudo = sum16(&s.octets(), 0);
+            pseudo = sum16(&d.octets(), pseudo);
+            pseudo += PROTO_ICMPV6 as u32 + len as u32;
+            let l4 = out.len();
+            out.extend_from_slice(&[1, 4, 0, 0, 0, 0, 0, 0]);
+            out.extend_from_slice(&quoted);
+            let ck = !fold(sum16(&out[l4..], pseudo));
+            wr16(out, l4 + 2, ck);
+        }
+        _ => unreachable!("address family mismatch"),
+    }
+}
+
 /// Split a whole packet into fragments of at most `mtu` bytes, acting as
 /// the source host (RFC 791 §3.2, RFC 8200 §4.5). Each fragment is written
 /// to `out[headroom..]` and handed to `each`. IPv4 options are copied into
@@ -384,6 +431,40 @@ pub fn verify(p: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn udp_unreachable_is_well_formed() {
+        let mut out = Vec::new();
+        // IPv4: valid IP and ICMP checksums, port unreachable, quoting the flow.
+        build_udp_unreachable(
+            &mut out,
+            "1.2.3.4:443".parse().unwrap(),
+            "198.18.0.1:5000".parse().unwrap(),
+        );
+        assert_eq!(fold(sum16(&out[..20], 0)), 0xffff);
+        assert_eq!(out[9], PROTO_ICMP);
+        assert_eq!(&out[12..16], &[1, 2, 3, 4]);
+        assert_eq!((out[20], out[21]), (3, 3));
+        assert_eq!(fold(sum16(&out[20..], 0)), 0xffff);
+        let quoted = &out[28..];
+        assert_eq!(&quoted[12..16], &[198, 18, 0, 1]);
+        assert_eq!(u16::from_be_bytes([quoted[20], quoted[21]]), 5000);
+        assert_eq!(u16::from_be_bytes([quoted[22], quoted[23]]), 443);
+        // IPv6: ICMPv6 port unreachable with a pseudo-header checksum.
+        let (r, c): (SocketAddr, SocketAddr) =
+            ("[2001:db8::1]:443".parse().unwrap(), "[fdfe::1]:5000".parse().unwrap());
+        build_udp_unreachable(&mut out, r, c);
+        assert_eq!(out[6], PROTO_ICMPV6);
+        assert_eq!((out[40], out[41]), (1, 4));
+        let (IpAddr::V6(rs), IpAddr::V6(cs)) = (r.ip(), c.ip()) else {
+            unreachable!()
+        };
+        let len = out.len() - 40;
+        let mut pseudo = sum16(&rs.octets(), 0);
+        pseudo = sum16(&cs.octets(), pseudo);
+        pseudo += PROTO_ICMPV6 as u32 + len as u32;
+        assert_eq!(fold(sum16(&out[40..], pseudo)), 0xffff);
+    }
+
     use super::*;
 
     /// A TCP SYN with a valid checksum, built by hand.

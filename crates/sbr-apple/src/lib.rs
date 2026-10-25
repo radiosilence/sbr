@@ -694,6 +694,24 @@ pub unsafe extern "C" fn sbr_network_changed(instance: *mut SbrInstance) {
     })
 }
 
+/// Pin sbr's own sockets (servers, DNS, probes) to the physical interface
+/// `name` (e.g. `en0`, `pdp_ip0`), or unpin with NULL. A Network Extension's
+/// sockets bypass its tunnel only by the system's grace; with
+/// `includeAllNetworks` that grace isn't guaranteed, and an unpinned socket
+/// loops into the tunnel it is carrying. Process-wide, like `auto_route`'s
+/// pinning on desktops.
+///
+/// # Safety
+/// `name` NULL or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sbr_set_default_interface(name: *const c_char) {
+    guard((), || {
+        // SAFETY: NULL or valid per the contract.
+        let name = unsafe { str_arg(name) }.filter(|n| !n.is_empty()).map(str::to_owned);
+        sbr_engine::sbr_core::dial::set_default_interface(name);
+    })
+}
+
 /// # Safety
 /// `config_json` NULL or a valid C string; `error_out` NULL or valid.
 #[unsafe(no_mangle)]

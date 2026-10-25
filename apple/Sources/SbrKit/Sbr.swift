@@ -210,6 +210,12 @@ public final class Sbr: @unchecked Sendable {
         )
     }
 
+    /// Pin sbr's own sockets to a physical interface (`en0`, `pdp_ip0`), or
+    /// unpin with nil. Process-wide.
+    public static func setDefaultInterface(_ name: String?) {
+        sbr_set_default_interface(name)
+    }
+
     /// The default network path changed: drop state bound to the old one.
     public func networkChanged() {
         try? withHandle { sbr_network_changed($0) }

@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod censor;
+pub mod sni_censor;
 pub mod soak;
 
 use std::net::SocketAddr;

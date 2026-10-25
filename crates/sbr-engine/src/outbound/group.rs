@@ -17,6 +17,15 @@
 //! successful probe is followed by a data probe through the member: a GET of
 //! `url`, or with no `url`, a fetch from the member's own server through the
 //! member itself.
+//!
+//! Probing is shaped so it does not stand out on the wire. sing-box probes
+//! every member at once, on a fixed period: at start that is one TLS
+//! handshake per member to the same server within milliseconds, each with a
+//! different SNI, which no browser does and which Russia's 2026 rules count
+//! (more than three parallel handshakes to one endpoint). sbr probes members
+//! that share a server address one after another with a random gap, servers
+//! in parallel, adopts the first member that answers instead of waiting for
+//! all of them, and varies each period by up to [`JITTER`] either way.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -39,6 +48,15 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(180);
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(1800);
 const DEFAULT_TOLERANCE: u16 = 50;
 const CONCURRENCY: usize = 10;
+/// Probe periods vary by this fraction either way.
+pub const JITTER: f64 = 0.2;
+/// Gap between probes of members on one server address.
+pub const PROBE_GAP: std::ops::Range<u64> = 200..1200;
+
+/// `interval`, varied by up to [`JITTER`] either way.
+fn jittered(interval: Duration) -> Duration {
+    interval.mul_f64(1.0 - JITTER + 2.0 * JITTER * fastrand::f64())
+}
 
 /// sing-box `adapter.URLTestHistory`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -612,7 +630,7 @@ impl UrlTest {
         }
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(self.interval) => {}
+                _ = tokio::time::sleep(jittered(self.interval)) => {}
                 _ = stop.wait_for(|s| *s) => return,
             }
             if self.idle_for() > self.idle_timeout {
@@ -709,20 +727,36 @@ impl UrlTest {
             // waiting for it instead means a parent group testing this one
             // sees its results (fresh members are then skipped, so it's cheap).
             let _running = self.checking.lock().await;
-            let r = test_outbounds(&self.env, &self.members, self.url.as_ref(), self.interval, force).await;
+            // Before the group has picked anything, take the first member
+            // that answers rather than waiting for the slowest.
+            let first = || {
+                if self.selected.load(Ordering::Relaxed) == usize::MAX {
+                    self.perform_update_check();
+                }
+            };
+            let r = test_outbounds(
+                &self.env,
+                &self.members,
+                self.url.as_ref(),
+                self.interval,
+                force,
+                &first,
+            )
+            .await;
             self.perform_update_check();
             r
         })
     }
 }
 
-/// sing-box `URLTestOutbounds`.
+/// sing-box `URLTestOutbounds`. `measured` runs after each member answers.
 pub async fn test_outbounds(
     env: &Arc<GroupEnv>,
     outbounds: &[Arc<dyn Outbound>],
     url: Option<&Url>,
     interval: Duration,
     force: bool,
+    measured: &(dyn Fn() + Sync),
 ) -> HashMap<String, u16> {
     let mut seen = HashSet::new();
     let mut groups = Vec::new();
@@ -741,29 +775,52 @@ pub async fn test_outbounds(
             groups.push(o.clone());
             stack.extend(g.members().into_iter().rev());
         } else {
+            // Half the interval: a jittered period can be shorter than it.
             let fresh = env
                 .history(o.tag())
-                .is_some_and(|h| h.time.elapsed().is_ok_and(|e| e < interval));
+                .is_some_and(|h| h.time.elapsed().is_ok_and(|e| e < interval / 2));
             if force || !fresh || env.health.due(o.tag(), now) {
                 leaves.push(o);
             }
         }
     }
-    let sem = tokio::sync::Semaphore::new(CONCURRENCY);
-    let leaf_results = futures_util::future::join_all(leaves.iter().map(|o| async {
-        let _p = sem.acquire().await;
-        // The data probe runs inside the check, so a group's check (and its
-        // radio use) ends when the last probe does.
-        let r = env.measure(o, url).await;
-        if r.is_ok() {
-            env.check(real_leaf(o), url.cloned(), false).await;
+    // One queue per server address, in member order.
+    let mut queues: Vec<(String, Vec<Arc<dyn Outbound>>)> = Vec::new();
+    for o in leaves {
+        let key = env
+            .servers
+            .get()
+            .and_then(|m| m.get(o.tag()))
+            .map_or_else(|| o.tag().to_owned(), |(_, d)| format!("{:?}", d.host));
+        match queues.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, q)) => q.push(o),
+            None => queues.push((key, vec![o])),
         }
-        (o.tag().to_owned(), r)
+    }
+    let sem = tokio::sync::Semaphore::new(CONCURRENCY);
+    let leaf_results = futures_util::future::join_all(queues.iter().map(|(_, q)| async {
+        let _p = sem.acquire().await;
+        let mut out = Vec::with_capacity(q.len());
+        for (i, o) in q.iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(Duration::from_millis(fastrand::u64(PROBE_GAP))).await;
+            }
+            // The data probe runs inside the check, so a group's check (and
+            // its radio use) ends when the last probe does.
+            let r = env.measure(o, url).await;
+            if r.is_ok() {
+                measured();
+                env.check(real_leaf(o), url.cloned(), false).await;
+            }
+            out.push((o.tag().to_owned(), r));
+        }
+        out
     }));
     let nested_results = futures_util::future::join_all(nested.iter().map(|g| g.url_test(force)));
     let (leaf_results, nested_results) = tokio::join!(leaf_results, nested_results);
     let mut out: HashMap<String, u16> = leaf_results
         .into_iter()
+        .flatten()
         .filter_map(|(t, r)| r.ok().map(|d| (t, d)))
         .collect();
     for r in nested_results {

@@ -11,6 +11,8 @@
 //!   needs what the browser client lacks (TLS 1.2 via `max_version`, client
 //!   certificates, ECH). Those are refused instead when `utls` is enabled.
 //! - **REALITY**: `sbr-reality` with the REALITY handshake.
+//!
+//! All three can fragment the ClientHello ([`Fragment`]).
 
 mod conn;
 mod io;
@@ -18,6 +20,7 @@ pub(crate) mod verify;
 
 use std::io as stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use rustls::client::{EchConfig, EchMode};
@@ -26,6 +29,7 @@ use rustls::pki_types::{CertificateDer, EchConfigListBytes, PrivateKeyDer, Serve
 use rustls::{ClientConfig, RootCertStore};
 use sbr_config::TlsOutbound;
 use sbr_core::Stream;
+use tracing::info;
 
 pub use conn::TlsConn;
 pub(crate) use io::rand_u32;
@@ -105,7 +109,7 @@ pub struct BrowserClient {
     config: sbr_reality::TlsConfig,
     alpn_configured: bool,
     handshake_timeout: Duration,
-    fragment: Option<FragmentOptions>,
+    fragment: Arc<Fragment>,
 }
 
 impl BrowserClient {
@@ -129,7 +133,7 @@ impl BrowserClient {
                 .handshake_timeout
                 .filter(|d| !d.is_zero())
                 .unwrap_or(HANDSHAKE_TIMEOUT),
-            fragment: fragment_options(t),
+            fragment: Arc::new(Fragment::new(t)),
         })
     }
 
@@ -137,8 +141,7 @@ impl BrowserClient {
         &self.config
     }
 
-    async fn connect(&self, io: Stream, fd: Option<i32>) -> stdio::Result<TlsConn> {
-        let io = TlsIo::new(io, fd, self.fragment);
+    async fn connect(&self, io: TlsIo) -> stdio::Result<TlsConn> {
         match tokio::time::timeout(self.handshake_timeout, sbr_reality::connect_tls(io, &self.config)).await {
             Ok(r) => Ok(TlsConn::Browser(Box::new(r?))),
             Err(_) => Err(stdio::Error::new(stdio::ErrorKind::TimedOut, "TLS handshake timed out")),
@@ -160,7 +163,7 @@ pub struct RealityClient {
     config: sbr_reality::RealityConfig,
     alpn_configured: bool,
     handshake_timeout: Duration,
-    fragment: Option<FragmentOptions>,
+    fragment: Arc<Fragment>,
 }
 
 impl RealityClient {
@@ -185,12 +188,11 @@ impl RealityClient {
                 .handshake_timeout
                 .filter(|d| !d.is_zero())
                 .unwrap_or(HANDSHAKE_TIMEOUT),
-            fragment: fragment_options(t),
+            fragment: Arc::new(Fragment::new(t)),
         })
     }
 
-    async fn connect(&self, io: Stream, fd: Option<i32>) -> stdio::Result<TlsConn> {
-        let io = TlsIo::new(io, fd, self.fragment);
+    async fn connect(&self, io: TlsIo) -> stdio::Result<TlsConn> {
         match tokio::time::timeout(self.handshake_timeout, sbr_reality::connect(io, &self.config)).await {
             Ok(r) => Ok(TlsConn::Browser(Box::new(r?))),
             Err(_) => Err(stdio::Error::new(
@@ -201,15 +203,120 @@ impl RealityClient {
     }
 }
 
-fn fragment_options(t: &TlsOutbound) -> Option<FragmentOptions> {
-    (t.fragment || t.record_fragment).then(|| FragmentOptions {
-        split_packet: t.fragment,
-        split_record: t.record_fragment,
-        fallback_delay: t
+/// Bumped on every network change: automatic fragmentation levels belong to
+/// the network they were reached on.
+static NETWORK_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Forget every outbound's automatic fragmentation level (see
+/// `Engine::network_changed`).
+pub fn network_changed() {
+    NETWORK_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The highest automatic level: records and TCP segments.
+const AUTO_MAX: u8 = 2;
+
+/// ClientHello fragmentation for one outbound, shared by its ALPN variants.
+///
+/// `fragment` / `record_fragment` as configured apply to every handshake.
+/// With neither set, the automatic mode (an sbr extension, on unless
+/// `disable_auto_fragment`) starts unfragmented and steps up when a
+/// handshake is reset or closed before the server sent a byte, which is how
+/// SNI filtering by the GFW and most DPI vendors looks from the client:
+/// first to split TLS records (free; defeats filters that do not reassemble
+/// records), then to split records and TCP segments as well (costs
+/// `fragment_fallback_delay` per handshake where ACKs cannot be observed).
+/// The level is kept until the network changes.
+pub struct Fragment {
+    configured: Option<FragmentOptions>,
+    auto: bool,
+    fallback_delay: Duration,
+    /// The automatic level in the low byte, the network epoch above it.
+    state: AtomicU64,
+}
+
+impl Fragment {
+    pub fn new(t: &TlsOutbound) -> Self {
+        let fallback_delay = t
             .fragment_fallback_delay
             .filter(|d| !d.is_zero())
-            .unwrap_or(FRAGMENT_FALLBACK_DELAY),
-    })
+            .unwrap_or(FRAGMENT_FALLBACK_DELAY);
+        Self {
+            configured: (t.fragment || t.record_fragment).then_some(FragmentOptions {
+                split_packet: t.fragment,
+                split_record: t.record_fragment,
+                fallback_delay,
+            }),
+            auto: !t.disable_auto_fragment,
+            fallback_delay,
+            state: AtomicU64::new(NETWORK_EPOCH.load(Ordering::Relaxed) << 8),
+        }
+    }
+
+    fn watching(&self) -> bool {
+        self.auto && self.configured.is_none()
+    }
+
+    /// The automatic level on the current network.
+    pub fn level(&self) -> u8 {
+        let s = self.state.load(Ordering::Relaxed);
+        if s >> 8 == NETWORK_EPOCH.load(Ordering::Relaxed) {
+            s as u8
+        } else {
+            0
+        }
+    }
+
+    pub fn options(&self, level: u8) -> Option<FragmentOptions> {
+        self.configured.or(match level {
+            0 => None,
+            l => Some(FragmentOptions {
+                split_packet: l >= 2,
+                split_record: true,
+                fallback_delay: self.fallback_delay,
+            }),
+        })
+    }
+
+    /// A handshake at `from` was cut before the server answered. True when
+    /// the level is now above `from` (raised here or by a concurrent
+    /// handshake), so a retry is worth making.
+    pub fn escalate(&self, from: u8, server: &str) -> bool {
+        if !self.watching() {
+            return false;
+        }
+        let epoch = NETWORK_EPOCH.load(Ordering::Relaxed);
+        let mut s = self.state.load(Ordering::Relaxed);
+        loop {
+            let level = if s >> 8 == epoch { s as u8 } else { 0 };
+            if level > from {
+                return true;
+            }
+            if from >= AUTO_MAX {
+                return false;
+            }
+            let next = from + 1;
+            let new = epoch << 8 | u64::from(next);
+            match self
+                .state
+                .compare_exchange(s, new, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => {
+                    let how = if next == 1 {
+                        "TLS records"
+                    } else {
+                        "TLS records and TCP segments"
+                    };
+                    info!(
+                        server,
+                        "ClientHello cut before the server answered: splitting it across {how}"
+                    );
+                    return true;
+                }
+                Err(now) => s = now,
+            }
+        }
+    }
 }
 
 pub struct RustlsClient {
@@ -218,7 +325,7 @@ pub struct RustlsClient {
     /// `alpn` as configured (transports may substitute a default).
     alpn_configured: bool,
     handshake_timeout: Duration,
-    fragment: Option<FragmentOptions>,
+    fragment: Arc<Fragment>,
 }
 
 fn invalid(msg: impl Into<String>) -> String {
@@ -272,7 +379,7 @@ impl TlsClient {
                     server_name: c.server_name.clone(),
                     alpn_configured: true,
                     handshake_timeout: c.handshake_timeout,
-                    fragment: c.fragment,
+                    fragment: c.fragment.clone(),
                 }))
             }
             Self::Browser(c) if !c.alpn_configured => {
@@ -282,7 +389,7 @@ impl TlsClient {
                     config,
                     alpn_configured: true,
                     handshake_timeout: c.handshake_timeout,
-                    fragment: c.fragment,
+                    fragment: c.fragment.clone(),
                 }))
             }
             Self::Reality(c) if !c.alpn_configured => {
@@ -292,7 +399,7 @@ impl TlsClient {
                     config,
                     alpn_configured: true,
                     handshake_timeout: c.handshake_timeout,
-                    fragment: c.fragment,
+                    fragment: c.fragment.clone(),
                 }))
             }
             other => other.clone(),
@@ -318,11 +425,39 @@ impl TlsClient {
 
     /// Handshake over `io`. `fd` is the raw socket when `io` was dialed
     /// directly (used by `fragment` to wait for ACKs).
+    ///
+    /// A handshake cut before the server's first byte raises the automatic
+    /// fragmentation level; the error is then a [`Retry`], and a fresh
+    /// connection is worth trying (`ServerDialer::tls` does).
     pub async fn connect(&self, io: Stream, fd: Option<i32>) -> stdio::Result<TlsConn> {
+        let frag = self.fragment();
+        let level = frag.level();
+        let io = TlsIo::new(io, fd, frag.options(level));
+        if !frag.watching() {
+            return self.handshake(io).await;
+        }
+        let cut = Arc::new(AtomicBool::new(false));
+        match self.handshake(io.watch_cut(cut.clone())).await {
+            Err(e) if cut.load(Ordering::Relaxed) && frag.escalate(level, &self.server_name().unwrap_or_default()) => {
+                Err(stdio::Error::new(e.kind(), Retry(e)))
+            }
+            r => r,
+        }
+    }
+
+    async fn handshake(&self, io: TlsIo) -> stdio::Result<TlsConn> {
         match self {
-            Self::Rustls(c) => Ok(TlsConn::Rustls(Box::new(c.connect(io, fd).await?))),
-            Self::Reality(c) => c.connect(io, fd).await,
-            Self::Browser(c) => c.connect(io, fd).await,
+            Self::Rustls(c) => Ok(TlsConn::Rustls(Box::new(c.connect(io).await?))),
+            Self::Reality(c) => c.connect(io).await,
+            Self::Browser(c) => c.connect(io).await,
+        }
+    }
+
+    pub fn fragment(&self) -> &Fragment {
+        match self {
+            Self::Rustls(c) => &c.fragment,
+            Self::Reality(c) => &c.fragment,
+            Self::Browser(c) => &c.fragment,
         }
     }
 }
@@ -384,7 +519,7 @@ impl RustlsClient {
         };
         config.enable_sni = !t.disable_sni;
         config.alpn_protocols = t.alpn.iter().map(|a| a.as_bytes().to_vec()).collect();
-        let fragment = fragment_options(t);
+        let fragment = Arc::new(Fragment::new(t));
         Ok(Self {
             config: Arc::new(config),
             server_name,
@@ -397,13 +532,30 @@ impl RustlsClient {
         })
     }
 
-    async fn connect(&self, io: Stream, fd: Option<i32>) -> stdio::Result<TlsStream> {
-        let io = TlsIo::new(io, fd, self.fragment);
+    async fn connect(&self, io: TlsIo) -> stdio::Result<TlsStream> {
         let connector = tokio_rustls::TlsConnector::from(self.config.clone());
         match tokio::time::timeout(self.handshake_timeout, connector.connect(self.server_name.clone(), io)).await {
             Ok(r) => r,
             Err(_) => Err(stdio::Error::new(stdio::ErrorKind::TimedOut, "TLS handshake timed out")),
         }
+    }
+}
+
+/// A handshake failed in a way a retry with more fragmentation may fix.
+#[derive(Debug)]
+pub struct Retry(pub stdio::Error);
+
+impl std::fmt::Display for Retry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (retrying with the ClientHello fragmented)", self.0)
+    }
+}
+
+impl std::error::Error for Retry {}
+
+impl Retry {
+    pub fn is(e: &stdio::Error) -> bool {
+        e.get_ref().is_some_and(|r| r.is::<Retry>())
     }
 }
 

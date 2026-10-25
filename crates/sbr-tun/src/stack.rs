@@ -230,6 +230,21 @@ impl Stack {
     /// sender. Drops (rather than blocks) when the interface is congested.
     /// Datagrams larger than the MTU are fragmented, as the sending host
     /// would; this applies to IPv6 too, since sbr is that source.
+    /// Tell `client` its UDP flow to `remote` can't be carried (ICMP port
+    /// unreachable), so it fails fast instead of timing out.
+    pub fn write_udp_unreachable(&self, remote: SocketAddr, client: SocketAddr) -> io::Result<()> {
+        if remote.is_ipv4() != client.is_ipv4() {
+            return Ok(());
+        }
+        UDP_BUF.with(|b| {
+            let mut b = b.borrow_mut();
+            let pkt = &mut b.0;
+            packet::build_udp_unreachable(pkt, remote, client);
+            pkt.splice(0..0, [0u8; HEADROOM]);
+            try_send(&self.device, pkt)
+        })
+    }
+
     pub fn write_udp(&self, from: SocketAddr, to: SocketAddr, payload: &[u8]) -> io::Result<()> {
         // The IP and UDP length fields are 16 bits; a larger payload (a big
         // DNS answer, a UDP-over-stream frame) would wrap them.
@@ -388,11 +403,14 @@ async fn accept_loop(listener: TcpListener, fam: Arc<Family>, on_tcp: Arc<dyn Fn
             }
         };
         if peer.ip() != fam.next {
-            continue; // not one of ours
+            warn!(%peer, expected = %fam.next, "tun: dropped a connection from an unexpected peer");
+            continue;
         }
         let Some((source, destination)) = fam.nat.lock().unwrap().accept(peer.port()) else {
+            warn!(%peer, "tun: dropped a connection with no NAT entry");
             continue;
         };
+        debug!(%peer, "tun: accepted");
         let _ = stream.set_nodelay(true);
         on_tcp(Accepted {
             stream: TcpConn::Kernel(stream),
