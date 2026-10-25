@@ -8,13 +8,27 @@ license.workspace = true
 [dependencies]
 sbr-config.workspace = true
 sbr-core.workspace = true
+sbr-dns.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 base64.workspace = true
 bytes.workspace = true
 httparse = "1.10"
+sbr-tun = { path = "../sbr-tun" }
+ipnet.workspace = true
 shadowsocks = { version = "1.25", default-features = false, features = ["aead-cipher", "aead-cipher-2022", "aead-cipher-extra"] }
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs", "log"] }
+quinn-proto = { version = "0.11.19", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "logging", "tls12"] }
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+http = "1"
+blake2 = "0.10"
+rustls-pki-types = { version = "1", features = ["std"] }
+rustls-platform-verifier = "0.6"
+fastrand = "2"
+socket2 = "0.6"
 # Clash API, rule-set downloads, urltest probes, cache file.
 serde.workspace = true
 serde_json.workspace = true
@@ -24,7 +38,6 @@ hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
 webpki-roots = "1"
 redb = "4"
@@ -34,6 +47,7 @@ tracing-subscriber.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
+serde_json.workspace = true
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+tokio = { workspace = true, features = ["full"] }
 tokio-tungstenite = "0.28"

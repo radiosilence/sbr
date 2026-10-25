@@ -11,6 +11,7 @@ rust-version = "1.91"
 [workspace.dependencies]
 sbr-config = { path = "crates/sbr-config" }
 sbr-core = { path = "crates/sbr-core" }
+sbr-dns = { path = "crates/sbr-dns" }
 sbr-engine = { path = "crates/sbr-engine" }
 
 anyhow = "1"

@@ -1,19 +1,22 @@
 //! Outbound registry. Each protocol lives in its own module and registers in
 //! `build_one`; protocol modules only depend on `BuildContext` and `Upstream`.
 
-mod direct;
+pub(crate) mod direct;
 pub mod group;
 mod http;
+mod hysteria2;
+mod quic;
 mod shadowsocks;
 mod socks;
+mod tuic;
 
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
-use sbr_config::{Dial, Outbound as OutboundConfig, OutboundKind};
+use sbr_config::{Dial, DomainResolver, Outbound as OutboundConfig, OutboundKind};
 use sbr_core::dial::{self, DialOptions};
-use sbr_core::dns::Dns;
+use sbr_core::dns::{Dns, ResolverSpec};
 use sbr_core::{BoxPacketConn, Destination, Stream};
 
 pub use group::{GroupEnv, Selector, UrlTest};
@@ -25,6 +28,21 @@ pub struct BuildContext {
     pub dns: Arc<dyn Dns>,
     /// Services `selector`/`urltest` use (connection registry, cache file, probes).
     pub groups: Arc<GroupEnv>,
+    /// `route.default_domain_resolver`.
+    pub default_resolver: Option<DomainResolver>,
+}
+
+impl BuildContext {
+    /// The resolver an outbound's dialer uses: its `domain_resolver`, else
+    /// `route.default_domain_resolver`, else the DNS rules (which may match
+    /// the outbound's tag with the deprecated `outbound` item).
+    pub fn dns_for(&self, tag: Option<&str>, d: &Dial) -> Arc<dyn Dns> {
+        let spec = ResolverSpec {
+            resolver: d.domain_resolver.as_ref().or(self.default_resolver.as_ref()),
+            outbound: tag,
+        };
+        self.dns.bind(&spec).unwrap_or_else(|| self.dns.clone())
+    }
 }
 
 /// How an outbound reaches its server: the system network, or another
@@ -38,6 +56,12 @@ pub enum Upstream {
 impl Upstream {
     pub fn new(d: &Dial, ctx: &BuildContext, detour: Option<Arc<dyn Outbound>>) -> Self {
         match detour {
+            // With its own domain_resolver the server's domain is resolved here, not by the detour.
+            Some(o) if d.domain_resolver.is_some() => Upstream::Detour(Arc::new(crate::dns::ResolveFirst::new(
+                o,
+                ctx.dns.clone(),
+                d.domain_strategy,
+            ))),
             Some(o) => Upstream::Detour(o),
             None => Upstream::System(DialOptions::from(d), ctx.dns.clone()),
         }
@@ -81,6 +105,7 @@ pub fn build_all(configs: &[OutboundConfig], ctx: &BuildContext) -> Result<Vec<A
         visiting: vec![false; configs.len()],
         servers: HashMap::new(),
         urltests: HashMap::new(),
+        current: None,
     };
     for i in 0..configs.len() {
         b.build(i)?;
@@ -99,10 +124,14 @@ struct Builder<'a> {
     /// Leaf tag → how to reach its own server (URL-less urltest probes).
     servers: HashMap<String, (Upstream, Destination)>,
     urltests: HashMap<String, Arc<UrlTest>>,
+    /// The outbound being built, whose tag DNS rules may match.
+    current: Option<usize>,
 }
 
-/// The server and dialer of outbounds that have one. Protocols added later
-/// should be listed here so URL-less `urltest` can measure them.
+/// The server and dialer of TCP-reachable outbounds, for URL-less `urltest`
+/// (a TCP handshake to the server). Protocols added later should be listed
+/// here, unless they implement `Outbound::probe_rtt` (QUIC ones do: their
+/// servers don't listen on TCP).
 fn server_of(kind: &OutboundKind) -> Option<(&sbr_config::ServerAddr, &Dial)> {
     match kind {
         OutboundKind::Socks(s) => Some((&s.server, &s.dial)),
@@ -122,7 +151,13 @@ impl Builder<'_> {
             Some(t) => Some(self.dep(t)?),
             None => None,
         };
-        Ok(Upstream::new(d, self.ctx, detour))
+        let tag = self.current.map(|i| self.configs[i].tag.as_str());
+        let ctx = BuildContext {
+            dns: self.ctx.dns_for(tag, d),
+            default_resolver: None,
+            groups: self.ctx.groups.clone(),
+        };
+        Ok(Upstream::new(d, &ctx, detour))
     }
 
     fn build(&mut self, i: usize) -> Result<Arc<dyn Outbound>, BuildError> {
@@ -134,6 +169,7 @@ impl Builder<'_> {
             return Err(BuildError::Cycle(i, cfg.tag.clone()));
         }
         self.visiting[i] = true;
+        let outer = self.current.replace(i);
         let tag = cfg.tag.clone();
         let invalid = |e: String| BuildError::Invalid(i, cfg.tag.clone(), e);
         if let Some((server, dial)) = server_of(&cfg.kind) {
@@ -154,6 +190,10 @@ impl Builder<'_> {
             OutboundKind::Shadowsocks(s) => {
                 Arc::new(shadowsocks::Shadowsocks::new(tag, s, self.upstream(&s.dial)?).map_err(invalid)?)
             }
+            OutboundKind::Hysteria2(h) => {
+                Arc::new(hysteria2::Hysteria2::new(tag, h, self.upstream(&h.dial)?).map_err(invalid)?)
+            }
+            OutboundKind::Tuic(t) => Arc::new(tuic::Tuic::new(tag, t, self.upstream(&t.dial)?).map_err(invalid)?),
             OutboundKind::Selector(g) => {
                 let members = g.outbounds.iter().map(|t| self.dep(t)).collect::<Result<Vec<_>, _>>()?;
                 Arc::new(Selector::new(
@@ -171,6 +211,7 @@ impl Builder<'_> {
                 u
             }
         };
+        self.current = outer;
         self.visiting[i] = false;
         self.built[i] = Some(out.clone());
         Ok(out)

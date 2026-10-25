@@ -4,7 +4,8 @@
 //! `url` it does **not** fall back to `https://www.gstatic.com/generate_204`
 //! (sbr never contacts third parties unless the config says so). Instead it
 //! measures the TCP handshake to each member's own server, through the
-//! member's dialer/detour. That ranks servers by network distance but does
+//! member's dialer/detour (QUIC protocols report their connection's RTT
+//! instead, via `Outbound::probe_rtt`). That ranks servers by network distance but does
 //! not prove the proxy protocol works end to end; set `url` to a URL you
 //! control for that. Members without a server (`direct`, `block`) are not
 //! measured in that mode and are only chosen when nothing else answers.
@@ -47,6 +48,14 @@ pub struct GroupEnv {
     pub(crate) servers: OnceLock<HashMap<String, (Upstream, Destination)>>,
     pub(crate) urltests: OnceLock<HashMap<String, Arc<UrlTest>>>,
     shutdown: watch::Sender<bool>,
+}
+
+/// A standalone environment (own registry, no cache file), for outbounds
+/// built outside the engine (e.g. DNS server dialers).
+impl Default for GroupEnv {
+    fn default() -> Self {
+        Self::new(Arc::default(), None, HttpClient::new(None))
+    }
 }
 
 impl GroupEnv {
@@ -108,7 +117,13 @@ impl GroupEnv {
             Some(u) => self.http.probe(o.as_ref(), u).await,
             None => {
                 let leaf = real_leaf(o);
-                self.handshake(leaf.tag()).await
+                match leaf.probe_rtt() {
+                    Some(rtt) => tokio::time::timeout(crate::fetch::TIMEOUT, rtt)
+                        .await
+                        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "probe timed out"))?
+                        .map(|d| d.as_millis().clamp(1, u16::MAX as u128) as u16),
+                    None => self.handshake(leaf.tag()).await,
+                }
             }
         };
         match &r {

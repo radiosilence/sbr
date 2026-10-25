@@ -1,5 +1,6 @@
 pub mod http;
 pub mod socks;
+pub mod tun;
 
 use std::sync::Arc;
 

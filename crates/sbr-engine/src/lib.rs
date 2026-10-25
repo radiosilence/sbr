@@ -4,6 +4,7 @@
 pub mod cache;
 pub mod clash;
 pub mod dispatch;
+mod dns;
 pub mod fetch;
 mod httpx;
 pub mod inbound;
@@ -21,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use sbr_config::{InboundKind, Options};
 use sbr_core::dns::{Dns, SystemDns};
 use sbr_core::relay::{self, Traffic};
-use sbr_core::router::Router;
+use sbr_core::router::{ClashMode, Router, RuleSets};
 use sbr_core::{Metadata, Stream};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
@@ -40,6 +41,8 @@ pub enum Error {
     Outbound(#[from] outbound::BuildError),
     #[error(transparent)]
     Router(#[from] sbr_core::router::BuildError),
+    #[error(transparent)]
+    Dns(#[from] sbr_dns::BuildError),
     #[error("inbounds[{0}] ({1}): listen {2}: {3}")]
     Listen(usize, String, SocketAddr, io::Error),
     #[error("inbounds[{0}] ({1}): {2}")]
@@ -56,15 +59,22 @@ pub struct Settings {
     pub relay_buffer: usize,
     /// Resolves relative paths (local rule-sets, cache files).
     pub base_dir: Option<std::path::PathBuf>,
-    /// DNS implementation; defaults to the OS resolver.
+    /// DNS implementation, overriding the config's `dns` section (which
+    /// otherwise builds an `sbr_dns::DnsRouter`; no section means the OS
+    /// resolver).
     pub dns: Option<Arc<dyn Dns>>,
     /// Pre-opened TUN file descriptor (Apple Network Extension, Android
-    /// VpnService). When set, the `tun` inbound adopts it instead of creating
-    /// and configuring an interface.
+    /// VpnService). The `tun` inbound adopts it instead of creating an
+    /// interface, and takes ownership: it is closed when the instance stops.
     pub tun_fd: Option<i32>,
     /// Trust anchors for sbr's own HTTPS fetches (remote rule-sets, external
     /// UI, urltest). Defaults to the Mozilla roots (`webpki-roots`).
     pub http_roots: Option<Arc<rustls::RootCertStore>>,
+    /// Cap on concurrent TCP connections, and separately on UDP NAT
+    /// sessions; 0 = unlimited. Over the cap, new TCP connections are refused
+    /// and new UDP flows dropped, so a burst can't push a memory-capped host
+    /// (the iOS Network Extension) into jetsam.
+    pub max_connections: usize,
 }
 
 impl Default for Settings {
@@ -75,6 +85,7 @@ impl Default for Settings {
             dns: None,
             tun_fd: None,
             http_roots: None,
+            max_connections: 0,
         }
     }
 }
@@ -84,6 +95,8 @@ pub struct Engine {
     pub(crate) router: Router,
     pub(crate) dns: Arc<dyn Dns>,
     pub(crate) nat: udp::Nat,
+    /// Owns the outbounds DNS servers dial through (see `dns::LateOutbounds`).
+    _dns_outbounds: dns::LateOutbounds,
     pub traffic: Traffic,
     active: AtomicUsize,
     relay_buffer: usize,
@@ -94,11 +107,11 @@ pub struct Engine {
     pub(crate) groups: Arc<outbound::GroupEnv>,
     pub(crate) remote_sets: Option<Arc<ruleset::RemoteSets>>,
     pub(crate) http: fetch::HttpClient,
+    pub(crate) max_connections: usize,
 }
 
 impl Engine {
     pub fn new(options: &Options, settings: &Settings) -> Result<Self, Error> {
-        let dns: Arc<dyn Dns> = settings.dns.clone().unwrap_or_else(|| Arc::new(SystemDns));
         let cache = options.experimental.cache_file.as_ref().and_then(|c| {
             let path = resolve_path(settings, c.path.as_deref().unwrap_or("cache.db"));
             cache::CacheFile::open(&path, c)
@@ -108,38 +121,51 @@ impl Engine {
         let http = fetch::HttpClient::new(settings.http_roots.clone());
         let tracker = Arc::new(track::Tracker::default());
         let groups = Arc::new(outbound::GroupEnv::new(tracker.clone(), cache.clone(), http.clone()));
-        let ctx = BuildContext {
-            dns: dns.clone(),
-            groups: groups.clone(),
-        };
-        let outbounds = outbound::build_all(&options.outbounds, &ctx)?;
-        let router = Router::new(
-            &options.route.rules,
-            &options.route.rule_sets,
-            options.final_outbound(),
-            |tag| outbounds.iter().position(|o| o.tag() == tag),
-            |path| std::fs::read(resolve_path(settings, path)),
-        )?
-        .with_default_mode(
+        // Rule-sets are compiled once, for the route and DNS rules both;
+        // remote ones are filled (and later refreshed) in place.
+        let rule_sets = RuleSets::compile(&options.route.rule_sets, |path| {
+            std::fs::read(resolve_path(settings, path))
+        })?;
+        // The Clash mode is shared by route and DNS `clash_mode` items.
+        let dns_rules = options.dns.iter().flat_map(|d| d.rules.iter().map(|r| &r.rule));
+        rule_sets.clash_mode().configure(
             options
                 .experimental
                 .clash_api
                 .as_ref()
                 .and_then(|c| c.default_mode.as_deref()),
-            &options.route.rules,
+            ClashMode::modes_in(options.route.rules.iter().chain(dns_rules)),
         );
         if let Some(mode) = cache.as_ref().and_then(|c| c.load_mode()) {
-            router.clash_mode().set(&mode);
+            rule_sets.clash_mode().set(&mode);
         }
+        let late = dns::LateOutbounds::default();
+        let dns: Arc<dyn Dns> = match (&settings.dns, &options.dns) {
+            (Some(d), _) => d.clone(),
+            (None, Some(cfg)) => Arc::new(dns::build(cfg, options, &rule_sets, &late, settings)?),
+            (None, None) => Arc::new(SystemDns),
+        };
+        let ctx = BuildContext {
+            dns: dns.clone(),
+            default_resolver: options.route.default_domain_resolver.clone(),
+            groups: groups.clone(),
+        };
+        let outbounds = outbound::build_all(&options.outbounds, &ctx)?;
+        let _ = late.set(outbounds.clone());
+        let router = Router::with_sets(&options.route.rules, &rule_sets, options.final_outbound(), |tag| {
+            outbounds.iter().position(|o| o.tag() == tag)
+        })?;
         let remote = ruleset::RemoteSets::new(&options.route.rule_sets, settings, cache.clone(), http.clone());
         let mut engine = Self {
             outbounds,
             router,
             dns,
             nat: udp::Nat::default(),
+            _dns_outbounds: late,
             traffic: Traffic::default(),
             active: AtomicUsize::new(0),
             relay_buffer: settings.relay_buffer,
+            max_connections: settings.max_connections,
             tracker,
             cache,
             groups,
@@ -199,17 +225,44 @@ impl Engine {
         &self.dns
     }
 
+    /// TCP connections the engine is routing, connecting or relaying.
     pub fn active_connections(&self) -> usize {
         self.active.load(Ordering::Relaxed)
+    }
+
+    /// Open UDP NAT sessions.
+    pub fn udp_sessions(&self) -> usize {
+        self.nat.len()
+    }
+
+    /// Take a connection slot, or `None` when `max_connections` is reached.
+    pub(crate) fn admit(&self) -> Option<Slot<'_>> {
+        let n = self.active.fetch_add(1, Ordering::Relaxed);
+        if self.max_connections != 0 && n >= self.max_connections {
+            self.active.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        Some(Slot(&self.active))
+    }
+
+    /// The host's network path changed (Wi-Fi ↔ cellular, VPN reconnect).
+    ///
+    /// Drops state bound to the old path: UDP NAT sessions (their sockets
+    /// were routed over the old interface; QUIC/WebRTC clients re-establish
+    /// on the next packet). In-flight TCP is left alone: it either survives
+    /// (same interface) or fails fast on its own. Pooled upstream state
+    /// (multiplex sessions, QUIC connections, DNS cache) belongs here too as
+    /// it lands, so the next request dials over the new path.
+    pub fn network_changed(&self) {
+        let udp = self.nat.clear();
+        info!(udp_sessions = udp, "network changed: reset path-bound state");
     }
 
     pub(crate) async fn relay<A>(&self, meta: &Metadata, mut client: A, mut remote: Stream) -> io::Result<()>
     where
         A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
-        self.active.fetch_add(1, Ordering::Relaxed);
         let r = relay::relay(&mut client, &mut remote, self.relay_buffer, &self.traffic).await;
-        self.active.fetch_sub(1, Ordering::Relaxed);
         match r {
             Ok((up, down)) => {
                 debug!(dest = %meta.destination, up, down, "closed");
@@ -219,6 +272,15 @@ impl Engine {
             Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe) => Ok(()),
             Err(e) => Err(e),
         }
+    }
+}
+
+/// A held connection slot; released on drop.
+pub(crate) struct Slot<'a>(&'a AtomicUsize);
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -237,6 +299,7 @@ pub struct Instance {
     /// Where the Clash API listens, if enabled.
     pub clash_api: Option<SocketAddr>,
     tasks: JoinSet<()>,
+    tuns: Vec<Arc<sbr_tun::Stack>>,
 }
 
 impl Instance {
@@ -265,11 +328,16 @@ impl Instance {
             tasks.spawn(serve);
         }
         let mut listening = Vec::new();
+        let mut tuns = Vec::new();
         for (i, ib) in options.inbounds.iter().enumerate() {
             let p = match &ib.kind {
                 InboundKind::Mixed(p) | InboundKind::Socks(p) | InboundKind::Http(p) => p,
-                InboundKind::Tun(_) => {
-                    return Err(Error::Inbound(i, ib.tag.clone(), "tun inbound not wired yet".into()));
+                InboundKind::Tun(t) => {
+                    let stack = inbound::tun::start(engine.clone(), &ib.tag, t, &settings)
+                        .await
+                        .map_err(|e| Error::Inbound(i, ib.tag.clone(), e.to_string()))?;
+                    tuns.push(stack);
+                    continue;
                 }
             };
             let addr = SocketAddr::new(p.listen.listen, p.listen.listen_port);
@@ -289,6 +357,7 @@ impl Instance {
             listening,
             clash_api,
             tasks,
+            tuns,
         })
     }
 
@@ -297,6 +366,7 @@ impl Instance {
     pub fn shutdown(mut self) {
         self.tasks.abort_all();
         self.engine.groups.shutdown();
+        self.tuns.clear();
     }
 }
 

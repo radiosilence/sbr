@@ -185,8 +185,13 @@ impl CacheFile {
         }))
     }
 
-    /// A table namespaced by `cache_id`. The DNS subsystem stores FakeIP
-    /// mappings here (`table("fakeip")`) when `store_fakeip` is set.
+    /// A table namespaced by `cache_id`, for other subsystems' state.
+    ///
+    /// TODO(dns): persist FakeIP when `store_fakeip` is set. Needs, in
+    /// `sbr_dns::FakeIp`, an allocation observer (write `addr -> domain` with
+    /// `table("fakeip").put_lazy`) and a restore entry point (bulk-insert
+    /// `entries()` and the next offsets at start), plus engine access to the
+    /// DNS router's FakeIP stores. `/cache/fakeip/flush` already clears the table.
     pub fn table(&self, name: &str) -> Table<'_> {
         Table {
             cache: self,

@@ -7,8 +7,10 @@
 //! only exceptions are knobs that cannot change *where* traffic goes; those
 //! are accepted and reported in [`Options::warnings`].
 
+mod dns;
 mod experimental;
 mod obj;
+mod quic;
 mod route;
 pub mod srs;
 mod tls;
@@ -20,7 +22,9 @@ use std::time::Duration;
 use obj::{Diag, Obj};
 use serde_json::Value;
 
+pub use dns::*;
 pub use experimental::{CacheFileOptions, ClashApiOptions, Experimental, split_host_port};
+pub use quic::{Hysteria2Outbound, QuicOptions, TuicCongestion, TuicOutbound, TuicUdpRelay};
 pub use route::*;
 pub use srs::parse_rule_set;
 pub use tls::{Ech, Multiplex, Reality, TlsOutbound, Transport, Utls};
@@ -50,6 +54,8 @@ pub struct Options {
     pub inbounds: Vec<Inbound>,
     pub outbounds: Vec<Outbound>,
     pub route: RouteOptions,
+    /// The `dns` section; `None` means the system resolver.
+    pub dns: Option<DnsOptions>,
     /// `experimental`: clash API and cache file.
     pub experimental: Experimental,
     /// Non-fatal notes about accepted-but-ignored settings.
@@ -141,6 +147,8 @@ pub enum OutboundKind {
     Socks(SocksOutbound),
     Http(HttpOutbound),
     Shadowsocks(ShadowsocksOutbound),
+    Hysteria2(Hysteria2Outbound),
+    Tuic(TuicOutbound),
     Selector(Selector),
     UrlTest(UrlTest),
 }
@@ -153,6 +161,8 @@ impl OutboundKind {
             Self::Socks(_) => "socks",
             Self::Http(_) => "http",
             Self::Shadowsocks(_) => "shadowsocks",
+            Self::Hysteria2(_) => "hysteria2",
+            Self::Tuic(_) => "tuic",
             Self::Selector(_) => "selector",
             Self::UrlTest(_) => "urltest",
         }
@@ -169,6 +179,9 @@ pub struct Dial {
     pub disable_tcp_keep_alive: bool,
     pub bind_interface: Option<String>,
     pub domain_strategy: Option<DomainStrategy>,
+    /// DNS server (and query options) for resolving the domains this dialer
+    /// connects to.
+    pub domain_resolver: Option<DomainResolver>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -258,13 +271,11 @@ impl Options {
             None => LogOptions::default(),
         };
 
-        // Sections that exist in sing-box but that sbr doesn't run yet. DNS is
-        // the big one: we fall back to the system resolver, which is what
-        // sing-box itself does with an empty `dns` block.
-        if root.raw("dns").is_some() {
-            diag.warnings
-                .push("dns: not implemented yet, using the system resolver".into());
-        }
+        let dns = match root.raw("dns") {
+            Some(v) => Some(dns::parse_dns(Obj::new(v, "dns")?, &mut diag)?),
+            None => None,
+        };
+        // Sections that exist in sing-box but that sbr doesn't run yet.
         if root.raw("ntp").is_some() {
             diag.warnings.push("ntp: ignored by sbr".into());
         }
@@ -319,6 +330,7 @@ impl Options {
             inbounds,
             outbounds,
             route,
+            dns,
             experimental,
             warnings: diag.warnings,
         };
@@ -365,6 +377,8 @@ impl Options {
                 OutboundKind::Socks(s) => Some(&s.dial),
                 OutboundKind::Http(s) => Some(&s.dial),
                 OutboundKind::Shadowsocks(s) => Some(&s.dial),
+                OutboundKind::Hysteria2(h) => Some(&h.dial),
+                OutboundKind::Tuic(t) => Some(&t.dial),
                 OutboundKind::Selector(g) => {
                     for t in &g.outbounds {
                         need(format!("{path}.outbounds"), t)?;
@@ -393,6 +407,15 @@ impl Options {
                 }
                 need(format!("{path}.detour"), det)?;
             }
+            if let Some(r) = dial.and_then(|d| d.domain_resolver.as_ref()) {
+                self.need_dns_server(&format!("{path}.domain_resolver"), &r.server)?;
+            }
+        }
+        if let Some(r) = &self.route.default_domain_resolver {
+            self.need_dns_server("route.default_domain_resolver", &r.server)?;
+        }
+        if let Some(dns) = &self.dns {
+            self.check_dns(dns, &tags, &in_tags)?;
         }
         if let Some(f) = &self.route.final_outbound {
             need("route.final".into(), f)?;
@@ -423,6 +446,9 @@ impl Options {
             if let RuleAction::Route { outbound, .. } = &rule.action {
                 need(format!("{path}.outbound"), outbound)?;
             }
+            if let RuleAction::Resolve { server: Some(s), .. } = &rule.action {
+                self.need_dns_server(&format!("{path}.server"), s)?;
+            }
             if let RuleKind::Logical { rules, .. } = &rule.kind {
                 stack.extend(rules.iter().enumerate().map(|(i, r)| (r, format!("{path}.rules[{i}]"))));
             }
@@ -438,6 +464,93 @@ impl Options {
                             &format!("{path}.rule_set"),
                             format!("rule-set not found: {rs}"),
                         ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Options {
+    fn need_dns_server(&self, path: &str, tag: &str) -> Result<()> {
+        if self
+            .dns
+            .as_ref()
+            .is_some_and(|d| d.servers.iter().any(|s| s.tag == tag))
+        {
+            Ok(())
+        } else {
+            Err(Error::at(path, format!("DNS server not found: {tag}")))
+        }
+    }
+
+    fn check_dns(
+        &self,
+        dns: &DnsOptions,
+        outbounds: &std::collections::HashSet<&str>,
+        inbounds: &std::collections::HashSet<&str>,
+    ) -> Result<()> {
+        let mut tags = std::collections::HashSet::new();
+        for (i, s) in dns.servers.iter().enumerate() {
+            let path = format!("dns.servers[{i}]");
+            if !tags.insert(s.tag.as_str()) {
+                return Err(Error::at(&format!("{path}.tag"), format!("duplicate tag {:?}", s.tag)));
+            }
+            if let Some(d) = &s.dial.detour
+                && !outbounds.contains(d.as_str())
+            {
+                return Err(Error::at(&format!("{path}.detour"), format!("outbound not found: {d}")));
+            }
+            if let Some(r) = &s.dial.domain_resolver {
+                let rpath = if s.legacy.is_some() {
+                    format!("{path}.address_resolver")
+                } else {
+                    format!("{path}.domain_resolver")
+                };
+                if r.server == s.tag {
+                    return Err(Error::at(&rpath, "resolver is the server itself"));
+                }
+                self.need_dns_server(&rpath, &r.server)?;
+            }
+        }
+        if let Some(f) = &dns.final_server {
+            self.need_dns_server("dns.final", f)?;
+        }
+        let mut stack: Vec<(&Rule, String)> = Vec::new();
+        for (i, r) in dns.rules.iter().enumerate() {
+            let path = format!("dns.rules[{i}]");
+            if let DnsRuleAction::Route { server, .. } = &r.action {
+                self.need_dns_server(&format!("{path}.server"), server)?;
+            }
+            stack.push((&r.rule, path));
+        }
+        while let Some((rule, path)) = stack.pop() {
+            match &rule.kind {
+                RuleKind::Logical { rules, .. } => {
+                    stack.extend(rules.iter().enumerate().map(|(i, r)| (r, format!("{path}.rules[{i}]"))));
+                }
+                RuleKind::Default(m) => {
+                    for i in &m.inbound {
+                        if !inbounds.contains(i.as_str()) {
+                            return Err(Error::at(&format!("{path}.inbound"), format!("inbound not found: {i}")));
+                        }
+                    }
+                    for o in &m.outbound {
+                        if o != "any" && !outbounds.contains(o.as_str()) {
+                            return Err(Error::at(
+                                &format!("{path}.outbound"),
+                                format!("outbound not found: {o}"),
+                            ));
+                        }
+                    }
+                    for rs in &m.rule_set {
+                        if !self.route.rule_sets.iter().any(|r| &r.tag == rs) {
+                            return Err(Error::at(
+                                &format!("{path}.rule_set"),
+                                format!("rule-set not found: {rs}"),
+                            ));
+                        }
                     }
                 }
             }
@@ -672,6 +785,7 @@ pub(crate) fn parse_dial(o: &mut Obj, diag: &mut Diag) -> Result<Dial> {
         disable_tcp_keep_alive: o.bool("disable_tcp_keep_alive")?,
         bind_interface: o.string("bind_interface")?,
         domain_strategy: o.opt("domain_strategy")?,
+        domain_resolver: dns::parse_domain_resolver(o, "domain_resolver")?,
     };
     o.tolerate(
         diag,
@@ -738,14 +852,7 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
         "http" => {
             let server = parse_server(&mut o)?;
             let dial = parse_dial(&mut o, diag)?;
-            let headers = o
-                .get::<serde_json::Map<String, Value>>("headers")?
-                .into_iter()
-                .flat_map(|(k, v)| match v {
-                    Value::Array(vs) => vs.into_iter().map(|v| (k.clone(), json_str(v))).collect::<Vec<_>>(),
-                    v => vec![(k, json_str(v))],
-                })
-                .collect();
+            let headers = parse_headers(&mut o, "headers")?;
             if o.has("tls") {
                 return Err(Error::at(&o.sub("tls"), "not supported by sbr yet"));
             }
@@ -783,6 +890,8 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
                 network,
             })
         }
+        "hysteria2" => OutboundKind::Hysteria2(quic::parse_hysteria2(&mut o, diag)?),
+        "tuic" => OutboundKind::Tuic(quic::parse_tuic(&mut o, diag)?),
         "selector" => OutboundKind::Selector(Selector {
             outbounds: nonempty(o.req("outbounds")?, &o.sub("outbounds"))?,
             default: o.string("default")?,
@@ -813,6 +922,17 @@ fn nonempty(v: Vec<String>, path: &str) -> Result<Vec<String>> {
     } else {
         Ok(v)
     }
+}
+
+/// sing-box `HTTPHeader`: `{"Name": "v"}` or `{"Name": ["v1", "v2"]}`.
+pub(crate) fn parse_headers(o: &mut Obj, key: &str) -> Result<Vec<(String, String)>> {
+    Ok(o.get::<serde_json::Map<String, Value>>(key)?
+        .into_iter()
+        .flat_map(|(k, v)| match v {
+            Value::Array(vs) => vs.into_iter().map(|v| (k.clone(), json_str(v))).collect::<Vec<_>>(),
+            v => vec![(k, json_str(v))],
+        })
+        .collect())
 }
 
 fn json_str(v: Value) -> String {
