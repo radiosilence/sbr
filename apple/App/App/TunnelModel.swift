@@ -11,6 +11,8 @@ final class TunnelModel: ObservableObject {
     @Published private(set) var downloadRate: Double = 0
     @Published private(set) var testing: Set<String> = []
     @Published var errorMessage: String?
+    /// Why the tunnel last stopped without being asked to, from the system.
+    @Published private(set) var lastStop: String?
     /// "Block traffic outside the tunnel": `includeAllNetworks`. Applied the
     /// next time the tunnel connects.
     @Published var strict = UserDefaults.standard.bool(forKey: "strict") {
@@ -269,11 +271,29 @@ final class TunnelModel: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                let previous = self.status
                 self.status = connection.status
                 TunnelControl.reloadControl()
                 if connection.status != .connected { self.groups = [] }
+                if connection.status == .connecting { self.lastStop = nil }
+                if connection.status == .disconnected, previous != .disconnecting, previous != .disconnected {
+                    self.lastStop = await Self.disconnectReason(connection)
+                }
             }
         }
+    }
+}
+
+extension TunnelModel {
+    /// The system's account of an unrequested stop: the extension crashed,
+    /// was killed for memory, another VPN took over, and so on.
+    static func disconnectReason(_ connection: NEVPNConnection) async -> String {
+        let error: Error? = await withCheckedContinuation { c in
+            connection.fetchLastDisconnectError { c.resume(returning: $0) }
+        }
+        guard let error else { return "stopped unexpectedly" }
+        let ns = error as NSError
+        return "stopped: \(ns.localizedDescription.lowercased()) (\(ns.domain) \(ns.code))"
     }
 }
 
