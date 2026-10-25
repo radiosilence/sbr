@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,7 @@ use bytes::Bytes;
 use sbr_core::router::{Action, RouteOptions};
 use sbr_core::sniff::{self, Sniffed};
 use sbr_core::{Destination, Host, Metadata, Network};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, warn};
 
 use crate::Engine;
@@ -25,6 +25,14 @@ pub const UDP_TIMEOUT: Duration = Duration::from_secs(300);
 /// DNS sessions are short-lived (sing-box `ProtocolTimeouts["dns"]`).
 const DNS_TIMEOUT: Duration = Duration::from_secs(10);
 const QUEUE: usize = 128;
+/// Payload bytes queued across all sessions. Queues fill while an outbound
+/// handshakes, and 512 sessions of 128 jumbo datagrams would otherwise pin
+/// hundreds of megabytes, far past the iOS extension's memory limit.
+const MAX_QUEUED_BYTES: usize = 4 << 20;
+/// `hijack-dns` exchanges in flight across all sessions. Each one holds a
+/// task and upstream state until its timeout, so a flood of distinct names
+/// against a stalled upstream must not grow without bound.
+const MAX_DNS_INFLIGHT: usize = 128;
 
 /// How a packet inbound delivers datagrams back to its client.
 pub trait UdpWriteBack: Send + Sync + 'static {
@@ -44,9 +52,44 @@ struct Session {
     tx: mpsc::Sender<(Destination, Bytes)>,
 }
 
-#[derive(Default)]
 pub(crate) struct Nat {
     sessions: Mutex<HashMap<Key, Session>>,
+    queued: Arc<AtomicUsize>,
+    dns_inflight: Arc<Semaphore>,
+}
+
+impl Default for Nat {
+    fn default() -> Self {
+        Self {
+            sessions: Mutex::default(),
+            queued: Arc::default(),
+            dns_inflight: Arc::new(Semaphore::new(MAX_DNS_INFLIGHT)),
+        }
+    }
+}
+
+/// A session's queue. Queued payload bytes count against `Nat::queued` until
+/// they are received or the queue is dropped.
+struct Rx {
+    rx: mpsc::Receiver<(Destination, Bytes)>,
+    queued: Arc<AtomicUsize>,
+}
+
+impl Rx {
+    async fn recv(&mut self) -> Option<(Destination, Bytes)> {
+        let p = self.rx.recv().await?;
+        self.queued.fetch_sub(p.1.len(), Ordering::Relaxed);
+        Some(p)
+    }
+}
+
+impl Drop for Rx {
+    fn drop(&mut self) {
+        self.rx.close();
+        while let Ok(p) = self.rx.try_recv() {
+            self.queued.fetch_sub(p.1.len(), Ordering::Relaxed);
+        }
+    }
 }
 
 /// Monotonic milliseconds since an arbitrary epoch, for cheap idle tracking.
@@ -81,9 +124,19 @@ impl Engine {
         let key = (inbound.clone(), pkt.source);
         let mut sessions = self.nat.sessions.lock().unwrap();
         if let Some(s) = sessions.get(&key) {
+            let len = pkt.payload.len();
+            if self.nat.queued.fetch_add(len, Ordering::Relaxed) + len > MAX_QUEUED_BYTES {
+                self.nat.queued.fetch_sub(len, Ordering::Relaxed);
+                return;
+            }
             match s.tx.try_send((pkt.destination, pkt.payload)) {
-                Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => return,
+                Ok(()) => return,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    self.nat.queued.fetch_sub(len, Ordering::Relaxed);
+                    return;
+                }
                 Err(mpsc::error::TrySendError::Closed(p)) => {
+                    self.nat.queued.fetch_sub(len, Ordering::Relaxed);
                     sessions.remove(&key);
                     return self.spawn_session(&mut sessions, key, inbound_type, p.0, p.1, back);
                 }
@@ -106,6 +159,10 @@ impl Engine {
         back: Arc<dyn UdpWriteBack>,
     ) {
         let (tx, rx) = mpsc::channel(QUEUE);
+        let rx = Rx {
+            rx,
+            queued: self.nat.queued.clone(),
+        };
         sessions.insert(key.clone(), Session { tx });
         let engine = self.clone();
         tokio::spawn(async move {
@@ -124,7 +181,7 @@ impl Engine {
         self: &Arc<Self>,
         mut meta: Metadata,
         first: Bytes,
-        mut rx: mpsc::Receiver<(Destination, Bytes)>,
+        mut rx: Rx,
         back: Arc<dyn UdpWriteBack>,
     ) -> io::Result<()> {
         let source = meta.source;
@@ -183,8 +240,13 @@ impl Engine {
                         },
                     };
                     // Answer concurrently: one slow upstream mustn't stall the rest.
+                    let Ok(permit) = self.nat.dns_inflight.clone().try_acquire_owned() else {
+                        debug!(source = %source, "dns exchange limit reached; query dropped");
+                        continue;
+                    };
                     let (engine, back, meta) = (engine.clone(), back.clone(), meta.clone());
                     tokio::spawn(async move {
+                        let _permit = permit;
                         match engine.dns.exchange(&payload, &meta).await {
                             Ok(resp) => {
                                 let _ = back.write_back(&resp, &dest, source);

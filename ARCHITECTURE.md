@@ -18,7 +18,8 @@ Read this before adding a protocol, inbound or service.
   - `outbound/`: one module per protocol, registered in `outbound/mod.rs::Builder::build`. Protocols reach their server through `Upstream` (system dialer with DNS, or a `detour` outbound), so detour chains work for free.
   - `inbound/`: proxy inbounds; `tun` lives in the `sbr-tun` crate plus `inbound/tun.rs`.
   - `track.rs`: live connection registry (Clash API, `interrupt_exist_connections`). `handle_tcp` and the UDP session register once connected; closing a connection aborts its relay.
-  - `outbound/group.rs`: `selector`, `urltest` and `GroupEnv` (delay history, probes). New protocols with a `server` should be added to `server_of` in `outbound/mod.rs` so URL-less `urltest` can measure them.
+  - `outbound/group.rs`: `selector`, `urltest` and `GroupEnv` (delay history, probes, health glue). New protocols with a `server` should be added to `server_of` in `outbound/mod.rs` so URL-less `urltest` can measure them, and to `probe_target_of` if their servers front a website on their own address.
+  - `health.rs`: per-leaf health (the state machine, unit-tested with an injected clock), the relay watcher that reports stalls and resets, and its thresholds. `fetch.rs::data_probe` is the active check.
   - `ruleset.rs` (remote rule-sets), `cache.rs` (`cache_file`; other subsystems get namespaced tables via `CacheFile::table`, e.g. `"fakeip"`), `fetch.rs` (HTTP(S) client through an outbound), `clash/` (Clash API).
 - `sbr-config/src/srs.rs`: the binary rule-set codec, byte-compatible with sing-box.
 - `sbr-reality`: TLS 1.3 client with browser ClientHellos, generic over the transport: `connect(stream, &RealityConfig)` for REALITY, `connect_tls(stream, &TlsConfig)` for ordinary TLS with a rustls `ServerCertVerifier`. rustls cannot emit browser ClientHellos, and its own is distinctive, so this is the default handshake for every TCP TLS client (`sbr-engine/src/tls`, ShadowTLS, AnyTLS, DoH); `TlsOutbound::browser_fingerprint` decides when rustls is used instead. Profiles must follow browser releases: Chrome and Apple are captured from the real clients, and `tls_tests.rs` pins each profile's JA3/JA4. Interop-tested against a sing-box binary built with `-tags with_utls` (`SBR_SING_BOX`) and against Xray-core (`SBR_XRAY`), whose uTLS profiles are the reference.
@@ -46,3 +47,7 @@ sbr contacts only endpoints the config names. Never add a built-in default URL (
 
 - `cargo fmt` (max_width 120), `cargo clippy --workspace --all-targets` clean, `cargo test --workspace` green.
 - Comments explain *why*. Match the existing density.
+
+## Untrusted input
+
+Local apps, servers, the network and remote rule-sets are all hostile (`docs/security-audit.md`). A panic or an unbounded allocation kills the iOS extension and with it the tunnel, so every length field is checked before use and every table, queue and buffer driven by input has a cap in bytes, not only in entries. New parsers of untrusted bytes get a target in `fuzz/` (`cargo +nightly fuzz run -O <target>`).

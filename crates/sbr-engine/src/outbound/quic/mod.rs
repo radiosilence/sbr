@@ -8,6 +8,7 @@
 //! reconnect RTT on a phone.
 
 pub(crate) mod brutal;
+mod initial;
 pub(crate) mod socket;
 mod tls;
 
@@ -91,6 +92,9 @@ pub(crate) struct Dialer {
     pub server: Destination,
     pub hop: Option<Hop>,
     pub salamander: Option<String>,
+    /// Hide the SNI from Initial-decrypting censors ([`initial`]). Pointless
+    /// under Salamander, which already hides the whole packet.
+    pub scramble: bool,
     pub tls: Arc<rustls::ClientConfig>,
     pub server_name: String,
     pub handshake_timeout: Duration,
@@ -114,6 +118,7 @@ impl Dialer {
             server,
             hop: None,
             salamander: None,
+            scramble: true,
             tls: t.config,
             server_name: t.server_name,
             handshake_timeout: tls.handshake_timeout.unwrap_or(DEFAULT_HANDSHAKE),
@@ -140,6 +145,7 @@ impl Dialer {
         };
         let socket: Socket = match &self.salamander {
             Some(pw) => Salamander::new(socket, pw),
+            None if self.scramble => initial::Scramble::new(socket),
             None => socket,
         };
         let endpoint =

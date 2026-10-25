@@ -7,7 +7,7 @@ pub mod group;
 mod http;
 mod hysteria2;
 mod proto;
-mod quic;
+pub(crate) mod quic;
 mod shadowsocks;
 mod shadowtls;
 mod socks;
@@ -140,6 +140,19 @@ pub fn build_all(configs: &[OutboundConfig], ctx: &BuildContext) -> Result<Vec<A
     }
     let _ = ctx.groups.servers.set(b.servers);
     let _ = ctx.groups.urltests.set(b.urltests);
+    let _ = ctx.groups.outbounds.set(
+        configs
+            .iter()
+            .zip(&b.built)
+            .filter_map(|(c, o)| Some((c.tag.clone(), Arc::downgrade(o.as_ref()?))))
+            .collect(),
+    );
+    let _ = ctx.groups.targets.set(
+        configs
+            .iter()
+            .filter_map(|c| Some((c.tag.clone(), probe_target_of(&c.kind)?)))
+            .collect(),
+    );
     Ok(b.built.into_iter().map(|o| o.expect("built")).collect())
 }
 
@@ -172,6 +185,25 @@ fn server_of(kind: &OutboundKind) -> Option<(&sbr_config::ServerAddr, &Dial)> {
         OutboundKind::Vmess(c) => Some((&c.common.server, &c.common.dial)),
         _ => None,
     }
+}
+
+/// Where a URL-less data probe through a leaf fetches from: the leaf's own
+/// server, through the leaf, so the server proxies the request to itself.
+/// Only for tunnels whose servers commonly front an HTTPS site on that
+/// address (REALITY and trojan forward unauthenticated clients to one; a
+/// QUIC server's host is tried on TCP 443). Others are left out: plain
+/// proxies have nothing to serve, VMess and Shadowsocks servers stall on
+/// unexpected input by design, and ShadowTLS would relay to its handshake
+/// server, someone else's site.
+fn probe_target_of(kind: &OutboundKind) -> Option<Destination> {
+    let (server, port) = match kind {
+        OutboundKind::Trojan(c) => (&c.common.server.server, c.common.server.server_port),
+        OutboundKind::Vless(c) => (&c.common.server.server, c.common.server.server_port),
+        OutboundKind::Hysteria2(h) => (&h.server.server, 443),
+        OutboundKind::Tuic(t) => (&t.server.server, 443),
+        _ => return None,
+    };
+    Some(Destination::from_host_port(server, port))
 }
 
 impl Builder<'_> {

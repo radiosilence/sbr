@@ -155,6 +155,8 @@ pub struct Shared {
     pub kick: Notify,
     /// Set by `probe_rtt`: initiate a handshake with every peer.
     pub want_handshake: AtomicBool,
+    /// Set on a network change: replace the UDP socket.
+    pub rebind: AtomicBool,
     /// When the last handshake we initiated completed, and its round trip.
     pub handshake: watch::Sender<Option<(StdInstant, Duration)>>,
     epoch: StdInstant,
@@ -203,6 +205,7 @@ impl Shared {
             }),
             kick: Notify::new(),
             want_handshake: AtomicBool::new(false),
+            rebind: AtomicBool::new(false),
             handshake: watch::Sender::new(None),
             epoch,
         }

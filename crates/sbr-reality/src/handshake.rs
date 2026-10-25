@@ -706,3 +706,29 @@ mod tests {
         assert!(decompress_certificate(&msg(1, body.len(), &compressed), &hello).is_err());
     }
 }
+
+/// Fuzzing entry: the parsers that run on decrypted handshake messages, which
+/// a fuzzer cannot reach through the AEAD.
+#[cfg(fuzzing)]
+pub fn fuzz_handshake_messages(data: &[u8]) {
+    // Firefox offers every certificate compression algorithm.
+    let Ok(hello) = Hello::new(&HelloParams {
+        fingerprint: crate::Fingerprint::Firefox,
+        server_name: Some("fuzz.test"),
+        alpn: &[],
+        post_quantum: true,
+    }) else {
+        return;
+    };
+    let mut hs = HandshakeBuf::default();
+    hs.push(data);
+    while let Ok(Some(msg)) = hs.next_message() {
+        let body = &msg[4..];
+        let _ = parse_server_hello(body).map(|sh| sh.key_share.map(|(g, p)| (g, p.len())));
+        let _ = parse_encrypted_extensions(body, &hello);
+        let _ = parse_certificates(body);
+        if let Ok(chain) = decompress_certificate(body, &hello) {
+            let _ = parse_certificates(&chain);
+        }
+    }
+}

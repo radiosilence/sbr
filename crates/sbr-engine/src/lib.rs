@@ -6,6 +6,7 @@ pub mod clash;
 pub mod dispatch;
 mod dns;
 pub mod fetch;
+pub mod health;
 mod httpx;
 pub mod inbound;
 pub mod outbound;
@@ -22,10 +23,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sbr_config::{InboundKind, Options};
+use sbr_core::Metadata;
 use sbr_core::dns::{Dns, SystemDns};
 use sbr_core::relay::{self, Traffic};
 use sbr_core::router::{ClashMode, Router, RuleSets};
-use sbr_core::{Metadata, Stream};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
@@ -67,7 +68,8 @@ pub struct Settings {
     pub dns: Option<Arc<dyn Dns>>,
     /// Pre-opened TUN file descriptor (Apple Network Extension, Android
     /// VpnService). The `tun` inbound adopts it instead of creating an
-    /// interface, and takes ownership: it is closed when the instance stops.
+    /// interface, and takes ownership: it is closed when the instance stops or
+    /// fails to start.
     pub tun_fd: Option<i32>,
     /// Trust anchors for sbr's own HTTPS fetches (remote rule-sets, external
     /// UI, urltest). Defaults to the Mozilla roots (`webpki-roots`).
@@ -255,15 +257,23 @@ impl Engine {
     /// on the next packet). In-flight TCP is left alone: it either survives
     /// (same interface) or fails fast on its own. Pooled upstream state
     /// (multiplex sessions, QUIC connections, DNS cache) belongs here too as
-    /// it lands, so the next request dials over the new path.
+    /// it lands, so the next request dials over the new path. Outbounds with
+    /// long-lived sockets (WireGuard) replace them. Outbound health is
+    /// forgotten (a different network has a different censor) and `urltest`
+    /// groups re-probe: at once if in use, otherwise on their next use.
     pub fn network_changed(&self) {
         let udp = self.nat.clear();
+        for o in &self.outbounds {
+            o.network_changed();
+        }
+        self.groups.network_changed();
         info!(udp_sessions = udp, "network changed: reset path-bound state");
     }
 
-    pub(crate) async fn relay<A>(&self, meta: &Metadata, mut client: A, mut remote: Stream) -> io::Result<()>
+    pub(crate) async fn relay<A, B>(&self, meta: &Metadata, mut client: A, mut remote: B) -> io::Result<()>
     where
         A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+        B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
         let r = relay::relay(&mut client, &mut remote, self.relay_buffer, &self.traffic).await;
         match r {
@@ -311,6 +321,12 @@ impl Instance {
         for w in &options.warnings {
             warn!("{w}");
         }
+        // The platform's tun fd is ours from here on: closed on every early
+        // return, and handed to exactly one tun inbound.
+        // SAFETY: the caller transfers ownership of `tun_fd` (see `Settings`).
+        let mut tun_fd = settings
+            .tun_fd
+            .map(|fd| unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) });
         let engine = Arc::new(Engine::new(options, &settings)?);
         if options.experimental.cache_file.is_some() && engine.cache.is_none() {
             return Err(Error::Service("cache file could not be opened".into()));
@@ -336,7 +352,19 @@ impl Instance {
             let p = match &ib.kind {
                 InboundKind::Mixed(p) | InboundKind::Socks(p) | InboundKind::Http(p) => p,
                 InboundKind::Tun(t) => {
-                    let stack = inbound::tun::start(engine.clone(), &ib.tag, t, &settings)
+                    if settings.tun_fd.is_some() && tun_fd.is_none() {
+                        return Err(Error::Inbound(
+                            i,
+                            ib.tag.clone(),
+                            "only one tun inbound can use the platform tun".into(),
+                        ));
+                    }
+                    let fd = tun_fd.take().map(std::os::fd::IntoRawFd::into_raw_fd);
+                    let tun_settings = Settings {
+                        tun_fd: fd,
+                        ..settings.clone()
+                    };
+                    let stack = inbound::tun::start(engine.clone(), &ib.tag, t, &tun_settings)
                         .await
                         .map_err(|e| Error::Inbound(i, ib.tag.clone(), e.to_string()))?;
                     tuns.push(stack);

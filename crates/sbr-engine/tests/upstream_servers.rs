@@ -696,7 +696,7 @@ async fn xray_reality_fallback() {
         .await;
     // dest's certificate doesn't cover that name: the handshake reaching
     // dest and failing verification is the expected outcome.
-    let err = off_list.err().expect("off-list SNI unexpectedly verified").to_string();
+    let err = off_list.expect_err("off-list SNI unexpectedly verified").to_string();
     assert!(err.contains("certificate") || err.contains("Certificate"), "{err}");
 }
 
@@ -708,6 +708,7 @@ struct Hysteria {
     _dir: PathBuf,
     ports: Vec<u16>,
     cert_pem: String,
+    obfs: bool,
 }
 
 /// The pinned self-signed certificate hysteria.ts mints with `@pulumi/tls`:
@@ -728,7 +729,8 @@ fn hy2_cert() -> (String, String) {
 }
 
 /// hysteria.ts `createHysteria`: one process per port, same config.
-async fn start_hysteria(bin: &Path, nports: usize) -> Hysteria {
+/// `obfs: false` drops Salamander, leaving plain QUIC with a readable SNI.
+async fn start_hysteria(bin: &Path, nports: usize, obfs: bool) -> Hysteria {
     let dir = temp_dir("hy2");
     let (cert, key) = hy2_cert();
     std::fs::write(dir.join("cert.pem"), &cert).unwrap();
@@ -737,8 +739,13 @@ async fn start_hysteria(bin: &Path, nports: usize) -> Hysteria {
     let mut ports = Vec::new();
     while ports.len() < nports {
         let port = common::free_udp_port();
+        let obfs = if obfs {
+            format!("obfs:\n  type: salamander\n  salamander:\n    password: {OBFS_PASSWORD}\n")
+        } else {
+            String::new()
+        };
         let config = format!(
-            "listen: 127.0.0.1:{port}\ntls:\n  cert: {cert}\n  key: {key}\nobfs:\n  type: salamander\n  salamander:\n    password: {OBFS_PASSWORD}\nauth:\n  type: userpass\n  userpass:\n    {ADMIN}: {HY2_PASSWORD}\n    other: {OBFS_PASSWORD}\n",
+            "listen: 127.0.0.1:{port}\ntls:\n  cert: {cert}\n  key: {key}\n{obfs}auth:\n  type: userpass\n  userpass:\n    {ADMIN}: {HY2_PASSWORD}\n    other: {OBFS_PASSWORD}\n",
             cert = dir.join("cert.pem").display(),
             key = dir.join("key.pem").display(),
         );
@@ -762,10 +769,10 @@ async fn start_hysteria(bin: &Path, nports: usize) -> Hysteria {
                 if echo {
                     eprintln!("hysteria: {line}");
                 }
-                if line.contains("server up and running") {
-                    if let Some(tx) = tx.take() {
-                        let _ = tx.send(());
-                    }
+                if line.contains("server up and running")
+                    && let Some(tx) = tx.take()
+                {
+                    let _ = tx.send(());
                 }
             }
         });
@@ -786,13 +793,14 @@ async fn start_hysteria(bin: &Path, nports: usize) -> Hysteria {
         _dir: dir,
         ports,
         cert_pem: cert,
+        obfs,
     }
 }
 
 impl Hysteria {
     /// singbox.ts `hy2()`.
     fn outbound(&self, tag: &str, port: u16, password: &str) -> Value {
-        json!({
+        let mut o = json!({
             "type": "hysteria2",
             "tag": tag,
             "server": "127.0.0.1",
@@ -800,7 +808,11 @@ impl Hysteria {
             "password": password,
             "obfs": {"type": "salamander", "password": OBFS_PASSWORD},
             "tls": {"enabled": true, "server_name": HY2_SNI, "certificate": self.cert_pem},
-        })
+        });
+        if !self.obfs {
+            o.as_object_mut().unwrap().remove("obfs");
+        }
+        o
     }
 }
 
@@ -813,7 +825,7 @@ async fn hysteria2_apernet() {
     let Some(bin) = find_bin("SBR_HYSTERIA", "hysteria") else {
         return;
     };
-    let hy = start_hysteria(&bin, 3).await;
+    let hy = start_hysteria(&bin, 3, true).await;
     let (techo, uecho) = (common::echo().await, common::udp_echo().await);
     let engine = engine(
         hy.ports
@@ -847,7 +859,7 @@ async fn hysteria2_apernet_rejections() {
     let Some(bin) = find_bin("SBR_HYSTERIA", "hysteria") else {
         return;
     };
-    let hy = start_hysteria(&bin, 1).await;
+    let hy = start_hysteria(&bin, 1, true).await;
     let techo = common::echo().await;
     let port = hy.ports[0];
     let mut wrong_obfs = hy.outbound("wrong-obfs", port, &hy2_password());
@@ -887,6 +899,33 @@ async fn hysteria2_apernet_rejections() {
     }
     let out = engine.outbound("ok").unwrap().clone();
     tcp_roundtrip(&out, techo, 64 * 1024).await.unwrap();
+}
+
+/// apernet hysteria without obfs behind an SNI-filtering censor: quic-go's
+/// server must accept the scrambled ClientHello, and the censor must block
+/// the unsplit one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hysteria2_apernet_sni_censor() {
+    let Some(bin) = find_bin("SBR_HYSTERIA", "hysteria") else {
+        return;
+    };
+    let hy = start_hysteria(&bin, 1, false).await;
+    let (techo, uecho) = (common::echo().await, common::udp_echo().await);
+    let upstream = SocketAddr::from(([127, 0, 0, 1], hy.ports[0]));
+    let open = common::censor::start(upstream, HY2_SNI).await;
+    let shut = common::censor::start(upstream, HY2_SNI).await;
+    let mut plain = hy.outbound("unsplit", shut.addr.port(), &hy2_password());
+    plain["disable_client_hello_scrambling"] = json!(true);
+    plain["tls"]["handshake_timeout"] = json!("3s");
+    let engine = engine(vec![hy.outbound("scrambled", open.addr.port(), &hy2_password()), plain]);
+    let out = engine.outbound("scrambled").unwrap().clone();
+    tcp_roundtrip(&out, techo, MIB).await.unwrap();
+    udp_roundtrip(&out, uecho, &[1, 1200, 3000]).await.unwrap();
+    assert!(open.inspected.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    assert!(!open.blocked.load(std::sync::atomic::Ordering::Relaxed));
+    let out = engine.outbound("unsplit").unwrap().clone();
+    assert!(tcp_roundtrip(&out, techo, 1024).await.is_err());
+    assert!(shut.blocked.load(std::sync::atomic::Ordering::Relaxed));
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,7 +1072,7 @@ async fn jaritanet_profile() {
         return;
     };
     let xray = start_xray(&xbin).await;
-    let hy = start_hysteria(&hbin, 3).await;
+    let hy = start_hysteria(&hbin, 3, true).await;
     let dir = temp_dir("profile");
     let exit = ss_exit(&dir).await;
     let probe = generate_204().await;

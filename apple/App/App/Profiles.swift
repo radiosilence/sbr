@@ -31,11 +31,11 @@ struct ProfileLink {
             guard link.host == "import-remote-profile",
                   let raw = URLComponents(url: link, resolvingAgainstBaseURL: false)?
                   .queryItems?.first(where: { $0.name == "url" })?.value,
-                  let url = URL(string: raw), url.scheme?.hasPrefix("http") == true
+                  let url = URL(string: raw), url.scheme?.lowercased() == "https"
             else { return nil }
             self.url = url
             self.name = link.fragment?.removingPercentEncoding
-        case "http", "https":
+        case "https":
             self.url = link
             self.name = link.fragment?.removingPercentEncoding
         default:
@@ -44,17 +44,23 @@ struct ProfileLink {
     }
 }
 
-/// Profiles live in the App Group: `profiles/index.json` plus one JSON file
-/// per profile. The active one is copied to `config.json`, which is what the
-/// tunnel reads.
+/// Profiles live in the app's own container (`Application Support/profiles`:
+/// `index.json` plus one JSON file per profile), protected until first
+/// unlock. The tunnel never reads them: the app hands it the active
+/// profile's text inside the VPN configuration (see `TunnelModel.apply`), so
+/// no shared container holds every profile's credentials.
 @MainActor
 final class ProfileStore: ObservableObject {
     @Published private(set) var profiles: [Profile] = []
     @Published private(set) var activeID: UUID?
     @Published private(set) var refreshing: Set<UUID> = []
+    /// The active profile's config, for the tunnel.
+    @Published private(set) var activeText: String?
 
-    private let config = SbrConfigStore(appGroup: AppConfig.appGroup)
-    private var dir: URL? { config.directory?.appendingPathComponent("profiles", isDirectory: true) }
+    private var dir: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("profiles", isDirectory: true)
+    }
     private var indexURL: URL? { dir?.appendingPathComponent("index.json") }
 
     private struct Index: Codable {
@@ -70,6 +76,7 @@ final class ProfileStore: ObservableObject {
         else { return }
         profiles = index.profiles
         activeID = index.active
+        activeText = active.flatMap { try? text(of: $0) }
     }
 
     /// Download a remote profile, validate it with the tunnel's own parser,
@@ -94,13 +101,13 @@ final class ProfileStore: ObservableObject {
     }
 
     func text(of profile: Profile) throws -> String {
-        guard let url = file(profile.id) else { throw SbrError("App Group unavailable") }
+        guard let url = file(profile.id) else { throw SbrError("no storage directory") }
         return try String(contentsOf: url, encoding: .utf8)
     }
 
     /// Make `profile` the one the tunnel runs.
     func activate(_ profile: Profile) throws {
-        try config.save(try text(of: profile))
+        activeText = try text(of: profile)
         activeID = profile.id
         try saveIndex()
     }
@@ -108,7 +115,10 @@ final class ProfileStore: ObservableObject {
     func remove(_ profile: Profile) {
         if let url = file(profile.id) { try? FileManager.default.removeItem(at: url) }
         profiles.removeAll { $0.id == profile.id }
-        if activeID == profile.id { activeID = nil }
+        if activeID == profile.id {
+            activeID = nil
+            activeText = nil
+        }
         try? saveIndex()
     }
 
@@ -125,7 +135,7 @@ final class ProfileStore: ObservableObject {
         updated.updated = Date()
         try write(updated, text: text)
         guard profile.id == activeID, before != text else { return false }
-        try config.save(text)
+        activeText = text
         return true
     }
 
@@ -139,11 +149,19 @@ final class ProfileStore: ObservableObject {
         return activeChanged
     }
 
+    /// No disk cache (the response carries credentials), no cookies, and no
+    /// client-identifying User-Agent beyond the system default.
+    private static let session: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.urlCache = nil
+        c.httpCookieStorage = nil
+        c.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        return URLSession(configuration: c)
+    }()
+
     private func fetch(_ url: URL) async throws -> String {
-        var request = URLRequest(url: url)
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("sbr/\(Sbr.version)", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        guard url.scheme?.lowercased() == "https" else { throw SbrError("profile links must use https") }
+        let (data, response) = try await Self.session.data(from: url)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw SbrError("download failed: HTTP \(http.statusCode)")
         }
@@ -151,9 +169,9 @@ final class ProfileStore: ObservableObject {
     }
 
     private func write(_ profile: Profile, text: String) throws {
-        guard let dir, let url = file(profile.id) else { throw SbrError("App Group unavailable") }
+        guard let dir, let url = file(profile.id) else { throw SbrError("no storage directory") }
         if let problem = Sbr.check(config: text) { throw SbrError(problem) }
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Self.prepare(dir)
         try Data(text.utf8).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         if let i = profiles.firstIndex(where: { $0.id == profile.id }) {
             profiles[i] = profile
@@ -165,9 +183,19 @@ final class ProfileStore: ObservableObject {
 
     private func saveIndex() throws {
         guard let dir, let indexURL else { return }
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Self.prepare(dir)
         let data = try JSONEncoder().encode(Index(profiles: profiles, active: activeID))
         try data.write(to: indexURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    /// Profiles hold server credentials: keep them out of iCloud and
+    /// computer backups.
+    private static func prepare(_ dir: URL) throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var d = dir
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try d.setResourceValues(values)
     }
 
     private func file(_ id: UUID) -> URL? { dir?.appendingPathComponent("\(id.uuidString).json") }

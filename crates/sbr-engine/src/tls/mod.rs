@@ -14,7 +14,7 @@
 
 mod conn;
 mod io;
-mod verify;
+pub(crate) mod verify;
 
 use std::io as stdio;
 use std::sync::Arc;

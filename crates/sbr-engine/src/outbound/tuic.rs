@@ -84,8 +84,10 @@ fn put_addr(out: &mut Vec<u8>, d: Option<&Destination>) {
     match &d.host {
         Host::Domain(name) => {
             out.push(0);
+            // A longer name would spill into the port field; truncate like proto.rs.
+            let name = &name.as_bytes()[..name.len().min(255)];
             out.push(name.len() as u8);
-            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(name);
         }
         Host::Ip(std::net::IpAddr::V4(ip)) => {
             out.push(1);
@@ -120,7 +122,8 @@ impl Tuic {
     pub fn new(tag: String, c: &TuicOutbound, upstream: Upstream) -> Result<Self, String> {
         let server = Destination::from_host_port(&c.server.server, c.server.server_port);
         // sing-box sets no default ALPN for TUIC.
-        let dialer = Dialer::new(upstream, server, &c.tls, &[], c.zero_rtt_handshake)?;
+        let mut dialer = Dialer::new(upstream, server, &c.tls, &[], c.zero_rtt_handshake)?;
+        dialer.scramble = !c.quic.disable_client_hello_scrambling;
         Ok(Self {
             tag,
             dialer,
@@ -473,8 +476,10 @@ fn put_socks_addr(out: &mut Vec<u8>, d: &Destination) {
         }
         Host::Domain(name) => {
             out.push(3);
+            // A longer name would spill into the port field; truncate like proto.rs.
+            let name = &name.as_bytes()[..name.len().min(255)];
             out.push(name.len() as u8);
-            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(name);
         }
         Host::Ip(std::net::IpAddr::V6(ip)) => {
             out.push(4);
@@ -497,8 +502,10 @@ fn put_uot_addr(out: &mut Vec<u8>, d: &Destination) {
         }
         Host::Domain(name) => {
             out.push(2);
+            // A longer name would spill into the port field; truncate like proto.rs.
+            let name = &name.as_bytes()[..name.len().min(255)];
             out.push(name.len() as u8);
-            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(name);
         }
     }
     out.extend_from_slice(&d.port.to_be_bytes());

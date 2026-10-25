@@ -9,6 +9,14 @@
 //! not prove the proxy protocol works end to end; set `url` to a URL you
 //! control for that. Members without a server (`direct`, `block`) are not
 //! measured in that mode and are only chosen when nothing else answers.
+//!
+//! On top of delay, sbr tracks whether each member actually carries data
+//! (`crate::health`): members that freeze, reset or black-hole traffic after
+//! their handshake are skipped for a back-off period, and the group switches
+//! as soon as that is detected instead of at its next interval. Each
+//! successful probe is followed by a data probe through the member: a GET of
+//! `url`, or with no `url`, a fetch from the member's own server through the
+//! member itself.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -18,12 +26,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 use sbr_core::{BoxFuture, BoxPacketConn, Destination, Group, Outbound, Stream};
 use tokio::sync::watch;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::Upstream;
 use crate::cache::CacheFile;
-use crate::fetch::{HttpClient, Url, elapsed_ms};
-use crate::track::Tracker;
+use crate::fetch::{HttpClient, Target, Url, elapsed_ms};
+use crate::health::{self, Change, Degraded, Finish, Health, Record, Signal, Verdict};
+use crate::track::{Conn, Tracker};
 
 /// sing-box defaults.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(180);
@@ -47,6 +56,14 @@ pub struct GroupEnv {
     /// How to reach each leaf's own server, for URL-less probing.
     pub(crate) servers: OnceLock<HashMap<String, (Upstream, Destination)>>,
     pub(crate) urltests: OnceLock<HashMap<String, Arc<UrlTest>>>,
+    /// Every built outbound, so a leaf can be probed by tag. Weak: groups
+    /// hold this environment.
+    pub(crate) outbounds: OnceLock<HashMap<String, Weak<dyn Outbound>>>,
+    /// What a data probe through each leaf fetches when no `url` applies:
+    /// the leaf's own server, reached through the leaf.
+    pub(crate) targets: OnceLock<HashMap<String, Destination>>,
+    pub health: Health,
+    handle: OnceLock<tokio::runtime::Handle>,
     shutdown: watch::Sender<bool>,
 }
 
@@ -67,6 +84,10 @@ impl GroupEnv {
             history: Mutex::default(),
             servers: OnceLock::new(),
             urltests: OnceLock::new(),
+            outbounds: OnceLock::new(),
+            targets: OnceLock::new(),
+            health: Health::default(),
+            handle: OnceLock::new(),
             shutdown: watch::channel(false).0,
         }
     }
@@ -99,6 +120,9 @@ impl GroupEnv {
 
     /// Start background probing (sing-box `PostStart`).
     pub fn start(&self) {
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            let _ = self.handle.set(h);
+        }
         for g in self.urltests() {
             g.post_start();
         }
@@ -110,8 +134,18 @@ impl GroupEnv {
     }
 
     /// Measure one outbound and record it under its real (leaf) tag.
-    /// `url` overrides the URL-less handshake measurement.
-    pub async fn probe(&self, o: &Arc<dyn Outbound>, url: Option<&Url>) -> io::Result<u16> {
+    /// `url` overrides the URL-less handshake measurement. A successful
+    /// measurement starts a data probe in the background.
+    pub async fn probe(self: &Arc<Self>, o: &Arc<dyn Outbound>, url: Option<&Url>) -> io::Result<u16> {
+        let r = self.measure(o, url).await;
+        if r.is_ok() {
+            let (env, leaf, url) = (self.clone(), real_leaf(o), url.cloned());
+            self.spawn(async move { env.check(leaf, url, false).await });
+        }
+        r
+    }
+
+    async fn measure(&self, o: &Arc<dyn Outbound>, url: Option<&Url>) -> io::Result<u16> {
         let tag = real_tag(o.as_ref());
         let r = match url {
             Some(u) => self.http.probe(o.as_ref(), u).await,
@@ -154,13 +188,184 @@ impl GroupEnv {
         Ok(d)
     }
 
-    /// Re-evaluate every urltest group that contains `tag` (after a manual probe).
+    /// Re-evaluate every urltest group that contains `tag`. Repeats while
+    /// anything switches, so an outer group sees its inner groups' new picks.
     pub fn recheck_containing(&self, tag: &str) {
-        for g in self.urltests() {
-            if contains(g.as_ref(), tag, &mut HashSet::new()) {
-                g.perform_update_check();
+        let groups = self.containing(tag);
+        for _ in 0..groups.len() {
+            if !groups.iter().fold(false, |any, g| g.perform_update_check() | any) {
+                break;
             }
         }
+    }
+
+    fn containing(&self, tag: &str) -> Vec<&Arc<UrlTest>> {
+        self.urltests()
+            .filter(|g| contains(g.as_ref(), tag, &mut HashSet::new()))
+            .collect()
+    }
+
+    fn spawn(&self, f: impl Future<Output = ()> + Send + 'static) {
+        if let Some(h) = self
+            .handle
+            .get()
+            .cloned()
+            .or_else(|| tokio::runtime::Handle::try_current().ok())
+        {
+            h.spawn(f);
+        }
+    }
+
+    fn leaf(&self, tag: &str) -> Option<Arc<dyn Outbound>> {
+        self.outbounds.get()?.get(tag)?.upgrade()
+    }
+
+    /// Why `tag` (a leaf) is out of selection, if it is.
+    pub fn degraded(&self, tag: &str) -> Option<Degraded> {
+        self.health.degraded(tag)
+    }
+
+    /// A passive signal from a connection carried by `leaf`.
+    pub(crate) fn report(self: &Arc<Self>, leaf: &str, signal: Signal, dest: &Destination, conn: Option<u64>) {
+        let out = self
+            .health
+            .with(leaf, |r| r.report(Instant::now(), signal, health::dest_key(dest), conn));
+        debug!(outbound = leaf, signal = signal.as_str(), %dest, "suspect connection");
+        if out.degraded {
+            self.on_degraded(leaf);
+        }
+        if out.probe {
+            match self.leaf(leaf) {
+                Some(o) => {
+                    let url = self.containing(leaf).iter().find_map(|g| g.url.clone());
+                    let env = self.clone();
+                    self.spawn(async move { env.check(o, url, true).await });
+                }
+                None => self.probed(leaf, Verdict::Inconclusive),
+            }
+        }
+    }
+
+    /// A stalled connection on `leaf` started receiving again.
+    pub(crate) fn retract(&self, leaf: &str, conn: u64) {
+        self.health.with(leaf, |r| r.retract(conn));
+    }
+
+    /// A relay on `leaf` ended.
+    pub(crate) fn finished(self: &Arc<Self>, leaf: &str, conn: &Conn, dest: &Destination) {
+        match health::finish(conn) {
+            Some(Finish::Proven) => self.health.with(leaf, Record::success),
+            Some(Finish::Failed(s)) => self.report(leaf, s, dest, Some(conn.id)),
+            None => {}
+        }
+    }
+
+    /// Data-probe `leaf`. `claimed`: the caller already holds the record's
+    /// probe slot. Dropping the future mid-probe releases the slot.
+    async fn check(self: &Arc<Self>, leaf: Arc<dyn Outbound>, url: Option<Url>, claimed: bool) {
+        let tag = leaf.tag().to_owned();
+        let target = match url {
+            Some(u) => Some(Target::Url(u)),
+            None => self
+                .targets
+                .get()
+                .and_then(|m| m.get(&tag))
+                .cloned()
+                .map(Target::Server),
+        };
+        if !claimed && !self.health.with(&tag, Record::begin_probe) {
+            return;
+        }
+        let Some(target) = target else {
+            self.probed(&tag, Verdict::Inconclusive);
+            return;
+        };
+        debug!(outbound = %tag, ?target, "data probe started");
+        let slot = ProbeSlot {
+            health: &self.health,
+            tag: &tag,
+        };
+        let v = self.http.data_probe(leaf.as_ref(), &target).await;
+        std::mem::forget(slot);
+        debug!(outbound = %tag, verdict = ?v, "data probe");
+        self.probed(&tag, v);
+    }
+
+    fn probed(self: &Arc<Self>, tag: &str, v: Verdict) {
+        match self.health.with(tag, |r| r.probe_done(Instant::now(), v)) {
+            Change::Degraded => self.on_degraded(tag),
+            Change::Readmitted => {
+                info!(outbound = tag, "outbound readmitted");
+                self.recheck_containing(tag);
+            }
+            Change::None => {}
+        }
+    }
+
+    fn on_degraded(self: &Arc<Self>, tag: &str) {
+        let Some(d) = self.health.degraded(tag) else { return };
+        let closed = self.tracker.close_broken(tag);
+        warn!(
+            outbound = tag,
+            reason = d.reason.as_str(),
+            retry_in = ?d.until.saturating_duration_since(Instant::now()),
+            closed,
+            "outbound degraded"
+        );
+        self.recheck_containing(tag);
+        // One deadline per demotion, not a polling timer.
+        let env = self.clone();
+        let tag = tag.to_owned();
+        let mut stop = self.shutdown.subscribe();
+        self.spawn(async move {
+            let due = tokio::select! {
+                _ = tokio::time::sleep_until(d.until.into()) => true,
+                _ = stop.wait_for(|s| *s) => false,
+            };
+            if due {
+                env.retry(&tag).await;
+            }
+        });
+    }
+
+    /// The back-off for `tag` ran out: probe it again, unless every group
+    /// it belongs to is idle (they re-probe due members when next used).
+    async fn retry(self: &Arc<Self>, tag: &str) {
+        let (idle, url) = {
+            let groups = self.containing(tag);
+            (
+                !groups.is_empty() && !groups.iter().any(|g| g.probing()),
+                groups.iter().find_map(|g| g.url.clone()),
+            )
+        };
+        if idle {
+            return;
+        }
+        let Some(o) = self.leaf(tag) else { return };
+        if self.measure(&o, url.as_ref()).await.is_ok() {
+            self.check(o, url, false).await;
+        }
+    }
+
+    /// See `Engine::network_changed`.
+    pub fn network_changed(&self) {
+        self.health.clear();
+        for g in self.urltests() {
+            g.network_changed();
+        }
+    }
+}
+
+/// Frees a leaf's probe slot if a data probe is dropped before it finishes
+/// (a Clash API delay test that timed out).
+struct ProbeSlot<'a> {
+    health: &'a Health,
+    tag: &'a str,
+}
+
+impl Drop for ProbeSlot<'_> {
+    fn drop(&mut self) {
+        self.health.with(self.tag, Record::abort_probe);
     }
 }
 
@@ -399,8 +604,9 @@ impl UrlTest {
 
     async fn probe_loop(self: Arc<Self>) {
         let mut stop = self.env.shutdown.subscribe();
-        // Resuming after a long idle: the history is stale, check now.
-        if self.idle_for() > self.interval {
+        // Resuming after a long idle (the history is stale), or with members
+        // whose back-off ran out while the group was idle: check now.
+        if self.idle_for() > self.interval || self.members_due() {
             self.last_active.store(self.now_ms(), Ordering::Relaxed);
             self.url_test(false).await;
         }
@@ -420,16 +626,30 @@ impl UrlTest {
 
     /// sing-box `Select`: keep the current member unless another beats it by
     /// more than `tolerance`. Returns (index, measured).
+    /// Degraded members are skipped while any healthy member has answered.
     fn select(&self) -> (usize, bool) {
+        let state: Vec<(Option<Delay>, bool)> = self
+            .members
+            .iter()
+            .map(|m| {
+                let t = real_tag(m.as_ref());
+                (self.env.history(&t), self.env.health.degraded(&t).is_some())
+            })
+            .collect();
+        let skip_degraded = state.iter().any(|(h, d)| h.is_some() && !d);
+        let usable = |i: usize| match state[i] {
+            (Some(h), degraded) if !(skip_degraded && degraded) => Some(h),
+            _ => None,
+        };
         let mut best: Option<(usize, u16)> = None;
         let cur = self.selected.load(Ordering::Relaxed);
         if cur != usize::MAX
-            && let Some(h) = self.env.history(&real_tag(self.members[cur].as_ref()))
+            && let Some(h) = usable(cur)
         {
             best = Some((cur, h.delay));
         }
-        for (i, m) in self.members.iter().enumerate() {
-            let Some(h) = self.env.history(&real_tag(m.as_ref())) else {
+        for i in 0..self.members.len() {
+            let Some(h) = usable(i) else {
                 continue;
             };
             if best.is_none_or(|(_, d)| d > h.delay.saturating_add(self.tolerance)) {
@@ -442,7 +662,8 @@ impl UrlTest {
         }
     }
 
-    pub fn perform_update_check(&self) {
+    /// Re-select; true if the group switched.
+    pub fn perform_update_check(&self) -> bool {
         let _g = self.update.lock().unwrap();
         let (i, measured) = self.select();
         let cur = self.selected.load(Ordering::Relaxed);
@@ -453,8 +674,31 @@ impl UrlTest {
                 if self.interrupt {
                     self.env.tracker.close_through(&self.tag);
                 }
+                return true;
             }
         }
+        false
+    }
+
+    fn network_changed(&self) {
+        if !self.started.load(Ordering::Relaxed) {
+            return;
+        }
+        if self.probing() {
+            if let Some(me) = self.me.upgrade() {
+                self.env.spawn(async move {
+                    me.url_test(true).await;
+                });
+            }
+        } else {
+            // Stale: the next use re-probes before anything else.
+            self.last_active.store(0, Ordering::Relaxed);
+        }
+    }
+
+    fn members_due(&self) -> bool {
+        let now = Instant::now();
+        self.members.iter().any(|m| self.env.health.due(m.tag(), now))
     }
 
     /// Probe all members (recursing into groups) and re-select.
@@ -474,7 +718,7 @@ impl UrlTest {
 
 /// sing-box `URLTestOutbounds`.
 pub async fn test_outbounds(
-    env: &GroupEnv,
+    env: &Arc<GroupEnv>,
     outbounds: &[Arc<dyn Outbound>],
     url: Option<&Url>,
     interval: Duration,
@@ -484,6 +728,7 @@ pub async fn test_outbounds(
     let mut groups = Vec::new();
     let mut leaves = Vec::new();
     let mut nested = Vec::new();
+    let now = Instant::now();
     let mut stack: Vec<Arc<dyn Outbound>> = outbounds.iter().rev().cloned().collect();
     while let Some(o) = stack.pop() {
         if !seen.insert(o.tag().to_owned()) {
@@ -499,7 +744,7 @@ pub async fn test_outbounds(
             let fresh = env
                 .history(o.tag())
                 .is_some_and(|h| h.time.elapsed().is_ok_and(|e| e < interval));
-            if force || !fresh {
+            if force || !fresh || env.health.due(o.tag(), now) {
                 leaves.push(o);
             }
         }
@@ -507,7 +752,13 @@ pub async fn test_outbounds(
     let sem = tokio::sync::Semaphore::new(CONCURRENCY);
     let leaf_results = futures_util::future::join_all(leaves.iter().map(|o| async {
         let _p = sem.acquire().await;
-        (o.tag().to_owned(), env.probe(o, url).await)
+        // The data probe runs inside the check, so a group's check (and its
+        // radio use) ends when the last probe does.
+        let r = env.measure(o, url).await;
+        if r.is_ok() {
+            env.check(real_leaf(o), url.cloned(), false).await;
+        }
+        (o.tag().to_owned(), r)
     }));
     let nested_results = futures_util::future::join_all(nested.iter().map(|g| g.url_test(force)));
     let (leaf_results, nested_results) = tokio::join!(leaf_results, nested_results);

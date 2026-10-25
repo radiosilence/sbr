@@ -6,6 +6,7 @@ mod h2;
 mod http;
 mod prefixed;
 mod ws;
+mod xhttp;
 
 use std::io;
 
@@ -54,7 +55,7 @@ impl ServerDialer {
     }
 
     /// The dialer with `alpn` as TLS default ALPN (see [`TlsClient::with_default_alpn`]).
-    fn with_default_alpn(&self, alpn: &[&str]) -> Self {
+    pub(crate) fn with_default_alpn(&self, alpn: &[&str]) -> Self {
         Self {
             upstream: self.upstream.clone(),
             server: self.server.clone(),
@@ -91,6 +92,7 @@ enum Kind {
     HttpUpgrade(http::HttpUpgradeClient),
     Grpc(h2::H2Pool, http::HttpRequestTemplate),
     Http(http::HttpClient),
+    Xhttp(xhttp::XhttpClient),
 }
 
 /// A V2Ray-family outbound's way to its server.
@@ -107,7 +109,7 @@ impl ProxyDialer {
             Some(t) => Some(TlsClient::new(t, &c.server.server, base_dir)?),
             None => None,
         };
-        let base = ServerDialer::new(upstream, server, tls);
+        let base = ServerDialer::new(upstream.clone(), server, tls);
         let kind = match &c.transport {
             None => Kind::Plain,
             Some(Transport::Ws {
@@ -152,6 +154,9 @@ impl ProxyDialer {
                 method.as_deref(),
                 headers,
             )),
+            Some(Transport::Xhttp(x)) => {
+                Kind::Xhttp(xhttp::XhttpClient::new(x, base.clone(), c.tls(), upstream, base_dir)?)
+            }
             Some(Transport::Quic) => return Err("transport.type: quic transport not supported by sbr yet".into()),
         };
         Ok(Self { base, kind })
@@ -172,6 +177,7 @@ impl ProxyDialer {
             Kind::HttpUpgrade(c) => c.connect().await,
             Kind::Grpc(pool, tpl) => Ok(Box::new(pool.open(tpl.build()?, true).await?)),
             Kind::Http(c) => c.connect().await,
+            Kind::Xhttp(c) => c.connect().await,
         }
     }
 }

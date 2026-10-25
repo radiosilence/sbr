@@ -172,6 +172,22 @@ pub(crate) fn parse_tls(parent: &mut Obj, key: &str, diag: &mut Diag) -> Result<
             return Err(Error::at(&o.sub(k), "not supported by sbr yet"));
         }
     }
+    // sing-box ignores these when `enabled` is false, so a profile missing
+    // `"enabled": true` would send the proxy header (UUID or password and the
+    // destination) in cleartext. Refuse rather than ignore.
+    if !t.enabled {
+        let on = [
+            ("reality", t.reality.as_ref().is_some_and(|r| r.enabled)),
+            ("utls", t.utls.as_ref().is_some_and(|u| u.enabled)),
+            ("ech", t.ech.as_ref().is_some_and(|e| e.enabled)),
+        ];
+        if let Some((k, _)) = on.iter().find(|(_, on)| *on) {
+            return Err(Error::at(
+                &o.sub(k),
+                format!("{k} is enabled but tls is not; set \"enabled\": true"),
+            ));
+        }
+    }
     o.finish()?;
     Ok(Some(t))
 }
@@ -204,6 +220,8 @@ pub enum Transport {
         path: Option<String>,
         headers: Vec<(String, String)>,
     },
+    /// sbr extension: Xray's XHTTP (`splithttp`).
+    Xhttp(Box<crate::xhttp::Xhttp>),
 }
 
 /// `badoption.HTTPHeader`: values are a string or a list of strings.
@@ -224,7 +242,7 @@ fn json_str(v: Value) -> String {
     }
 }
 
-pub(crate) fn parse_transport(parent: &mut Obj, key: &str) -> Result<Option<Transport>> {
+pub(crate) fn parse_transport(parent: &mut Obj, key: &str, diag: &mut Diag) -> Result<Option<Transport>> {
     let Some(v) = parent.raw(key) else { return Ok(None) };
     let mut o = Obj::new(v, parent.sub(key))?;
     let ty: String = o.req("type")?;
@@ -255,6 +273,7 @@ pub(crate) fn parse_transport(parent: &mut Obj, key: &str) -> Result<Option<Tran
             path: o.string("path")?,
             headers: headers(&mut o, "headers")?,
         },
+        "xhttp" | "splithttp" => Transport::Xhttp(Box::new(crate::xhttp::parse_xhttp(&mut o, diag)?)),
         t => return Err(Error::at(&o.sub("type"), format!("unknown transport {t:?}"))),
     };
     o.finish()?;

@@ -122,6 +122,10 @@ where
     handshake::handshake(stream, &params, auth).await
 }
 
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub use handshake::fuzz_handshake_messages;
+
 /// Client options, mirroring sing-box's outbound `tls` with `utls` and `reality`.
 #[derive(Clone, Debug)]
 pub struct RealityConfig {

@@ -8,8 +8,9 @@ public enum SbrRequest: Codable, Sendable {
     /// Start a latency test of a group; poll `.groups` for the results.
     case urlTest(group: String)
     case stats
-    /// Re-read the config (App Group / providerConfiguration) and reload.
-    case reload
+    /// Reload with this config, or re-read the saved one when nil. The app
+    /// also saves it into `providerConfiguration` so a restart uses it.
+    case reload(config: String?)
 }
 
 public struct SbrResponse: Codable, Sendable {

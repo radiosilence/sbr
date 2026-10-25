@@ -48,6 +48,11 @@ const CMD_SERVER_SETTINGS: u8 = 10;
 const PROTOCOL_VERSION: u32 = 2;
 const FRAME_OVERHEAD: usize = 7;
 const MAX_FRAME: usize = 0xffff;
+/// Bounds on a padding scheme, which the server may replace at any time: it
+/// must not be able to make the client upload unbounded padding. The default
+/// scheme pads 8 packets with at most 4 ranges each.
+const MAX_PADDING_PACKETS: u32 = 64;
+const MAX_PADDING_RANGES: usize = 16;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MIN_IDLE_INTERVAL: Duration = Duration::from_secs(5);
 const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -106,10 +111,12 @@ impl Padding {
                 if a > b {
                     std::mem::swap(&mut a, &mut b);
                 }
-                if a <= 0 || b > 1 << 20 {
+                if a <= 0 || b > MAX_FRAME as i64 {
                     continue;
                 }
-                ranges.push((a, b));
+                if ranges.len() < MAX_PADDING_RANGES {
+                    ranges.push((a, b));
+                }
             }
             if !ranges.is_empty() {
                 records.insert(n, ranges);
@@ -117,7 +124,7 @@ impl Padding {
         }
         Some(Self {
             md5_hex: hex(&md5::Md5::digest(raw)),
-            stop: stop as u32,
+            stop: (stop as u32).min(MAX_PADDING_PACKETS),
             records,
         })
     }
@@ -263,6 +270,8 @@ struct Session {
     peer_version: AtomicU32,
     /// Frames received so far: the stream-open watchdog compares it.
     frames: AtomicU64,
+    /// A heartbeat reply is queued; further requests are answered by it.
+    heart_pending: AtomicBool,
     closed: AtomicBool,
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -366,10 +375,13 @@ impl Session {
                             )));
                         }
                     }
-                    CMD_HEART_REQUEST => {
+                    // One reply in flight at most: a server that floods
+                    // requests and stops reading must not pile up tasks.
+                    CMD_HEART_REQUEST if !self.heart_pending.swap(true, Ordering::AcqRel) => {
                         let me = self.clone();
                         tokio::spawn(async move {
                             let _ = me.write_control(CMD_HEART_RESPONSE, id, &[]).await;
+                            me.heart_pending.store(false, Ordering::Release);
                         });
                     }
                     // SYN, SETTINGS (server side only), WASTE, HEART_RESPONSE: ignore.
@@ -512,7 +524,7 @@ impl Pool {
         let padding = self.padding.read().unwrap().clone();
         let (r, mut w) = tokio::io::split(tls);
         // Authentication: sha256(password), padding length, zeros.
-        let pad = padding.sizes(0).first().copied().filter(|s| *s > 0).unwrap_or(0) as usize;
+        let pad = (padding.sizes(0).first().copied().filter(|s| *s > 0).unwrap_or(0) as usize).min(u16::MAX as usize);
         let mut req = Vec::with_capacity(32 + 2 + pad);
         req.extend_from_slice(&self.password);
         req.extend_from_slice(&(pad as u16).to_be_bytes());
@@ -539,6 +551,7 @@ impl Pool {
             next_id: AtomicU32::new(0),
             peer_version: AtomicU32::new(0),
             frames: AtomicU64::new(0),
+            heart_pending: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             reader: Mutex::new(None),
         });

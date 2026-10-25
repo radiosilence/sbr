@@ -5,13 +5,24 @@
 //! Allocation follows sing-box: the first address handed out is
 //! `network + 2`, addresses are used in order, and after the last one
 //! below the broadcast address it wraps to `network + 2` again, evicting
-//! whatever domain held the reused address.
+//! whatever domain held the reused address. Unlike sing-box, a range is
+//! used only up to `MAX_ENTRIES` addresses before wrapping: every allocation
+//! holds its domain in memory, and a local app resolving unique names would
+//! otherwise grow the table without bound (a /18 IPv6 range never wraps).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, RwLock};
 
 use ipnet::{Ipv4Net, Ipv6Net};
+
+/// Addresses used per family before wrapping. Bounds the table to a few MB
+/// even with 253-byte names, which matters under the iOS extension's limit.
+const MAX_ENTRIES: u128 = if cfg!(any(target_os = "ios", target_os = "tvos")) {
+    16 << 10
+} else {
+    64 << 10
+};
 
 pub struct FakeIp {
     v4: Option<Range>,
@@ -57,7 +68,7 @@ impl Range {
         }
     }
     fn size(&self) -> u128 {
-        self.last - self.first + 1
+        (self.last - self.first + 1).min(MAX_ENTRIES)
     }
 }
 

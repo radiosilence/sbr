@@ -4,6 +4,9 @@
 //! path (or have `sing-box` on `PATH`). Without one, every test prints why
 //! and passes.
 
+#[path = "common/censor.rs"]
+mod censor;
+
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -369,4 +372,66 @@ async fn tuic_wrong_password() {
         .await
         .expect("must not hang");
     assert!(r.is_err(), "wrong TUIC password must not relay");
+}
+
+/// Through a censor that blocks `localhost` in a single Initial packet: the
+/// scrambled ClientHello gets through, the unsplit one is black-holed.
+async fn through_censor(port: u16, outbound_json: impl Fn(SocketAddr, &str) -> String) {
+    let censor = censor::start(SocketAddr::from(([127, 0, 0, 1], port)), "localhost").await;
+    let out = outbound(&outbound_json(censor.addr, ""));
+    tcp_roundtrip(out.as_ref()).await;
+    assert!(censor.inspected.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    assert!(!censor.blocked.load(std::sync::atomic::Ordering::Relaxed));
+
+    let censor = censor::start(SocketAddr::from(([127, 0, 0, 1], port)), "localhost").await;
+    let out = outbound(&outbound_json(
+        censor.addr,
+        r#""disable_client_hello_scrambling":true,"#,
+    ));
+    let r = tokio::time::timeout(
+        Duration::from_secs(10),
+        out.connect(&Destination::from(tcp_echo().await)),
+    )
+    .await;
+    assert!(matches!(r, Ok(Err(_))), "the unsplit ClientHello must be blocked");
+    assert!(censor.blocked.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+fn censored_tls(pem: &str) -> String {
+    format!(
+        r#""tls":{{"enabled":true,"server_name":"localhost","alpn":["h3"],"handshake_timeout":"3s","certificate":{}}}"#,
+        serde_json::to_string(pem).unwrap()
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hysteria2_through_sni_censor() {
+    let port = free_udp_port();
+    let Some((_server, pem)) = start_server(&hy2_inbound(""), port) else {
+        return;
+    };
+    through_censor(port, |addr, extra| {
+        format!(
+            r#"{{"type":"hysteria2","tag":"hy2","server":"127.0.0.1","server_port":{},"password":"{PASSWORD}",{extra}{}}}"#,
+            addr.port(),
+            censored_tls(&pem)
+        )
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tuic_through_sni_censor() {
+    let port = free_udp_port();
+    let Some((_server, pem)) = start_server(&tuic_inbound(PASSWORD), port) else {
+        return;
+    };
+    through_censor(port, |addr, extra| {
+        format!(
+            r#"{{"type":"tuic","tag":"tuic","server":"127.0.0.1","server_port":{},"uuid":"{UUID}","password":"{PASSWORD}",{extra}{}}}"#,
+            addr.port(),
+            censored_tls(&pem)
+        )
+    })
+    .await;
 }
