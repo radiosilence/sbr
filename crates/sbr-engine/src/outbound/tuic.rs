@@ -84,8 +84,10 @@ fn put_addr(out: &mut Vec<u8>, d: Option<&Destination>) {
     match &d.host {
         Host::Domain(name) => {
             out.push(0);
+            // A longer name would spill into the port field; truncate like proto.rs.
+            let name = &name.as_bytes()[..name.len().min(255)];
             out.push(name.len() as u8);
-            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(name);
         }
         Host::Ip(std::net::IpAddr::V4(ip)) => {
             out.push(1);
@@ -473,8 +475,10 @@ fn put_socks_addr(out: &mut Vec<u8>, d: &Destination) {
         }
         Host::Domain(name) => {
             out.push(3);
+            // A longer name would spill into the port field; truncate like proto.rs.
+            let name = &name.as_bytes()[..name.len().min(255)];
             out.push(name.len() as u8);
-            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(name);
         }
         Host::Ip(std::net::IpAddr::V6(ip)) => {
             out.push(4);
@@ -497,8 +501,10 @@ fn put_uot_addr(out: &mut Vec<u8>, d: &Destination) {
         }
         Host::Domain(name) => {
             out.push(2);
+            // A longer name would spill into the port field; truncate like proto.rs.
+            let name = &name.as_bytes()[..name.len().min(255)];
             out.push(name.len() as u8);
-            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(name);
         }
     }
     out.extend_from_slice(&d.port.to_be_bytes());

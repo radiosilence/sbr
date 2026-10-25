@@ -267,7 +267,8 @@ pub(crate) fn parse_hysteria2(o: &mut Obj, diag: &mut Diag) -> Result<Hysteria2O
 /// RFC 4122 text form (`8-4-4-4-12`, any case).
 fn parse_uuid(s: &str, path: &str) -> Result<[u8; 16]> {
     let hex: String = s.chars().filter(|c| *c != '-').collect();
-    let bad = || Error::at(path, format!("invalid uuid {s:?}"));
+    // The UUID is the credential: never echo it into errors (they reach logs and the UI).
+    let bad = || Error::at(path, "invalid uuid");
     if hex.len() != 32 || s.len() != 36 {
         return Err(bad());
     }
