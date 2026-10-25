@@ -154,7 +154,20 @@ impl Engine {
                 let dest = options.apply(&meta.destination);
                 debug!(inbound = %meta.inbound, dest = %meta.destination, domain = meta.sniffed_domain.as_deref().unwrap_or(""), outbound = out.tag(), "route");
                 match out.connect(&dest).await {
-                    Ok(remote) => {
+                    Ok(mut remote) => {
+                        // sing-box `route-options` `tls_fragment`: split the
+                        // client's own ClientHello on its way out.
+                        if options.tls_fragment || options.tls_record_fragment {
+                            let opts = crate::tls::FragmentOptions {
+                                split_packet: options.tls_fragment,
+                                split_record: options.tls_record_fragment,
+                                fallback_delay: options
+                                    .tls_fragment_fallback_delay
+                                    .filter(|d| !d.is_zero())
+                                    .unwrap_or(crate::tls::FRAGMENT_FALLBACK_DELAY),
+                            };
+                            remote = Box::new(crate::tls::TlsIo::new(remote, None, Some(opts)));
+                        }
                         client.inner.ready().await?;
                         // Registered once connected, like sing-box; closing it
                         // through the registry aborts the relay.

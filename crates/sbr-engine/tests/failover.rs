@@ -514,3 +514,54 @@ async fn data_probe_of_own_server_pipelines_past_the_threshold() {
     const { assert!(PROOF_BYTES > 100 * 120, "the limit above is below the threshold") };
     i.shutdown();
 }
+
+/// Accepts connections and records when each arrived.
+async fn accept_log() -> (u16, Arc<std::sync::Mutex<Vec<Instant>>>) {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let l2 = log.clone();
+    tokio::spawn(async move {
+        loop {
+            let (s, _) = l.accept().await.unwrap();
+            l2.lock().unwrap().push(Instant::now());
+            drop(s);
+        }
+    });
+    (port, log)
+}
+
+/// Members on one server are probed one after another with a gap, never
+/// all at once, while a member on another server is probed alongside them.
+#[tokio::test]
+async fn probes_of_one_server_are_spaced_out() {
+    let (one, one_log) = accept_log().await;
+    let (two, two_log) = accept_log().await;
+    let member = |tag: &str, host: &str, port: u16| {
+        format!(r#"{{"type":"http","tag":"{tag}","server":"{host}","server_port":{port}}}"#)
+    };
+    let cfg = format!(
+        r#"{{"log":{{"level":"warn"}},
+        "inbounds":[{{"type":"mixed","tag":"in","listen":"127.0.0.1","listen_port":0}}],
+        "outbounds":[
+            {{"type":"urltest","tag":"auto","outbounds":["a","b","c","d","x"],"interval":"10m"}},
+            {},{},{},{},{}]}}"#,
+        member("a", "127.0.0.1", one),
+        member("b", "127.0.0.1", one),
+        member("c", "127.0.0.1", one),
+        member("d", "127.0.0.1", one),
+        // Another host name, so another queue.
+        member("x", "localhost", two),
+    );
+    let i = start(&cfg).await;
+    let done = until(Duration::from_secs(10), async || one_log.lock().unwrap().len() >= 4).await;
+    assert!(done.is_some(), "every member on the first server probed");
+    let times = one_log.lock().unwrap().clone();
+    for w in times.windows(2) {
+        let gap = w[1] - w[0];
+        assert!(gap >= Duration::from_millis(150), "probes {gap:?} apart");
+    }
+    let x = two_log.lock().unwrap().first().copied().expect("second server probed");
+    assert!(x < times[1], "the second server did not wait behind the first's queue");
+    i.shutdown();
+}

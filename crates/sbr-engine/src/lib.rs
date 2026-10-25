@@ -268,7 +268,8 @@ impl Engine {
     /// (multiplex sessions, QUIC connections, DNS cache) belongs here too as
     /// it lands, so the next request dials over the new path. Outbounds with
     /// long-lived sockets (WireGuard) replace them. Outbound health is
-    /// forgotten (a different network has a different censor) and `urltest`
+    /// forgotten (a different network has a different censor), as are
+    /// automatic ClientHello fragmentation levels, and `urltest`
     /// groups re-probe: at once if in use, otherwise on their next use.
     pub fn network_changed(&self) {
         let udp = self.nat.clear();
@@ -276,6 +277,7 @@ impl Engine {
             o.network_changed();
         }
         self.groups.network_changed();
+        crate::tls::network_changed();
         info!(udp_sessions = udp, "network changed: reset path-bound state");
     }
 

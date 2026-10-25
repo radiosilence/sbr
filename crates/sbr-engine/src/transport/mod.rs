@@ -14,7 +14,7 @@ use sbr_config::{Transport, V2rayCommon};
 use sbr_core::{Destination, Host, Stream};
 
 use crate::outbound::Upstream;
-use crate::tls::{TlsClient, TlsConn};
+use crate::tls::{Retry, TlsClient, TlsConn};
 
 pub use prefixed::Prefixed;
 
@@ -68,14 +68,21 @@ impl ServerDialer {
         self.upstream.connect_raw(&self.server).await
     }
 
-    /// TCP + TLS, keeping the concrete TLS type (XTLS Vision needs it).
+    /// TCP + TLS, keeping the concrete TLS type (XTLS Vision needs it). A
+    /// handshake cut before the server answered is retried on a fresh
+    /// connection once per automatic fragmentation level it raised.
     pub async fn tls(&self) -> io::Result<TlsConn> {
         let tls = self
             .tls
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "TLS required"))?;
-        let (s, fd) = self.tcp().await?;
-        tls.connect(s, fd).await
+        loop {
+            let (s, fd) = self.tcp().await?;
+            match tls.connect(s, fd).await {
+                Err(e) if Retry::is(&e) => continue,
+                r => return r,
+            }
+        }
     }
 
     pub async fn connect(&self) -> io::Result<Stream> {
