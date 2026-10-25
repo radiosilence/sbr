@@ -40,6 +40,10 @@ pub use hello::Fingerprint;
 pub use keys::CipherSuite;
 pub use stream::RealityStream;
 
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub use handshake::fuzz_handshake_messages;
+
 /// Client options, mirroring sing-box's outbound `tls` with `utls` and `reality`.
 #[derive(Clone, Debug)]
 pub struct RealityConfig {
