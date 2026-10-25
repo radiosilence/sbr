@@ -1,3 +1,7 @@
 /target
 *.xcframework
 .DS_Store
+/apple/build
+/apple/Examples/SbrDemo/*.xcodeproj
+/apple/Examples/SbrDemo/Support
+.swiftpm
