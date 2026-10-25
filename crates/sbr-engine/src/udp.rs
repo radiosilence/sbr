@@ -54,6 +54,20 @@ fn now_ms(epoch: Instant) -> u64 {
     epoch.elapsed().as_millis() as u64
 }
 
+impl Nat {
+    pub(crate) fn len(&self) -> usize {
+        self.sessions.lock().unwrap().len()
+    }
+
+    /// Drop every session; their tasks exit when the queue closes.
+    pub(crate) fn clear(&self) -> usize {
+        let mut s = self.sessions.lock().unwrap();
+        let n = s.len();
+        s.clear();
+        n
+    }
+}
+
 impl Engine {
     /// Feed one client datagram. Never blocks: a full session queue drops
     /// the packet, which is what UDP promised anyway.
@@ -74,6 +88,10 @@ impl Engine {
                     return self.spawn_session(&mut sessions, key, inbound_type, p.0, p.1, back);
                 }
             }
+        }
+        if self.max_connections != 0 && sessions.len() >= self.max_connections {
+            debug!(source = %pkt.source, limit = self.max_connections, "udp session limit reached");
+            return;
         }
         self.spawn_session(&mut sessions, key, inbound_type, pkt.destination, pkt.payload, back);
     }

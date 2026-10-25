@@ -22,8 +22,8 @@ sbr check -c config.json
 | `sbr-engine` | Inbounds, outbounds, runtime (`Instance`). |
 | `sbr` | CLI, flag-compatible with `sing-box run/check/version`. |
 | `sbr-reality` | REALITY TLS 1.3 client with uTLS-equivalent ClientHello fingerprints (not wired into an outbound yet). |
-| `sbr-apple` | C ABI (`include/sbr.h`) + `staticlib` for an xcframework. |
-| `apple/` | `SbrKit` Swift package, `build-xcframework.sh`, example `PacketTunnelProvider`. **Untested: written on Linux, not compiled with Xcode yet.** |
+| `sbr-apple` | C ABI (`include/sbr.h`) + `staticlib` for an xcframework: TUN fd adoption, log callback, reload, memory stats, network-change hook. |
+| `apple/` | `SbrKit` Swift package (`Sbr`, `SbrPacketTunnelProvider`), `build-xcframework.sh` (iOS, macOS, Catalyst, tvOS), SwiftUI sample app. See [`apple/README.md`](apple/README.md). **The Swift code is syntax-checked only: written on Linux, not compiled with Xcode yet.** |
 
 ## Routing semantics
 

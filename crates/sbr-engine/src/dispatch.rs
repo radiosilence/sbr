@@ -90,7 +90,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Replay<S> {
 
 impl Engine {
     /// Run a client TCP connection to completion.
-    pub async fn handle_tcp<S: InboundStream>(&self, mut meta: Metadata, client: S) -> io::Result<()> {
+    pub async fn handle_tcp<S: InboundStream>(&self, mut meta: Metadata, mut client: S) -> io::Result<()> {
+        let Some(_slot) = self.admit() else {
+            debug!(inbound = %meta.inbound, dest = %meta.destination, limit = self.max_connections, "connection limit reached");
+            return client.fail(&OpenError::Rejected { drop: false }).await;
+        };
         let mut client = Replay {
             inner: client,
             head: Vec::new(),

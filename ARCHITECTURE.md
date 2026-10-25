@@ -16,7 +16,7 @@ Read this before adding a protocol, inbound or service.
   - `outbound/`: one module per protocol, registered in `outbound/mod.rs::Builder::build`. Protocols reach their server through `Upstream` (system dialer with DNS, or a `detour` outbound), so detour chains work for free.
   - `inbound/`: proxy inbounds; `tun` lives in the `sbr-tun` crate plus `inbound/tun.rs`.
 - `sbr-reality`: standalone REALITY client, `connect(stream, &RealityConfig) -> RealityStream<S>`, generic over the transport. Carries its own minimal TLS 1.3 client because rustls cannot emit browser ClientHellos (uTLS profiles: chrome/firefox/safari/ios). Interop-tested against a sing-box binary built with `-tags with_utls` (`SBR_SING_BOX`).
-- `sbr-apple`: C ABI + staticlib. `apple/`: Swift package.
+- `sbr-apple`: C ABI + staticlib; `include/sbr.h` must match the exports (`tests/c_abi.rs` enforces it). `apple/`: Swift package and sample app; see `apple/README.md` for the power and memory budget.
 
 ## Adding an outbound protocol
 

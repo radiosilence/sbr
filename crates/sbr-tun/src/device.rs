@@ -30,18 +30,15 @@ pub struct DeviceConfig {
 }
 
 impl Device {
-    /// Adopt an fd opened by the platform (Network Extension, VpnService).
-    /// The fd is duplicated: the platform keeps ownership of the original.
+    /// Adopt an fd for a tunnel the platform opened (Network Extension,
+    /// VpnService). Takes ownership: the fd is closed when the device drops.
+    /// Embedders that must keep their own copy pass a `dup()` (sbr-apple does).
     pub fn adopt(fd: RawFd) -> io::Result<Self> {
-        // SAFETY: dup of a caller-provided fd; we own the duplicate.
-        let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
-        if dup < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `dup` is a fresh fd we own.
-        let owned = unsafe { OwnedFd::from_raw_fd(dup) };
+        // SAFETY: the caller transfers ownership of `fd` to us.
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
         set_nonblocking(owned.as_raw_fd())?;
         let name = platform::fd_name(owned.as_raw_fd()).unwrap_or_else(|| "tun".into());
+        platform::tune(owned.as_raw_fd());
         Ok(Self {
             af_header: cfg!(target_vendor = "apple"),
             fd: register(owned)?,

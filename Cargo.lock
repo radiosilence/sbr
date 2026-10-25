@@ -1612,7 +1612,10 @@ dependencies = [
 name = "sbr-apple"
 version = "0.1.0"
 dependencies = [
+ "ipnet",
+ "libc",
  "sbr-engine",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
