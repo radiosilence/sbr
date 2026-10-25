@@ -136,7 +136,7 @@ sing-box wins plain TCP relay **on Linux** because its `bufio` uses `splice(2)` 
 
 ## TUN: two TCP stacks
 
-`stack: system` (and `mixed`, and an unset `stack`) lets the kernel run the TUN's TCP through a NAT onto a local listener. `stack: gvisor` runs sbr's own userspace TCP (`crates/sbr-tun/src/tcp`), which needs no socket on the TUN side and so no kernel routing or interface scoping to get replies back into the tunnel. sing-box's `mixed` means system TCP with gVisor UDP; sbr's UDP path is the same under every value, so `mixed` runs system TCP. Embedders can override the config with `Settings::tun_stack` (an sbr extension). [ARCHITECTURE.md](ARCHITECTURE.md#tun-tcp-stacks) explains the design and why it is not smoltcp.
+`stack: system` (and `mixed`, and an unset `stack`) lets the kernel run the TUN's TCP through a NAT onto a local listener. `stack: gvisor` runs sbr's own userspace TCP (`crates/sbr-tun/src/tcp`), which needs no socket on the TUN side and so no kernel routing or interface scoping to get replies back into the tunnel. sing-box's `mixed` means system TCP with gVisor UDP; sbr's UDP path is the same under every value, so `mixed` runs system TCP. Embedders can override the config with `Settings::tun_stack` (an sbr extension); the Apple framework sets it to userspace on iOS and tvOS. Picking a group member by hand through the Apple framework closes the connections running through that group, so the change applies to live traffic at once. [ARCHITECTURE.md](ARCHITECTURE.md#tun-tcp-stacks) explains the design and why it is not smoltcp.
 
 Where the userspace stack behaves differently, on purpose:
 - A segment for a connection it does not know, such as one an app opened before the tunnel restarted, gets a reset, so the app reconnects at once. The system stack drops it and the app waits out its own timeouts.
@@ -252,7 +252,7 @@ Every push and pull request to `main` runs `cargo fmt`, clippy and the tests on 
 
 1. **TUN inbound.** Takes the utun fd from `NEPacketTunnelProvider` (`packetFlow`'s socket). Two stacks, like sing-box:
    - `system`: rewrite TCP SYNs to a local listener and let the kernel run TCP.
-   - `gvisor`: sbr's userspace TCP, independent of kernel routing on the TUN side (done; not yet the iOS default).
+   - `gvisor`: sbr's userspace TCP, independent of kernel routing on the TUN side. Always used on iOS and tvOS, where the system stops a packet-tunnel extension running the kernel-listener path under sustained load.
    UDP NAT table, then FakeIP.
 2. **DNS.** Done except QUIC-based servers (`quic`, `h3`) and FakeIP persistence in the cache file.
 3. ~~**TLS layer** → trojan, vless, vmess, http over TLS, reality~~ (done; `multiplex` next).
