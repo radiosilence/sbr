@@ -92,6 +92,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             logger.info("tunnel up on fd \(fd)")
         } catch {
             logger.error("start failed: \(error.localizedDescription, privacy: .private)")
+            SbrRecentLogs.shared.append(.error, "start failed: \(error.localizedDescription)")
             throw error
         }
     }
@@ -116,6 +117,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Override to add requests; call super for the built-in ones.
     open func handle(_ request: SbrRequest) throws -> SbrResponse {
+        if case .logs = request { return SbrResponse(logs: SbrRecentLogs.shared.snapshot()) }
         guard let core else { throw SbrError("sbr is not running") }
         switch request {
         case .groups:
@@ -130,6 +132,8 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             return SbrResponse(groups: core.groups())
         case .stats:
             return SbrResponse(stats: core.stats())
+        case .logs:
+            return SbrResponse(logs: SbrRecentLogs.shared.snapshot())
         case let .reload(config):
             // Interface settings come from the tun inbound; if those changed,
             // the app should restart the tunnel instead.

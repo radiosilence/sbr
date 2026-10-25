@@ -8,6 +8,8 @@ public enum SbrRequest: Codable, Sendable {
     /// Start a latency test of a group; poll `.groups` for the results.
     case urlTest(group: String)
     case stats
+    /// The extension's recent log lines (memory only).
+    case logs
     /// Reload with this config, or re-read the saved one when nil. The app
     /// also saves it into `providerConfiguration` so a restart uses it.
     case reload(config: String?)
@@ -16,11 +18,13 @@ public enum SbrRequest: Codable, Sendable {
 public struct SbrResponse: Codable, Sendable {
     public var groups: [SbrGroup]?
     public var stats: SbrStats?
+    public var logs: [String]?
     public var error: String?
 
-    public init(groups: [SbrGroup]? = nil, stats: SbrStats? = nil, error: String? = nil) {
+    public init(groups: [SbrGroup]? = nil, stats: SbrStats? = nil, logs: [String]? = nil, error: String? = nil) {
         self.groups = groups
         self.stats = stats
+        self.logs = logs
         self.error = error
     }
 }

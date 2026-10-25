@@ -104,6 +104,16 @@ final class TunnelModel: ObservableObject {
         testing.remove(group)
     }
 
+    @Published private(set) var logs: [String] = []
+
+    /// Poll the extension's recent logs while the logs tab is visible.
+    func pollLogs() async {
+        while !Task.isCancelled {
+            if let session, let l = try? await session.send(.logs).logs { logs = l }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+    }
+
     /// Poll the tunnel once a second while visible and connected. The
     /// extension only wakes for these messages, so a backgrounded app costs
     /// it nothing.
