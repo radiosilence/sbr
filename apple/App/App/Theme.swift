@@ -157,6 +157,15 @@ struct SbrButtonStyle: ButtonStyle {
 
 extension View {
     func sbrButton(_ kind: SbrButtonStyle.Kind = .standard) -> some View { buttonStyle(SbrButtonStyle(kind: kind)) }
+
+    /// Selectable text where the platform has selection; tvOS has none.
+    @ViewBuilder func sbrSelectable() -> some View {
+        #if os(tvOS)
+        self
+        #else
+        textSelection(.enabled)
+        #endif
+    }
 }
 
 /// A lowercase section label with breathing room above, no rule.
