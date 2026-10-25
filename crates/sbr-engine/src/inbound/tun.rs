@@ -1,5 +1,5 @@
-//! The `tun` inbound: a TUN device plus sbr's system stack, feeding the
-//! engine's TCP pipeline and UDP NAT.
+//! The `tun` inbound: a TUN device plus sbr's system or userspace TCP
+//! stack, feeding the engine's TCP pipeline and UDP NAT.
 
 use std::io;
 use std::net::SocketAddr;
@@ -8,23 +8,30 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::task::{Context, Poll};
 
 use ipnet::IpNet;
-use sbr_config::TunInbound;
+use sbr_config::{TunInbound, TunStack};
 use sbr_core::{Destination, Host, Metadata, Network};
 use sbr_tun::device::{Device, DeviceConfig};
-use sbr_tun::{Accepted, Stack, StackConfig};
+use sbr_tun::{Accepted, Stack, StackConfig, TcpStack};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::{debug, info, warn};
 
-use crate::dispatch::InboundStream;
+use crate::dispatch::{InboundStream, OpenError};
 use crate::udp::{UdpPacket, UdpWriteBack};
-use crate::{Engine, Settings};
+use crate::{Engine, Settings, TunTcp};
 
 /// sing-box's default TUN MTU.
 const DEFAULT_MTU: u32 = 9000;
 
 struct TunClient(Accepted);
 
-impl InboundStream for TunClient {}
+impl InboundStream for TunClient {
+    /// With the userspace stack the app gets a reset, as from a refused
+    /// connect; the kernel stack can only close.
+    fn fail<'a>(&'a mut self, err: &'a OpenError) -> sbr_core::BoxFuture<'a, io::Result<()>> {
+        self.0.stream.refuse(matches!(err, OpenError::Rejected { drop: true }));
+        Box::pin(async { Ok(()) })
+    }
+}
 
 impl AsyncRead for TunClient {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
@@ -85,6 +92,11 @@ fn auto_routes(t: &TunInbound) -> Vec<IpNet> {
 
 pub async fn start(engine: Arc<Engine>, tag: &str, t: &TunInbound, settings: &Settings) -> io::Result<Arc<Stack>> {
     let mtu = t.mtu.unwrap_or(DEFAULT_MTU);
+    let tcp = match settings.tun_stack {
+        Some(TunTcp::Userspace) => true,
+        Some(TunTcp::Kernel) => false,
+        None => t.stack == Some(TunStack::Gvisor),
+    };
     if t.strict_route {
         warn!(inbound = tag, "strict_route is not enforced by sbr yet");
     }
@@ -115,7 +127,13 @@ pub async fn start(engine: Arc<Engine>, tag: &str, t: &TunInbound, settings: &Se
             })?
         }
     };
-    info!(inbound = tag, interface = device.name(), mtu, "tun up");
+    info!(
+        inbound = tag,
+        interface = device.name(),
+        mtu,
+        tcp = if tcp { "userspace" } else { "system" },
+        "tun up"
+    );
 
     let tag: Arc<str> = tag.into();
     let back = Arc::new(TunBack { stack: OnceLock::new() });
@@ -153,15 +171,11 @@ pub async fn start(engine: Arc<Engine>, tag: &str, t: &TunInbound, settings: &Se
             );
         }
     };
-    let stack = Arc::new(
-        Stack::start(
-            device,
-            StackConfig::from_prefixes(&t.address, mtu as usize),
-            on_tcp,
-            on_udp,
-        )
-        .await?,
-    );
+    let mut cfg = StackConfig::from_prefixes(&t.address, mtu as usize);
+    if tcp {
+        cfg.tcp = TcpStack::User(settings.tun_tcp.clone());
+    }
+    let stack = Arc::new(Stack::start(device, cfg, on_tcp, on_udp).await?);
     let _ = back.stack.set(Arc::downgrade(&stack));
     Ok(stack)
 }

@@ -1,13 +1,18 @@
-//! The system stack: TCP via NAT onto a kernel listener, UDP handed up as
-//! datagrams. See the crate docs for the trick.
+//! The TUN packet loop. TCP goes either to the kernel via NAT onto a
+//! listener (the system stack; see the crate docs for the trick) or to
+//! sbr's userspace TCP (`crate::tcp`). UDP is handed up as datagrams either
+//! way, after fragment reassembly.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use bytes::Bytes;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 use tracing::{debug, trace, warn};
@@ -16,6 +21,18 @@ use crate::device::{Device, HEADROOM, RecvBatch};
 use crate::frag::Reassembler;
 use crate::nat::Nat;
 use crate::packet::{self, ACK, Ip, PROTO_TCP, PROTO_UDP, Parsed, SYN};
+use crate::tcp::tcb::Blocked;
+use crate::tcp::{self, Tcp, TcpConfig};
+
+/// Who terminates the TUN's TCP connections.
+#[derive(Clone, Debug, Default)]
+pub enum TcpStack {
+    /// The kernel, via NAT onto a listener on the interface address.
+    #[default]
+    System,
+    /// sbr's userspace TCP.
+    User(TcpConfig),
+}
 
 #[derive(Clone, Debug)]
 pub struct StackConfig {
@@ -23,6 +40,7 @@ pub struct StackConfig {
     pub inet4: Option<(Ipv4Addr, Ipv4Addr)>,
     pub inet6: Option<(Ipv6Addr, Ipv6Addr)>,
     pub mtu: usize,
+    pub tcp: TcpStack,
 }
 
 impl StackConfig {
@@ -33,6 +51,7 @@ impl StackConfig {
             inet4: None,
             inet6: None,
             mtu,
+            tcp: TcpStack::System,
         };
         for p in prefixes {
             match p {
@@ -49,15 +68,62 @@ impl StackConfig {
     }
 }
 
-/// A TCP connection from an app, terminated by the kernel. Dropping it
+/// A TCP connection from an app. With the system stack, dropping it
 /// releases the NAT entry (after a grace period for trailing segments).
 pub struct Accepted {
-    pub stream: TcpStream,
+    pub stream: TcpConn,
     /// The app's address.
     pub source: SocketAddr,
     /// Where the app was connecting to.
     pub destination: SocketAddr,
-    _guard: NatGuard,
+    _guard: Option<NatGuard>,
+}
+
+/// The app's end of an accepted connection.
+pub enum TcpConn {
+    Kernel(TcpStream),
+    User(tcp::Stream),
+}
+
+impl TcpConn {
+    /// The outbound refused the connection: reset it, or with `silent`
+    /// forget it without a word to the app. The kernel stack can only
+    /// close.
+    pub fn refuse(&self, silent: bool) {
+        if let Self::User(s) = self {
+            if silent { s.discard() } else { s.abort() }
+        }
+    }
+}
+
+impl AsyncRead for TcpConn {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Kernel(s) => Pin::new(s).poll_read(cx, buf),
+            Self::User(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for TcpConn {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Kernel(s) => Pin::new(s).poll_write(cx, buf),
+            Self::User(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Kernel(s) => Pin::new(s).poll_flush(cx),
+            Self::User(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Kernel(s) => Pin::new(s).poll_shutdown(cx),
+            Self::User(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
 }
 
 struct NatGuard {
@@ -110,8 +176,18 @@ impl Stack {
             cfg.inet4.map(|(a, n)| (IpAddr::V4(a), IpAddr::V4(n))),
             cfg.inet6.map(|(a, n)| (IpAddr::V6(a), IpAddr::V6(n))),
         ];
+        let user = matches!(cfg.tcp, TcpStack::User(_));
         for (slot, pair) in fams.iter_mut().zip(pairs) {
             let Some((addr, next)) = pair else { continue };
+            if user {
+                *slot = Some(Arc::new(Family {
+                    addr,
+                    next,
+                    port: 0,
+                    nat: Arc::new(Mutex::new(Nat::default())),
+                }));
+                continue;
+            }
             let listener = listen(SocketAddr::new(addr, 0), device.name())?;
             let port = listener.local_addr()?.port();
             let fam = Arc::new(Family {
@@ -133,7 +209,15 @@ impl Stack {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
         let ids = Arc::new(AtomicU32::new(seed));
-        tasks.spawn(packet_loop(device.clone(), fams, cfg.mtu, ids.clone(), on_udp));
+        match cfg.tcp {
+            TcpStack::System => {
+                tasks.spawn(packet_loop(device.clone(), fams, cfg.mtu, ids.clone(), on_udp));
+            }
+            TcpStack::User(tcfg) => {
+                debug!(rx = tcfg.rx_buffer, tx = tcfg.tx_buffer, "userspace TCP stack");
+                tasks.spawn(user_loop(device.clone(), fams, cfg.mtu, on_udp, on_tcp, tcfg));
+            }
+        }
         Ok(Self {
             device,
             mtu: cfg.mtu,
@@ -311,13 +395,13 @@ async fn accept_loop(listener: TcpListener, fam: Arc<Family>, on_tcp: Arc<dyn Fn
         };
         let _ = stream.set_nodelay(true);
         on_tcp(Accepted {
-            stream,
+            stream: TcpConn::Kernel(stream),
             source,
             destination,
-            _guard: NatGuard {
+            _guard: Some(NatGuard {
                 nat: fam.nat.clone(),
                 port: peer.port(),
-            },
+            }),
         });
     }
 }
@@ -362,8 +446,8 @@ async fn packet_loop(
             if len == 0 {
                 continue;
             }
-            let r = match process(&fams, &mut reasm, batch.buf(i), len, &on_udp) {
-                Out::None => continue,
+            let r = match process(&fams, &mut reasm, batch.buf(i), len, &on_udp, false) {
+                Out::None | Out::Tcp(_) | Out::TcpOwned(..) => continue,
                 Out::InPlace(len) => device.send(batch.buf(i), len).await,
                 Out::Owned(mut pkt) if pkt.len() - HEADROOM > mtu => {
                     // A reassembled TCP segment. Fragment it again with our
@@ -399,16 +483,22 @@ enum Out {
     InPlace(usize),
     /// Write back a reassembled packet at `[HEADROOM..]`.
     Owned(Vec<u8>),
+    /// A TCP packet, in the input buffer, for the userspace stack.
+    Tcp(Parsed),
+    /// A reassembled TCP packet at `[HEADROOM..]` for the userspace stack.
+    TcpOwned(Vec<u8>, Parsed),
 }
 
 /// Handle one packet in `buf[HEADROOM..HEADROOM + len]`: TCP is rewritten
-/// for writing back into the TUN, UDP is consumed, anything else dropped.
+/// for writing back into the TUN (or, with `user`, handed back for the
+/// userspace stack), UDP is consumed, anything else dropped.
 fn process(
     fams: &[Option<Arc<Family>>; 2],
     reasm: &mut Reassembler,
     buf: &mut [u8],
     len: usize,
     on_udp: &impl Fn(UdpIn),
+    user: bool,
 ) -> Out {
     let pkt = &mut buf[HEADROOM..HEADROOM + len];
     match packet::classify(pkt) {
@@ -417,6 +507,13 @@ fn process(
                 return Out::None;
             };
             match h.proto {
+                PROTO_TCP if user => {
+                    if global_unicast(h.dst.ip()) {
+                        Out::Tcp(h)
+                    } else {
+                        Out::None
+                    }
+                }
                 PROTO_TCP if nat_tcp(fam, pkt, &h) => Out::InPlace(len),
                 PROTO_UDP if global_unicast(h.dst.ip()) => {
                     on_udp(UdpIn {
@@ -444,6 +541,13 @@ fn process(
             };
             trace!(src = %h.src, dst = %h.dst, len = h.len, "reassembled");
             match h.proto {
+                PROTO_TCP if user => {
+                    if global_unicast(h.dst.ip()) {
+                        Out::TcpOwned(whole, h)
+                    } else {
+                        Out::None
+                    }
+                }
                 PROTO_TCP if nat_tcp(fam, &mut whole[HEADROOM..], &h) => Out::Owned(whole),
                 PROTO_UDP if global_unicast(h.dst.ip()) => {
                     on_udp(UdpIn {
@@ -457,6 +561,86 @@ fn process(
             }
         }
         None => Out::None,
+    }
+}
+
+/// The packet loop with userspace TCP: also wakes for streams that have
+/// something to send and for TCP timers.
+async fn user_loop(
+    device: Arc<Device>,
+    fams: [Option<Arc<Family>>; 2],
+    mtu: usize,
+    on_udp: impl Fn(UdpIn) + Send + Sync + 'static,
+    on_tcp: Arc<dyn Fn(Accepted) + Send + Sync>,
+    cfg: TcpConfig,
+) {
+    let mut batch = RecvBatch::new(BATCH.0, BATCH.1, mtu.max(1500) + 64);
+    let mut reasm = Reassembler::new(HEADROOM);
+    let mut tcp = Tcp::new(
+        cfg,
+        mtu,
+        move |source, destination, s| {
+            on_tcp(Accepted {
+                stream: TcpConn::User(s),
+                source,
+                destination,
+                _guard: None,
+            })
+        },
+        Instant::now(),
+    );
+    let env = tcp.env().clone();
+    let mut link = |b: &mut [u8]| link_send(&device, b);
+    loop {
+        let deadline = tcp.next_deadline();
+        let got = tokio::select! {
+            r = device.recv_batch(&mut batch) => Some(r),
+            _ = env.notify.notified() => None,
+            _ = async {
+                match deadline {
+                    Some(d) => tokio::time::sleep_until(d.into()).await,
+                    None => std::future::pending().await,
+                }
+            } => None,
+        };
+        let now = Instant::now();
+        if let Some(r) = got {
+            let n = match r {
+                Ok(n) => n,
+                Err(e) => {
+                    warn!(error = %e, "tun read failed; stopping");
+                    return;
+                }
+            };
+            for i in 0..n {
+                let len = batch.len(i);
+                if len == 0 {
+                    continue;
+                }
+                match process(&fams, &mut reasm, batch.buf(i), len, &on_udp, true) {
+                    Out::Tcp(h) => tcp.input(&batch.buf(i)[HEADROOM..HEADROOM + len], &h, now, &mut link),
+                    Out::TcpOwned(pkt, h) => tcp.input(&pkt[HEADROOM..], &h, now, &mut link),
+                    _ => {}
+                }
+            }
+        }
+        tcp.drain_app(now);
+        tcp.run_timers(now, &mut link);
+        tcp.flush(now, &mut link);
+    }
+}
+
+/// Send `buf[HEADROOM..]` for the userspace stack. A full interface queue
+/// is reported so the stack can retry without losing state; other errors
+/// count as a lost packet.
+fn link_send(device: &Device, buf: &mut [u8]) -> Result<(), Blocked> {
+    match device.try_send(buf, buf.len() - HEADROOM) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.raw_os_error() == Some(libc::ENOBUFS) => Err(Blocked),
+        Err(e) => {
+            debug!(error = %e, "tun write failed");
+            Ok(())
+        }
     }
 }
 
@@ -517,7 +701,7 @@ mod tests {
         for mut f in frags {
             let len = f.len() - HEADROOM;
             assert!(matches!(out, Out::None), "completed early");
-            out = process(fams, reasm, &mut f, len, on_udp);
+            out = process(fams, reasm, &mut f, len, on_udp, false);
         }
         out
     }

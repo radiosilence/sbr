@@ -1,4 +1,5 @@
-//! TUN for sbr: devices, packet rewriting and the "system stack".
+//! TUN for sbr: devices, packet rewriting, the "system stack" and a
+//! userspace TCP stack (`tcp`, selected by `stack: gvisor`).
 //!
 //! The system stack lets the OS kernel run TCP. A SYN from an app to
 //! `D:dp` arriving on the TUN is rewritten to come from `next:nat_port` and go
@@ -14,6 +15,8 @@ pub mod frag;
 pub mod nat;
 pub mod packet;
 pub mod stack;
+pub mod tcp;
 
 pub use device::Device;
-pub use stack::{Accepted, Stack, StackConfig, UdpIn};
+pub use stack::{Accepted, Stack, StackConfig, TcpConn, TcpStack, UdpIn};
+pub use tcp::TcpConfig;

@@ -199,7 +199,7 @@ fn tun_inbound_and_actions() {
     };
     assert_eq!(t.address.len(), 2);
     assert_eq!(t.route_address.len(), 1, "legacy inet4_route_address merges");
-    assert!(o.warnings.iter().any(|w| w.contains("stack")));
+    assert_eq!(t.stack, Some(TunStack::Mixed));
     assert!(matches!(&o.route.rules[0].action, RuleAction::Sniff { sniffers, .. } if sniffers.len() == 2));
     assert_eq!(o.route.rules[1].action, RuleAction::HijackDns);
     assert!(

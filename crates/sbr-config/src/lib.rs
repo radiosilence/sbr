@@ -115,8 +115,20 @@ pub struct TunInbound {
     pub route_exclude_address: Vec<ipnet::IpNet>,
     pub loopback_address: Vec<IpAddr>,
     pub udp_timeout: Option<Duration>,
-    /// `system`, `gvisor` or `mixed`; sbr always runs its own system stack.
-    pub stack: Option<String>,
+    pub stack: Option<TunStack>,
+}
+
+/// sing-box's `stack`. sbr has two TCP implementations, the kernel's (via
+/// NAT) and its own userspace one; UDP takes the same path under every
+/// value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunStack {
+    /// TCP terminated by the kernel.
+    System,
+    /// TCP terminated by sbr's userspace stack (sing-box: gVisor).
+    Gvisor,
+    /// sing-box: system TCP with gVisor UDP. sbr runs system TCP.
+    Mixed,
 }
 
 #[derive(Debug, Clone)]
@@ -741,7 +753,13 @@ fn parse_tun(o: &mut Obj, diag: &mut Diag) -> Result<TunInbound> {
             }
             _ => None,
         },
-        stack: o.string("stack")?,
+        stack: match o.string("stack")?.as_deref() {
+            None | Some("") => None,
+            Some("system") => Some(TunStack::System),
+            Some("gvisor") => Some(TunStack::Gvisor),
+            Some("mixed") => Some(TunStack::Mixed),
+            Some(s) => return Err(Error::at(&o.sub("stack"), format!("unknown stack {s:?}"))),
+        },
     };
     // Deprecated split fields, still accepted by sing-box.
     for (legacy, into_route, exclude) in [
@@ -757,15 +775,6 @@ fn parse_tun(o: &mut Obj, diag: &mut Diag) -> Result<TunInbound> {
             (true, _) => t.route_address.extend(v),
             (_, true) => t.route_exclude_address.extend(v),
             _ => t.address.extend(v),
-        }
-    }
-    if let Some(stack) = &t.stack {
-        if !["system", "gvisor", "mixed"].contains(&stack.as_str()) {
-            return Err(Error::at(&o.sub("stack"), format!("unknown stack {stack:?}")));
-        }
-        if stack != "system" {
-            diag.warnings
-                .push(format!("{}.stack: {stack:?} runs on sbr's system stack", o.path()));
         }
     }
     if t.address.is_empty() {

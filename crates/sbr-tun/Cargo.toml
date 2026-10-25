@@ -1,6 +1,6 @@
 [package]
 name = "sbr-tun"
-description = "TUN devices and the system-stack NAT for sbr"
+description = "TUN devices, the system-stack NAT and a userspace TCP stack for sbr"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,3 +15,5 @@ bytes.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+# An independent TCP implementation to test against.
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp"] }

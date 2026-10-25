@@ -2474,6 +2474,7 @@ dependencies = [
  "ipnet",
  "libc",
  "rustc-hash",
+ "smoltcp",
  "tokio",
  "tracing",
 ]

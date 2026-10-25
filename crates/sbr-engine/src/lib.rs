@@ -79,6 +79,19 @@ pub struct Settings {
     /// and new UDP flows dropped, so a burst can't push a memory-capped host
     /// (the iOS Network Extension) into jetsam.
     pub max_connections: usize,
+    /// sbr extension for embedders: which TCP the `tun` inbound runs,
+    /// overriding its `stack` field. `None` follows the config (`gvisor`
+    /// is the userspace stack; `system`, `mixed` and unset are the kernel).
+    pub tun_stack: Option<TunTcp>,
+    /// Buffer and connection limits for the userspace TCP stack.
+    pub tun_tcp: sbr_tun::TcpConfig,
+}
+
+/// Who terminates TCP from the TUN.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TunTcp {
+    Kernel,
+    Userspace,
 }
 
 impl Default for Settings {
@@ -90,6 +103,8 @@ impl Default for Settings {
             tun_fd: None,
             http_roots: None,
             max_connections: 0,
+            tun_stack: None,
+            tun_tcp: sbr_tun::TcpConfig::default(),
         }
     }
 }
