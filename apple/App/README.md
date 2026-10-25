@@ -69,6 +69,19 @@ runs a latency test of that group and of any urltest groups inside it
 The header shows where traffic currently goes: the leaf of the outermost
 selector and its latency.
 
+## Personal rules
+
+Long-pressing a connection offers "always route <domain> via…" with every
+member of the profile's selectors, then the selectors themselves. The rule
+matches the domain and its subdomains (`domain_suffix`) and survives profile
+switches and refreshes: the app keeps the rules and passes them to the tunnel
+(`SbrProviderKey.personalRules`), which inserts them into every config it runs,
+including profiles it downloads itself, after the last `sniff` or `hijack-dns`
+rule so sniffed domains match. A rule naming an outbound a refreshed profile no
+longer has is skipped with a warning in the logs tab. When rules change, the
+tunnel closes open connections to the affected domains so they reconnect on the
+new route. The profiles tab lists the rules for deleting.
+
 ## Auto-connect
 
 With auto-connect on, the VPN configuration carries on-demand rules: disconnect

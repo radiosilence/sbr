@@ -19,6 +19,13 @@ struct ConnectionsView: View {
                         .listRowBackground(Color.sbrBg)
                         .sbrHideListSeparator()
                         .contextMenu {
+                            if let domain = live.connection.domain {
+                                Menu("always route \(domain) via…") {
+                                    ForEach(tunnel.routeChoices, id: \.self) { tag in
+                                        Button(tag) { Task { await tunnel.addRule(domain: domain, outbound: tag) } }
+                                    }
+                                }
+                            }
                             Button("close connection", role: .destructive) { close(live.id) }
                         }
                         #if !os(tvOS)

@@ -180,6 +180,28 @@ impl Tracker {
         hit.len()
     }
 
+    /// Close connections to `domain` (ASCII case-insensitive, trailing dot
+    /// ignored), and to its subdomains when `subdomains` is set: a new route
+    /// for a domain then applies to its open connections too. Matches the
+    /// requested or sniffed domain, as the router does.
+    pub fn close_domain(&self, domain: &str, subdomains: bool) -> usize {
+        let want = domain.trim_end_matches('.');
+        if want.is_empty() {
+            return 0;
+        }
+        let hit: Vec<_> = self
+            .connections()
+            .into_iter()
+            .filter(|c| {
+                c.meta
+                    .domain()
+                    .is_some_and(|d| domain_matches(d.trim_end_matches('.'), want, subdomains))
+            })
+            .collect();
+        hit.iter().for_each(|c| c.close());
+        hit.len()
+    }
+
     /// Close connections carried by `leaf` that are stalled or have received
     /// nothing: on a degraded path they are dead, and closing them makes the
     /// app retry now (on the next member) instead of after its own timeout.
@@ -215,6 +237,16 @@ impl Tracker {
         let c = self.shards[id as usize % SHARDS].lock().unwrap().get(&id).cloned()?;
         (self.uuid(id) == uuid).then_some(c)
     }
+}
+
+fn domain_matches(d: &str, want: &str, subdomains: bool) -> bool {
+    if d.eq_ignore_ascii_case(want) {
+        return true;
+    }
+    subdomains
+        && d.len() > want.len()
+        && d.as_bytes()[d.len() - want.len() - 1] == b'.'
+        && d[d.len() - want.len()..].eq_ignore_ascii_case(want)
 }
 
 /// Resolves when the connection is closed through the registry. Dropping
@@ -289,13 +321,48 @@ mod tests {
     use super::*;
 
     fn meta() -> Metadata {
+        meta_for("a.com")
+    }
+
+    fn meta_for(host: &str) -> Metadata {
         Metadata::new(
             "in".into(),
             "mixed",
             sbr_core::Network::Tcp,
             "127.0.0.1:1".parse().unwrap(),
-            sbr_core::Destination::from_host_port("a.com", 443),
+            sbr_core::Destination::from_host_port(host, 443),
         )
+    }
+
+    #[test]
+    fn close_domain_matches_exact_or_subdomains() {
+        let t = Tracker::default();
+        let regs: Vec<_> = [
+            "bbc.co.uk",
+            "www.BBC.co.uk",
+            "notbbc.co.uk",
+            "bbc.co.uk.evil.test",
+            "1.2.3.4",
+        ]
+        .into_iter()
+        .map(|h| t.register(meta_for(h), vec![], None))
+        .collect();
+        let mut sniffed = meta_for("10.0.0.1");
+        sniffed.sniffed_domain = Some("cdn.bbc.co.uk".into());
+        let _sniffed = t.register(sniffed, vec![], None);
+
+        assert_eq!(t.close_domain("", true), 0);
+        assert_eq!(
+            t.close_domain("BBC.co.uk.", false),
+            1,
+            "exact, case and trailing dot ignored"
+        );
+        assert_eq!(
+            t.close_domain("bbc.co.uk", true),
+            3,
+            "itself, a subdomain and a sniffed subdomain"
+        );
+        drop(regs);
     }
 
     #[tokio::test]

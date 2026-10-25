@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 struct ProfilesView: View {
     @EnvironmentObject private var profiles: ProfileStore
+    @EnvironmentObject private var tunnel: TunnelModel
     @State private var link = ""
     @State private var busy = false
     @State private var problem: String?
@@ -23,6 +24,7 @@ struct ProfilesView: View {
                     row(p)
                 }
                 add
+                personalRules
             }
             .padding(.horizontal, Theme.Space.xl)
             .padding(.bottom, Theme.Space.xxl)
@@ -69,6 +71,29 @@ struct ProfilesView: View {
         let host = url.host ?? "remote"
         guard let updated = p.updated else { return host }
         return "\(host) · updated \(updated.formatted(.relative(presentation: .named)))"
+    }
+
+    /// Domains routed through a chosen outbound whatever the profile says;
+    /// added from a connection's long-press menu.
+    @ViewBuilder private var personalRules: some View {
+        SectionHeader("rules")
+        if tunnel.rules.isEmpty {
+            Text("long-press a connection to always route its domain via an exit.")
+                .font(.sbr(.meta)).foregroundStyle(Color.sbrMuted)
+        }
+        ForEach(Array(tunnel.rules.enumerated()), id: \.element.id) { i, r in
+            if i > 0 { RowRule() }
+            HStack(spacing: Theme.Space.m) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(r.domains.joined(separator: " ")).font(.sbr(.body)).foregroundStyle(Color.sbrInk)
+                        .lineLimit(1).truncationMode(.middle)
+                    Text("via \(r.outbound)").font(.sbr(.fine)).foregroundStyle(Color.sbrMuted).lineLimit(1)
+                }
+                Spacer()
+                Button("delete") { Task { await tunnel.removeRule(r) } }.sbrButton(.text)
+            }
+            .padding(.vertical, Theme.Space.s)
+        }
     }
 
     private var add: some View {
