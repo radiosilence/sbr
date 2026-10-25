@@ -703,7 +703,7 @@ async fn xray_reality_fallback() {
         .await;
     // dest's certificate doesn't cover that name: the handshake reaching
     // dest and failing verification is the expected outcome.
-    let err = off_list.err().expect("off-list SNI unexpectedly verified").to_string();
+    let err = off_list.expect_err("off-list SNI unexpectedly verified").to_string();
     assert!(err.contains("certificate") || err.contains("Certificate"), "{err}");
 }
 
@@ -769,10 +769,10 @@ async fn start_hysteria(bin: &Path, nports: usize) -> Hysteria {
                 if echo {
                     eprintln!("hysteria: {line}");
                 }
-                if line.contains("server up and running") {
-                    if let Some(tx) = tx.take() {
-                        let _ = tx.send(());
-                    }
+                if line.contains("server up and running")
+                    && let Some(tx) = tx.take()
+                {
+                    let _ = tx.send(());
                 }
             }
         });
