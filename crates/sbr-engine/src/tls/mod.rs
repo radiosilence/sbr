@@ -3,9 +3,10 @@
 //!
 //! `utls` is accepted, but the ClientHello is rustls': we only borrow the
 //! cheap parts of a browser fingerprint (ALPN `h2, http/1.1`, AES-128-GCM
-//! first). `reality` has a hook ([`TlsClient::Reality`]) for the `sbr-reality`
-//! crate and is rejected until that lands.
+//! first). `reality` goes through the `sbr-reality` crate, which does carry
+//! browser ClientHellos.
 
+mod conn;
 mod io;
 mod verify;
 
@@ -20,6 +21,7 @@ use rustls::{ClientConfig, RootCertStore};
 use sbr_config::TlsOutbound;
 use sbr_core::Stream;
 
+pub use conn::TlsConn;
 pub(crate) use io::rand_u32;
 pub use io::{FRAGMENT_FALLBACK_DELAY, FragmentOptions, TlsIo};
 
@@ -33,8 +35,63 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Clone)]
 pub enum TlsClient {
     Rustls(Arc<RustlsClient>),
-    /// Placeholder for the `sbr-reality` crate; never constructed yet.
-    Reality,
+    Reality(Arc<RealityClient>),
+}
+
+pub struct RealityClient {
+    config: sbr_reality::RealityConfig,
+    alpn_configured: bool,
+    handshake_timeout: Duration,
+    fragment: Option<FragmentOptions>,
+}
+
+impl RealityClient {
+    fn new(t: &TlsOutbound, server: &str) -> Result<Self, String> {
+        let r = t.reality.as_ref().expect("reality options");
+        let name = t.server_name.clone().unwrap_or_else(|| server.to_owned());
+        let mut config = sbr_reality::RealityConfig::new(name, &r.public_key, &r.short_id)
+            .map_err(|e| format!("tls.reality: {e}"))?;
+        if let Some(u) = t.utls.as_ref().filter(|u| u.enabled) {
+            config.fingerprint = u
+                .fingerprint
+                .as_deref()
+                .unwrap_or_default()
+                .parse()
+                .map_err(|e| format!("tls.utls.fingerprint: {e}"))?;
+        }
+        config.alpn = t.alpn.clone();
+        Ok(Self {
+            config,
+            alpn_configured: !t.alpn.is_empty(),
+            handshake_timeout: t
+                .handshake_timeout
+                .filter(|d| !d.is_zero())
+                .unwrap_or(HANDSHAKE_TIMEOUT),
+            fragment: fragment_options(t),
+        })
+    }
+
+    async fn connect(&self, io: Stream, fd: Option<i32>) -> stdio::Result<TlsConn> {
+        let io = TlsIo::new(io, fd, self.fragment);
+        match tokio::time::timeout(self.handshake_timeout, sbr_reality::connect(io, &self.config)).await {
+            Ok(r) => Ok(TlsConn::Reality(Box::new(r?))),
+            Err(_) => Err(stdio::Error::new(
+                stdio::ErrorKind::TimedOut,
+                "REALITY handshake timed out",
+            )),
+        }
+    }
+}
+
+fn fragment_options(t: &TlsOutbound) -> Option<FragmentOptions> {
+    (t.fragment || t.record_fragment).then(|| FragmentOptions {
+        split_packet: t.fragment,
+        split_record: t.record_fragment,
+        fallback_delay: t
+            .fragment_fallback_delay
+            .filter(|d| !d.is_zero())
+            .unwrap_or(FRAGMENT_FALLBACK_DELAY),
+    })
 }
 
 pub struct RustlsClient {
@@ -77,7 +134,7 @@ impl TlsClient {
     /// `server_name` is unset. Errors name the offending `tls.*` field.
     pub fn new(t: &TlsOutbound, server: &str, base: Option<&std::path::Path>) -> Result<Self, String> {
         if t.reality.as_ref().is_some_and(|r| r.enabled) {
-            return Err(invalid("tls.reality: not supported by sbr yet"));
+            return Ok(Self::Reality(Arc::new(RealityClient::new(t, server)?)));
         }
         Ok(Self::Rustls(Arc::new(RustlsClient::new(t, server, base)?)))
     }
@@ -99,6 +156,16 @@ impl TlsClient {
                     fragment: c.fragment,
                 }))
             }
+            Self::Reality(c) if !c.alpn_configured => {
+                let mut config = c.config.clone();
+                config.alpn = alpn.iter().map(|s| s.to_string()).collect();
+                Self::Reality(Arc::new(RealityClient {
+                    config,
+                    alpn_configured: true,
+                    handshake_timeout: c.handshake_timeout,
+                    fragment: c.fragment,
+                }))
+            }
             other => other.clone(),
         }
     }
@@ -111,19 +178,16 @@ impl TlsClient {
                 ServerName::IpAddress(ip) => std::net::IpAddr::from(*ip).to_string(),
                 _ => return None,
             }),
-            Self::Reality => None,
+            Self::Reality(c) => Some(c.config.server_name.clone()),
         }
     }
 
     /// Handshake over `io`. `fd` is the raw socket when `io` was dialed
     /// directly (used by `fragment` to wait for ACKs).
-    pub async fn connect(&self, io: Stream, fd: Option<i32>) -> stdio::Result<TlsStream> {
+    pub async fn connect(&self, io: Stream, fd: Option<i32>) -> stdio::Result<TlsConn> {
         match self {
-            Self::Rustls(c) => c.connect(io, fd).await,
-            Self::Reality => Err(stdio::Error::new(
-                stdio::ErrorKind::Unsupported,
-                "reality is not supported by sbr yet",
-            )),
+            Self::Rustls(c) => Ok(TlsConn::Rustls(Box::new(c.connect(io, fd).await?))),
+            Self::Reality(c) => c.connect(io, fd).await,
         }
     }
 }
@@ -260,14 +324,7 @@ impl RustlsClient {
         };
         config.enable_sni = !t.disable_sni;
         config.alpn_protocols = effective_alpn(t.alpn.clone(), utls);
-        let fragment = (t.fragment || t.record_fragment).then(|| FragmentOptions {
-            split_packet: t.fragment,
-            split_record: t.record_fragment,
-            fallback_delay: t
-                .fragment_fallback_delay
-                .filter(|d| !d.is_zero())
-                .unwrap_or(FRAGMENT_FALLBACK_DELAY),
-        });
+        let fragment = fragment_options(t);
         Ok(Self {
             config: Arc::new(config),
             server_name,

@@ -412,7 +412,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsStream<S> {
                     this.data = true;
                     this.left = len;
                 }
-                0x8 | 0x9 | 0xa => {
+                0x8..=0xa => {
                     if len > 125 {
                         return Poll::Ready(Err(io::Error::new(
                             io::ErrorKind::InvalidData,

@@ -129,6 +129,8 @@ pub struct HeaderStream<S> {
     wbuf: Vec<u8>,
     wpos: usize,
     vless_response: bool,
+    /// The reader sent the request (client silent so far): it flushes.
+    read_flushes: bool,
     resp_hdr: [u8; 2],
     resp_got: usize,
     resp_skip: usize,
@@ -142,6 +144,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> HeaderStream<S> {
             wbuf: Vec::new(),
             wpos: 0,
             vless_response: matches!(response, Response::Vless),
+            read_flushes: false,
             resp_hdr: [0; 2],
             resp_got: 0,
             resp_skip: 0,
@@ -204,11 +207,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for HeaderStream<S> {
         let this = self.get_mut();
         if let Some(h) = this.header.take() {
             this.wbuf = h;
+            this.read_flushes = true;
         }
-        if this.wpos < this.wbuf.len() {
-            // Push the request out, but don't wait on writability here:
-            // another task may own the write side (split streams), and
-            // waiting would leave this read without a wakeup.
+        if this.read_flushes && this.wpos < this.wbuf.len() {
+            // Push the request out, but don't wait on writability here: the
+            // write side may live in another task (split streams), and a
+            // socket keeps one write wakeup, so only one side may wait on it.
+            // Once the writer has written, flushing is its job.
             if let Poll::Ready(r) = this.poll_flush_wbuf(cx) {
                 r?;
                 if let Poll::Ready(Err(e)) = Pin::new(&mut this.inner).poll_flush(cx) {
@@ -224,6 +229,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for HeaderStream<S> {
 impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for HeaderStream<S> {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        this.read_flushes = false;
         if let Some(mut h) = this.header.take() {
             h.extend_from_slice(buf);
             this.wbuf = h;

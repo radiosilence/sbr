@@ -13,7 +13,7 @@ use sbr_config::{Transport, V2rayCommon};
 use sbr_core::{Destination, Host, Stream};
 
 use crate::outbound::Upstream;
-use crate::tls::{TlsClient, TlsStream};
+use crate::tls::{TlsClient, TlsConn};
 
 pub use prefixed::Prefixed;
 
@@ -68,7 +68,7 @@ impl ServerDialer {
     }
 
     /// TCP + TLS, keeping the concrete TLS type (XTLS Vision needs it).
-    pub async fn tls(&self) -> io::Result<TlsStream> {
+    pub async fn tls(&self) -> io::Result<TlsConn> {
         let tls = self
             .tls
             .as_ref()

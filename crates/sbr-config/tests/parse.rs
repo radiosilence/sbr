@@ -79,8 +79,69 @@ fn rejects_unknown_fields_with_path() {
 
 #[test]
 fn rejects_unsupported_protocols_loudly() {
-    let e = err(r#"{"outbounds":[{"type":"vmess","tag":"v"}]}"#);
-    assert!(e.contains("outbounds[0].type") && e.contains("vmess"), "{e}");
+    let e = err(r#"{"outbounds":[{"type":"ssh","tag":"v"}]}"#);
+    assert!(e.contains("outbounds[0].type") && e.contains("ssh"), "{e}");
+}
+
+#[test]
+fn v2ray_family_outbounds() {
+    let o = Options::parse(
+        r#"{"outbounds":[
+        {"type":"trojan","tag":"t","server":"a.com","server_port":443,"password":"p","network":"tcp",
+         "tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"}},
+         "transport":{"type":"ws","path":"/ws?ed=2048","max_early_data":2048,"early_data_header_name":"Sec-WebSocket-Protocol"}},
+        {"type":"vless","tag":"l","server":"a.com","server_port":443,"uuid":"b831381d-6324-4d53-ad4f-8cda48b30811",
+         "flow":"xtls-rprx-vision","tls":{"enabled":true,"reality":{"enabled":true,"public_key":"k","short_id":"01"}}},
+        {"type":"vmess","tag":"m","server":"a.com","server_port":443,"uuid":"x","security":"chacha20-poly1305",
+         "global_padding":true,"authenticated_length":true,"packet_encoding":"xudp","network":["tcp","udp"],
+         "transport":{"type":"grpc","service_name":"s"},"multiplex":{"enabled":false}},
+        {"type":"http","tag":"h","server":"a.com","server_port":443,"tls":{"enabled":true,"server_name":"b.com"}}
+    ]}"#,
+    )
+    .unwrap();
+    let OutboundKind::Trojan(t) = &o.outbounds[0].kind else {
+        panic!()
+    };
+    assert!(t.common.tcp() && !t.common.udp());
+    assert!(matches!(
+        &t.common.transport,
+        Some(Transport::Ws {
+            max_early_data: 2048,
+            ..
+        })
+    ));
+    let OutboundKind::Vless(l) = &o.outbounds[1].kind else {
+        panic!()
+    };
+    assert_eq!(l.flow.as_deref(), Some("xtls-rprx-vision"));
+    assert_eq!(l.packet_encoding, PacketEncoding::Xudp, "VLESS defaults to xudp");
+    let OutboundKind::Vmess(m) = &o.outbounds[2].kind else {
+        panic!()
+    };
+    assert!(m.global_padding && m.authenticated_length && m.common.udp());
+    let OutboundKind::Http(h) = &o.outbounds[3].kind else {
+        panic!()
+    };
+    assert!(h.tls.as_ref().unwrap().enabled);
+}
+
+#[test]
+fn v2ray_family_rejections() {
+    let base = r#""server":"a.com","server_port":443,"uuid":"b831381d-6324-4d53-ad4f-8cda48b30811""#;
+    let e = err(&format!(
+        r#"{{"outbounds":[{{"type":"vless",{base},"multiplex":{{"enabled":true}}}}]}}"#
+    ));
+    assert!(e.starts_with("outbounds[0].multiplex"), "{e}");
+    let e = err(&format!(
+        r#"{{"outbounds":[{{"type":"vless",{base},"flow":"xtls-rprx-vision"}}]}}"#
+    ));
+    assert!(e.starts_with("outbounds[0].flow"), "{e}");
+    let e = err(&format!(r#"{{"outbounds":[{{"type":"vmess",{base},"alter_id":1}}]}}"#));
+    assert!(e.starts_with("outbounds[0].alter_id"), "{e}");
+    let e = err(&format!(
+        r#"{{"outbounds":[{{"type":"vmess",{base},"transport":{{"type":"quic"}}}}]}}"#
+    ));
+    assert!(e.starts_with("outbounds[0].transport.type"), "{e}");
 }
 
 #[test]

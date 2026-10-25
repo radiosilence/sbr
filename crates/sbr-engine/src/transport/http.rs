@@ -84,6 +84,7 @@ impl HttpClient {
                     wbuf: Vec::new(),
                     wpos: 0,
                     response: Response::Pending(Vec::new()),
+                    read_flushes: false,
                 }))
             }
             Mode::H2(pool) => {
@@ -120,6 +121,9 @@ struct Http1Stream {
     wbuf: Vec<u8>,
     wpos: usize,
     response: Response,
+    /// The reader sent the request head (nothing written yet): it flushes.
+    /// Only one task may wait on the socket's writability.
+    read_flushes: bool,
 }
 
 impl Http1Stream {
@@ -142,8 +146,11 @@ impl AsyncRead for Http1Stream {
         let this = self.get_mut();
         if let Some(h) = this.head.take() {
             this.wbuf = h;
+            this.read_flushes = true;
         }
-        if let Poll::Ready(Err(e)) = this.poll_flush_wbuf(cx) {
+        if this.read_flushes
+            && let Poll::Ready(Err(e)) = this.poll_flush_wbuf(cx)
+        {
             return Poll::Ready(Err(e));
         }
         loop {
@@ -200,6 +207,7 @@ impl AsyncRead for Http1Stream {
 impl AsyncWrite for Http1Stream {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        this.read_flushes = false;
         if let Some(mut h) = this.head.take() {
             h.extend_from_slice(buf);
             this.wbuf = h;

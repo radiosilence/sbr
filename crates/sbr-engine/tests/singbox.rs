@@ -23,6 +23,8 @@ use tokio::net::{TcpListener, UdpSocket};
 
 const DEFAULT_BIN: &str =
     "/tmp/claude-0/-home-user-sbr/f8826c5d-a757-5d8c-a19d-5dec2bf91f74/scratchpad/ref/sing-box-bin";
+const DEFAULT_UTLS_BIN: &str =
+    "/tmp/claude-0/-home-user-sbr/f8826c5d-a757-5d8c-a19d-5dec2bf91f74/scratchpad/ref/sing-box-utls";
 const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
 const PASSWORD: &str = "trojan-password";
 const MIB: usize = 1024 * 1024;
@@ -377,7 +379,7 @@ fn cross(pki: &Pki, proto: &str, inbound: Value, outbound: Value, udp: bool) -> 
         // Go's HTTP server may have read ahead a byte by then; its trojan
         // server then rejects the short first read ("bad request size").
         // A server-side race, independent of the client.
-        .filter(|(t, _, _)| !(proto == "trojan" && *t == "httpupgrade"))
+        .filter(|(t, _, _)| !(proto == "trojan" && t.starts_with("httpupgrade")))
         .map(|(tname, transport, tls)| {
             let mut i = inbound.clone();
             let mut o = outbound.clone();
@@ -497,9 +499,15 @@ async fn vless_vision_interop() {
         "tls": pki.server_tls(),
     });
     let _sb = start_singbox(&bin, &pki.dir, vec![inbound]).await;
+    vision_checks(&pki, port, pki.client_tls()).await;
+    let _ = std::fs::remove_dir_all(&pki.dir);
+}
+
+/// Plain, XUDP and inner-TLS (direct mode) traffic through VLESS Vision.
+async fn vision_checks(pki: &Pki, port: u16, tls: Value) {
     let opts = Options::from_value(json!({"outbounds": [{
         "type": "vless", "tag": "vision", "server": "127.0.0.1", "server_port": port,
-        "uuid": UUID, "flow": "xtls-rprx-vision", "tls": pki.client_tls(),
+        "uuid": UUID, "flow": "xtls-rprx-vision", "tls": tls,
     }]}))
     .unwrap();
     let engine = Engine::new(&opts, &Settings::default()).unwrap();
@@ -509,9 +517,12 @@ async fn vless_vision_interop() {
     tcp_roundtrip(&out, tcp_echo().await, MIB).await.unwrap();
     // XUDP over Vision.
     udp_roundtrip(&out, udp_echo().await).await.unwrap();
+    inner_tls_roundtrips(&out, pki).await;
+}
 
+async fn inner_tls_roundtrips(out: &Arc<dyn Outbound>, pki: &Pki) {
     // TLS 1.3 inside: goes direct after the inner handshake.
-    let inner = inner_tls_echo(&pki).await;
+    let inner = inner_tls_echo(pki).await;
     for size in [MIB, 100, 20000] {
         let s = out.connect(&Destination::from(inner)).await.unwrap();
         use rustls::pki_types::pem::PemObject;
@@ -546,6 +557,80 @@ async fn vless_vision_interop() {
         let _w = wt.await.unwrap();
         assert!(got == data, "vision inner TLS data mismatch ({size} bytes)");
     }
+}
+
+fn singbox_utls() -> Option<PathBuf> {
+    let p = std::env::var_os("SBR_SINGBOX_UTLS_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_UTLS_BIN));
+    if p.exists() {
+        Some(p)
+    } else {
+        eprintln!(
+            "note: sing-box (with_utls) not found at {}; skipping REALITY test",
+            p.display()
+        );
+        None
+    }
+}
+
+/// VLESS over REALITY, with and without Vision. The REALITY "cover" site is
+/// a local TLS 1.3 server: nothing leaves the machine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn vless_reality_interop() {
+    let Some(bin) = singbox_utls() else { return };
+    let pki = pki("reality");
+    let keys = Command::new(&bin)
+        .args(["generate", "reality-keypair"])
+        .output()
+        .unwrap();
+    let keys = String::from_utf8(keys.stdout).unwrap();
+    let field = |k: &str| {
+        keys.lines()
+            .find_map(|l| l.strip_prefix(k))
+            .map(|v| v.trim().to_owned())
+            .unwrap()
+    };
+    let (private_key, public_key) = (field("PrivateKey:"), field("PublicKey:"));
+    let cover = inner_tls_echo(&pki).await;
+    let short_id = "0123abcd";
+    let server_tls = json!({
+        "enabled": true, "server_name": "example.com",
+        "reality": {"enabled": true, "handshake": {"server": "127.0.0.1", "server_port": cover.port()},
+                    "private_key": private_key, "short_id": [short_id], "max_time_difference": "1m"},
+    });
+    let client_tls = |fp: &str| {
+        json!({
+            "enabled": true, "server_name": "example.com",
+            "utls": {"enabled": true, "fingerprint": fp},
+            "reality": {"enabled": true, "public_key": public_key, "short_id": short_id},
+        })
+    };
+    let (plain_port, vision_port) = (free_port(), free_port());
+    let inbounds = vec![
+        json!({"type": "vless", "listen": "127.0.0.1", "listen_port": plain_port,
+               "users": [{"uuid": UUID}], "tls": server_tls.clone()}),
+        json!({"type": "vless", "listen": "127.0.0.1", "listen_port": vision_port,
+               "users": [{"uuid": UUID, "flow": "xtls-rprx-vision"}], "tls": server_tls}),
+    ];
+    let _sb = start_singbox(&bin, &pki.dir, inbounds).await;
+
+    for fp in ["chrome", "firefox", "safari"] {
+        let opts = Options::from_value(json!({"outbounds": [{
+            "type": "vless", "tag": "reality", "server": "127.0.0.1", "server_port": plain_port,
+            "uuid": UUID, "tls": client_tls(fp),
+        }]}))
+        .unwrap();
+        let engine = Engine::new(&opts, &Settings::default()).unwrap();
+        let out = engine.outbound("reality").unwrap().clone();
+        tcp_roundtrip(&out, tcp_echo().await, MIB)
+            .await
+            .unwrap_or_else(|e| panic!("reality {fp}: {e}"));
+        udp_roundtrip(&out, udp_echo().await)
+            .await
+            .unwrap_or_else(|e| panic!("reality {fp} udp: {e}"));
+    }
+    vision_checks(&pki, vision_port, client_tls("chrome")).await;
     let _ = std::fs::remove_dir_all(&pki.dir);
 }
 

@@ -97,6 +97,18 @@ impl<S> RealityStream<S> {
         self.write_key.suite
     }
 
+    /// Leaves TLS for the raw stream (XTLS Vision "direct" mode): returns the
+    /// decrypted bytes not yet read, then the ciphertext bytes read past the
+    /// last processed record, which belong to whatever follows on the raw
+    /// stream. Records are processed one at a time, so nothing past the
+    /// current one has been decrypted. Don't read from this stream afterwards.
+    pub fn take_buffered(&mut self) -> Vec<u8> {
+        let mut out = self.rb.slice(self.plaintext.clone()).to_vec();
+        self.plaintext = 0..0;
+        out.extend_from_slice(&self.rb.take_unread());
+        out
+    }
+
     /// Queues a KeyUpdate (update_requested) sent before the next write or flush:
     /// both directions move to fresh traffic keys.
     pub fn refresh_traffic_keys(&mut self) {

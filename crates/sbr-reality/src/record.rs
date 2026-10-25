@@ -110,6 +110,13 @@ impl ReadBuf {
         Ok((pt[type_at], r.body.start..r.body.start + type_at))
     }
 
+    /// Bytes read from the wire but not yet taken as records.
+    pub(crate) fn take_unread(&mut self) -> Vec<u8> {
+        let v = self.buf[self.head..self.tail].to_vec();
+        self.head = self.tail;
+        v
+    }
+
     pub(crate) fn has_partial(&self) -> bool {
         self.head != self.tail
     }

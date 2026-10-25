@@ -10,17 +10,17 @@
 //! Differences from sing-vmess that don't touch the wire:
 //! - no 5 ms sleep between the last padded record and the first raw write;
 //! - reads are not forced into 8 KiB chunks after padding ends;
-//! - rustls is fed one TLS record at a time ([`TlsIo::limit_to_records`])
+//! - rustls is fed one TLS record at a time ([`crate::tls::TlsIo::limit_to_records`])
 //!   until we know whether the server will go direct, instead of reaching
 //!   into the TLS library's buffers. Afterwards reads are unrestricted.
 
-use std::io::{self, Read as _};
+use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::tls::{TlsIo, TlsStream, rand_u32};
+use crate::tls::{TlsConn, rand_u32};
 
 const CMD_CONTINUE: u8 = 0;
 const CMD_END: u8 = 1;
@@ -31,7 +31,7 @@ const APP_DATA: [u8; 3] = [0x17, 0x03, 0x03];
 const CHUNK: usize = 8192;
 
 pub struct VisionStream {
-    tls: TlsStream,
+    tls: TlsConn,
     uuid: [u8; 16],
     /// VLESS request, sent ahead of the first padded block.
     header: Option<Vec<u8>>,
@@ -42,6 +42,8 @@ pub struct VisionStream {
 
     // Write side.
     tls_out: Vec<u8>,
+    /// The reader sent the request (client silent so far): it flushes.
+    read_flushes: bool,
     tls_pos: usize,
     raw_out: Vec<u8>,
     raw_pos: usize,
@@ -73,8 +75,8 @@ pub struct VisionStream {
 }
 
 impl VisionStream {
-    pub fn new(mut tls: TlsStream, header: Vec<u8>, uuid: [u8; 16]) -> Self {
-        tls.get_mut().0.limit_to_records();
+    pub fn new(mut tls: TlsConn, header: Vec<u8>, uuid: [u8; 16]) -> Self {
+        tls.limit_reads();
         Self {
             tls,
             uuid,
@@ -84,6 +86,7 @@ impl VisionStream {
             resp_skip: 0,
             resp_done: false,
             tls_out: Vec::new(),
+            read_flushes: false,
             tls_pos: 0,
             raw_out: Vec::new(),
             raw_pos: 0,
@@ -111,11 +114,7 @@ impl VisionStream {
     }
 
     fn raw(&mut self) -> &mut sbr_core::Stream {
-        self.tls.get_mut().0.raw()
-    }
-
-    fn io(&mut self) -> &mut TlsIo {
-        self.tls.get_mut().0
+        self.tls.raw()
     }
 
     /// sing-vmess `filterTLS`: watch the inner handshake for TLS 1.3.
@@ -226,7 +225,7 @@ impl VisionStream {
         if self.raw_pos < self.raw_out.len() {
             while self.raw_pos < self.raw_out.len() {
                 let (out, pos) = (&self.raw_out, self.raw_pos);
-                let n = ready!(Pin::new(self.tls.get_mut().0.raw()).poll_write(cx, &out[pos..]))?;
+                let n = ready!(Pin::new(self.tls.raw()).poll_write(cx, &out[pos..]))?;
                 if n == 0 {
                     return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
                 }
@@ -338,19 +337,8 @@ impl VisionStream {
     /// whatever was read but not yet given to rustls, comes first.
     fn go_direct_read(&mut self) -> io::Result<()> {
         self.direct_read = true;
-        let mut tmp = [0u8; 4096];
-        loop {
-            match self.tls.get_mut().1.reader().read(&mut tmp) {
-                Ok(0) => break,
-                Ok(n) => {
-                    self.push_content(&tmp[..n]);
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) => return Err(e),
-            }
-        }
-        let raw = self.io().take_raw();
-        self.push_content(&raw);
+        let rest = self.tls.take_buffered()?;
+        self.push_content(&rest);
         Ok(())
     }
 }
@@ -390,11 +378,13 @@ impl AsyncRead for VisionStream {
             // Silent client (server-first protocol): send the request with an
             // empty padded block, as sing-box's `Write(nil)` does.
             this.queue_padded(&[]);
+            this.read_flushes = true;
         }
-        if this.tls_pos < this.tls_out.len() || this.raw_pos < this.raw_out.len() {
-            // Push the request out, but don't wait on writability here:
-            // another task may own the write side (split streams), and
-            // waiting would leave this read without a wakeup.
+        if this.read_flushes && (this.tls_pos < this.tls_out.len() || this.raw_pos < this.raw_out.len()) {
+            // Push the request out, but don't wait on writability here: the
+            // write side may live in another task (split streams), and a
+            // socket keeps one write wakeup, so only one side may wait on it.
+            // Once the writer has written, flushing is its job.
             if let Poll::Ready(r) = this.poll_flush_out(cx) {
                 r?;
                 if let Poll::Ready(Err(e)) = Pin::new(&mut this.tls).poll_flush(cx) {
@@ -457,7 +447,7 @@ impl AsyncRead for VisionStream {
             }
             if !this.direct_read && !this.within_padding && this.filter_left <= 0 {
                 // No Direct command can follow: stop feeding rustls record by record.
-                this.io().unlimit();
+                this.tls.unlimit_reads();
             }
         }
     }
@@ -466,6 +456,7 @@ impl AsyncRead for VisionStream {
 impl AsyncWrite for VisionStream {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        this.read_flushes = false;
         ready!(this.poll_flush_out(cx))?;
         if this.direct_write {
             return Pin::new(this.raw()).poll_write(cx, buf);
