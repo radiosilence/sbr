@@ -20,7 +20,7 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
-use aws_lc_rs::{digest, hmac};
+use aws_lc_rs::{constant_time, digest, hmac};
 use rustls::ClientConnection;
 use sbr_config::ShadowTlsOutbound;
 use sbr_core::{BoxFuture, Destination, Outbound, Stream};
@@ -221,10 +221,11 @@ impl V3Handshake {
                     d.update(&random);
                     self.mask = d.finish().as_ref().to_vec();
                     self.server_random = Some(random);
+                    // Strict mode: sing-shadowtls authorizes a TLS 1.2
+                    // ServerHello without proof, which would let a hijacker
+                    // relaying to any TLS 1.2 server see the tunnel start. sbr
+                    // offers TLS 1.3 for v3, so a real server answers with it.
                     self.tls13 = server_hello_is_tls13(rec);
-                    if !self.tls13 {
-                        self.authorized = true;
-                    }
                 }
             }
             APPLICATION_DATA => {
@@ -233,7 +234,12 @@ impl V3Handshake {
                     && let Some(h) = self.read_hmac.as_mut()
                 {
                     h.update(&rec[HEADER + HMAC_LEN..]);
-                    if h.clone().sign().as_ref()[..HMAC_LEN] != rec[HEADER..HEADER + HMAC_LEN] {
+                    if constant_time::verify_slices_are_equal(
+                        &h.clone().sign().as_ref()[..HMAC_LEN],
+                        &rec[HEADER..HEADER + HMAC_LEN],
+                    )
+                    .is_err()
+                    {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "shadow-tls v3: hmac mismatch, possible data corruption",
@@ -245,7 +251,7 @@ impl V3Handshake {
                     rec.drain(HEADER..HEADER + HMAC_LEN);
                     let len = (rec.len() - HEADER) as u16;
                     rec[3..5].copy_from_slice(&len.to_be_bytes());
-                    self.authorized = true;
+                    self.authorized = self.tls13;
                 }
             }
             _ => {}
@@ -428,7 +434,7 @@ impl Framed {
                 let data = &rec[HEADER + HMAC_LEN..];
                 if let Some(ig) = ignore.as_mut() {
                     ig.update(data);
-                    if ig.clone().sign().as_ref()[..HMAC_LEN] == *tag {
+                    if constant_time::verify_slices_are_equal(&ig.clone().sign().as_ref()[..HMAC_LEN], tag).is_ok() {
                         return Ok(false);
                     }
                     *ignore = None;
@@ -437,7 +443,7 @@ impl Framed {
                 let sum = verify.clone().sign();
                 let sum = &sum.as_ref()[..HMAC_LEN];
                 verify.update(sum);
-                if sum != tag {
+                if constant_time::verify_slices_are_equal(sum, tag).is_err() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "shadowtls: application data verification failed",

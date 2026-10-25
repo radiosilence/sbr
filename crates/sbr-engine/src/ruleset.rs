@@ -20,7 +20,12 @@ use crate::cache::{CacheFile, SavedRuleSet};
 use crate::fetch::{HttpClient, Url};
 use crate::{Engine, Settings};
 
-const MAX_SIZE: usize = 64 << 20;
+/// Downloads are buffered in memory; the iOS extension has about 50 MB.
+const MAX_SIZE: usize = if cfg!(any(target_os = "ios", target_os = "tvos")) {
+    8 << 20
+} else {
+    64 << 20
+};
 
 pub(crate) enum Store {
     Cache(Arc<CacheFile>),

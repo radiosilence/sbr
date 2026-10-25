@@ -393,3 +393,17 @@ where
         group,
     ))
 }
+
+/// Fuzzing entry: the parsers that run on decrypted handshake messages, which
+/// a fuzzer cannot reach through the AEAD.
+#[cfg(fuzzing)]
+pub fn fuzz_handshake_messages(data: &[u8]) {
+    let mut hs = HandshakeBuf::default();
+    hs.push(data);
+    while let Ok(Some(msg)) = hs.next_message() {
+        let body = &msg[4..];
+        let _ = parse_server_hello(body).map(|sh| sh.key_share.map(|(g, p)| (g, p.len())));
+        let _ = parse_alpn(body);
+        let _ = leaf_certificate(body);
+    }
+}

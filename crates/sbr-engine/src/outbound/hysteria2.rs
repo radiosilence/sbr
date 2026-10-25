@@ -95,6 +95,7 @@ impl Hysteria2 {
             });
         }
         dialer.salamander = c.obfs_salamander.clone();
+        dialer.scramble = !c.quic.disable_client_hello_scrambling;
         Ok(Self {
             tag,
             dialer,

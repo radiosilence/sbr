@@ -220,6 +220,9 @@ fn eq_ct(a: &str, b: &str) -> bool {
 /// pass `?token=`.
 async fn auth(State(api): State<Api>, req: Request, next: Next) -> Response {
     let Some(secret) = &api.secret else {
+        if !unauthenticated_ok(&api, &req) {
+            return error(StatusCode::FORBIDDEN, "Forbidden");
+        }
         return next.run(req).await;
     };
     if req.uri().path() == "/ui" || req.uri().path().starts_with("/ui/") {
@@ -245,6 +248,34 @@ async fn auth(State(api): State<Api>, req: Request, next: Next) -> Response {
         next.run(req).await
     } else {
         error(StatusCode::UNAUTHORIZED, "Unauthorized")
+    }
+}
+
+/// Without a secret, the API is open to anything that can reach it, including
+/// a web page in the device's browser. Refuse the two ways a page gets in:
+/// a cross-origin request (only listed origins, or the API's own `/ui`, may
+/// call it) and DNS rebinding (a Host that is a domain other than localhost).
+/// sing-box allows any origin here; sbr does not.
+fn unauthenticated_ok(api: &ApiState, req: &Request) -> bool {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let name = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.rsplit_once(':').map_or(host, |(h, _)| h),
+    };
+    if name.parse::<std::net::IpAddr>().is_err() && !name.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
+    match req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        None => true,
+        Some(o) => {
+            api.origins.iter().any(|a| a == o)
+                || o.split_once("://")
+                    .is_some_and(|(_, rest)| rest.eq_ignore_ascii_case(host))
+        }
     }
 }
 

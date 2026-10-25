@@ -83,7 +83,7 @@ fn common(o: &mut Obj, diag: &mut Diag) -> Result<V2rayCommon> {
     let dial = parse_dial(o, diag)?;
     let network = parse_network(o)?;
     let tls = parse_tls(o, "tls", diag)?;
-    let transport = parse_transport(o, "transport")?;
+    let transport = parse_transport(o, "transport", diag)?;
     if matches!(transport, Some(Transport::Quic)) {
         return Err(Error::at(
             &format!("{}.type", o.sub("transport")),

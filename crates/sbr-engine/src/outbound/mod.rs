@@ -7,7 +7,7 @@ pub mod group;
 mod http;
 mod hysteria2;
 mod proto;
-mod quic;
+pub(crate) mod quic;
 mod shadowsocks;
 mod shadowtls;
 mod socks;

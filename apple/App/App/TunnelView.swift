@@ -15,6 +15,17 @@ struct TunnelView: View {
                         GroupSection(group: group, lookup: groupsByTag)
                     }
                 }
+                #if !os(tvOS)
+                SectionHeader("protection")
+                Toggle(isOn: $tunnel.strict) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("block traffic outside the tunnel").font(.sbr(.control))
+                        Text("includes connections opened before connecting. takes effect on reconnect.")
+                            .font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
+                    }
+                }
+                .tint(.sbrAccent)
+                #endif
             }
             .padding(.horizontal, Theme.Space.xl)
             .padding(.bottom, Theme.Space.xxl)

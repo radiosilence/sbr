@@ -39,7 +39,7 @@ Lookups are built for large rule-sets: hash sets per label for domains, Aho-Cora
 | | supported | not yet (rejected with a path) |
 |---|---|---|
 | inbounds | `mixed`, `socks` (5), `http`, users/auth | **`tun`**, socks4, UDP associate, TLS on http, everything else |
-| outbounds | `direct`, `block`, `socks` (4/4a/5, UDP associate, UoT), `http` (CONNECT, over TLS too), `trojan`, `vless` (+ `xtls-rprx-vision`, REALITY), `vmess` (AEAD), `shadowsocks` (AEAD + 2022, TCP + UDP, UoT v1/v2), `shadowtls` (v1/v2/v3), `anytls`, `hysteria2` (salamander, port hopping, Brutal), `tuic` (v5, all UDP relay modes, 0-RTT), `selector`, `urltest`\*, `detour` chains, `interrupt_exist_connections` | `multiplex` (sing-mux), VMess legacy (`alter_id` > 0, `aes-128-cfb`), `packet_encoding: packetaddr`, `quic` v2ray transport, HTTP/2-3 proxies, hysteria2 gecko obfs / realm, naive, ssh, tor, SIP003 plugins, … |
+| outbounds | `direct`, `block`, `socks` (4/4a/5, UDP associate, UoT), `http` (CONNECT, over TLS too), `trojan`, `vless` (+ `xtls-rprx-vision`, REALITY), `vmess` (AEAD), `shadowsocks` (AEAD + 2022, TCP + UDP, UoT v1/v2), `shadowtls` (v1/v2/v3), `anytls`, `hysteria2` (salamander, port hopping, Brutal), `tuic` (v5, all UDP relay modes, 0-RTT), the `xhttp` transport (sbr extension, below), `selector`, `urltest`\*, `detour` chains, `interrupt_exist_connections` | `multiplex` (sing-mux), VMess legacy (`alter_id` > 0, `aes-128-cfb`), `packet_encoding: packetaddr`, `quic` v2ray transport, HTTP/2-3 proxies, hysteria2 gecko obfs / realm, naive, ssh, tor, SIP003 plugins, … |
 | endpoints | `wireguard` (userspace: boringtun + smoltcp, as an outbound) | `system: true`, flows opened by the peer, tailscale |
 | route | all default-rule fields above, `clash_mode`, logical and/or, invert, actions `route` / `reject` (default, drop) / `sniff`\*\*, inline / local / remote rule-sets, source and binary (`.srs` v1–5) | `protocol`/sniffing, `process_*`, `wifi_*`, `hijack-dns`, `resolve`, `route-options`, rule-set `http_client` |
 | dns | servers `local`, `hosts`, `udp` (TC→TCP), `tcp` (pipelined), `tls`, `https` (HTTP/2, POST/GET), `fakeip`, legacy `address` URLs incl. `rcode://`; `detour`/`domain_resolver` on servers, outbounds and `route.default_domain_resolver`; rules with all route matchers plus `query_type`, `outbound`, `ip_accept_any` and legacy address filtering; actions `route`, `route-options`, `reject`, `predefined`; cache (TTL, `cache_capacity`, `disable_expire`, `optimistic`, coalescing), `strategy`, `client_subnet`, `reverse_mapping` | servers `quic`, `h3`, `dhcp`, `mdns`, `tailscale`, `resolved`; `evaluate`/`respond`/response matching (1.14); uTLS/reality/ECH/pinning on DNS TLS |
@@ -59,7 +59,14 @@ A demoted member is skipped by every `urltest` group for 120 s (TSPU's residual 
 
 Costs: passive detection is a timestamp per relayed chunk and a timer per connection that runs only while data is moving or a reply is owed, so idle connections cost no wakeups. Data probes run only when the group probes (its interval, while in use) or when traffic looks wrong.
 
-## sbr never phones home
+## QUIC ClientHello scrambling
+
+The GFW and Russia's TSPU decrypt QUIC v1 Initial packets, whose keys anyone can derive from the connection ID, and block on the TLS SNI; neither reassembles CRYPTO data across datagrams. `hysteria2` without Salamander and `tuic` therefore scramble the ClientHello by default, as quic-go 0.52+ (and so sing-box, Xray and Hysteria) do: the SNI is cut in half and its two halves travel in different Initial packets. rustls' default key shares make the ClientHello longer than one packet, which is what lets the halves land in separate datagrams; a ClientHello that fits in one packet only gets its CRYPTO frames reordered.
+
+quinn builds Initials itself, so the rewrite is a socket wrapper under quinn (`outbound/quic/initial.rs`) that decrypts the Initials carrying the ClientHello, moves bytes between their CRYPTO frames and re-encrypts them, keeping packet numbers and sizes. quinn is unpatched. `"disable_client_hello_scrambling": true` on the outbound (an sbr extension, named after quic-go's `QUIC_GO_DISABLE_CLIENTHELLO_SCRAMBLING`) turns it off. With Salamander it never runs, because Salamander already hides the whole packet.
+
+The Initial does not resemble Chrome's: 1200-byte datagrams (Chrome sends 1250), a 20-byte destination and 8-byte source connection ID (Chrome: 8 and 0), rustls' ClientHello and quinn's transport parameters, and no Chrome-style interleaving of PING and PADDING frames between CRYPTO frames. Like the hysteria and quic-go clients it imitates, it is fingerprintable as a non-browser QUIC stack.
+
 
 sbr only contacts endpoints your config names. Where sing-box has a built-in third-party default, sbr differs:
 
@@ -82,7 +89,7 @@ Refreshes send `If-None-Match`, so a server that sets `ETag` (nginx and caddy do
 
 ## Clash API
 
-`experimental.clash_api` serves what yacd, metacubexd and zashboard use: `/version`, `/configs` (GET, PATCH `mode`), `/proxies[/{name}[/delay]]` (PUT selects), `/group[/{name}[/delay]]`, `/rules`, `/connections` (GET or WebSocket, DELETE all or one), `/traffic`, `/memory`, `/logs?level=` (WebSocket or streamed), `/dns/query` (A/AAAA), `/cache/fakeip/flush`, and `external_ui` under `/ui/`. `secret` is a bearer token (`?token=` for WebSockets); CORS follows `access_control_allow_origin` and `access_control_allow_private_network`. Closing a connection aborts its relay. `memory` is the process footprint (`phys_footprint` on Apple, RSS on Linux).
+`experimental.clash_api` serves what yacd, metacubexd and zashboard use: `/version`, `/configs` (GET, PATCH `mode`), `/proxies[/{name}[/delay]]` (PUT selects), `/group[/{name}[/delay]]`, `/rules`, `/connections` (GET or WebSocket, DELETE all or one), `/traffic`, `/memory`, `/logs?level=` (WebSocket or streamed), `/dns/query` (A/AAAA), `/cache/fakeip/flush`, and `external_ui` under `/ui/`. `secret` is a bearer token (`?token=` for WebSockets); CORS follows `access_control_allow_origin` and `access_control_allow_private_network`. Without a `secret`, sbr refuses requests from origins not listed in `access_control_allow_origin` (other than the API's own `/ui`) and requests whose `Host` is a domain other than `localhost`, so a web page cannot read connections or switch the proxy through the browser; sing-box allows every origin in that case. Closing a connection aborts its relay. `memory` is the process footprint (`phys_footprint` on Apple, RSS on Linux).
 
 Connection tracking costs one small allocation per connection and a non-atomic counter update per relayed chunk (each counter has a single writer), so it is always on.
 
@@ -137,7 +144,42 @@ The outbound `tls` object is rustls + aws-lc-rs (`crates/sbr-engine/src/tls`): `
 
 **`utls` without `reality` is not a browser fingerprint.** rustls cannot emit Chrome's ClientHello; sbr accepts `utls.enabled` and only borrows what is cheap (ALPN `h2, http/1.1` when none is set, AES-128-GCM first). The ClientHello is rustls', which a censor can tell apart from Chrome's. Use REALITY where that matters.
 
-Transports: `ws` (incl. early data in the path or a header), `httpupgrade`, `grpc` (the "gun" framing over one pooled HTTP/2 connection per outbound, h2c without TLS) and `http` (HTTP/2 over TLS, HTTP/1.1 without). gRPC/HTTP `idle_timeout`/`ping_timeout` are parsed but no health pings are sent (no idle timers).
+Transports: `ws` (incl. early data in the path or a header), `httpupgrade`, `grpc` (the "gun" framing over one pooled HTTP/2 connection per outbound, h2c without TLS), `http` (HTTP/2 over TLS, HTTP/1.1 without) and `xhttp` (below). gRPC/HTTP `idle_timeout`/`ping_timeout` are parsed but no health pings are sent (no idle timers).
+
+### XHTTP (sbr extension)
+
+sing-box has no XHTTP, but the Xray servers sbr targets do, and XHTTP is the Xray-native way to multiplex and to run through a CDN (see `docs/threat-model.md`). sbr adds it as a v2ray `transport` with `"type": "xhttp"` (or `"splithttp"`), usable by `vless`, `trojan` and `vmess`. A sing-box binary rejects such a config. The object takes Xray's `xhttpSettings` field names, defaults and validation unchanged, so settings can be copied from an Xray server or share link:
+
+```json
+"transport": {
+  "type": "xhttp",
+  "path": "/xh",
+  "mode": "auto",
+  "host": "cdn.example.com",
+  "headers": {"User-Agent": "firefox"},
+  "xPaddingBytes": "100-1000",
+  "scMaxEachPostBytes": "500000-1000000",
+  "scMinPostsIntervalMs": 30,
+  "xmux": {"maxConnections": "2-4", "hMaxRequestTimes": "600-900", "hMaxReusableSecs": "1800-3000"},
+  "downloadSettings": {"server": "203.0.113.7", "server_port": 443, "tls": {"enabled": true}, "transport": {"type": "xhttp", "path": "/xh"}}
+}
+```
+
+- `mode`: `stream-one` (one request each way in a single exchange), `stream-up` (a `GET` download and a streaming `POST` upload joined by a session ID), `packet-up` (the same `GET`, with the upload cut into numbered `POST`s that survive buffering proxies and CDNs). `auto` is `packet-up`, or over REALITY `stream-one` (`stream-up` with `downloadSettings`), as in Xray.
+- HTTP version, as Xray decides it: REALITY is HTTP/2; TLS is HTTP/2 unless `alpn` is exactly `["http/1.1"]` (HTTP/1.1, one connection per stream, `Connection: close`, chunked uploads) or `["h3"]` (HTTP/3 over quinn); no TLS is HTTP/1.1.
+- Also accepted: `xPaddingObfsMode`, `xPaddingKey`, `xPaddingHeader`, `xPaddingPlacement`, `xPaddingMethod` (`repeat-x`, `tokenish`), `uplinkHTTPMethod`, `sessionIDPlacement`/`sessionIDKey`/`sessionIDTable`/`sessionIDLength`, `seqPlacement`/`seqKey`, `uplinkDataPlacement`/`uplinkDataKey`/`uplinkChunkSize` (packet-up data in headers or cookies), `noGRPCHeader`, `xmux.maxConcurrency`/`cMaxReuseTimes`/`hKeepAlivePeriod`, and `extra` (everything but `host`, `path` and `mode`, as share links carry it). The server-side fields `noSSEHeader`, `scMaxBufferedPosts`, `scStreamUpServerSecs` and `serverMaxHeaderBytes` are accepted and have no effect on a client, as in Xray.
+- Requests carry Xray's browser defaults: a Chrome identity (`User-Agent`, client hints, `Sec-Fetch-*`, `Priority`) unless `headers.User-Agent` is `firefox`, `safari`, `edge`, `curl`, `golang` or a literal string, and padding in `Referer: <url>?x_padding=XXX` unless `xPaddingObfsMode` moves it.
+
+Deviations from Xray:
+
+- `downloadSettings` is sing-box-shaped (`server`, `server_port`, `tls`, and a `transport` that must be `xhttp`) rather than an Xray `streamSettings` object, and the same applies inside `extra`.
+- HTTP/2 keep-alive pings are sent only when `xmux.hKeepAlivePeriod` is positive. Xray pings every 45 s by default, which wakes the radio on idle connections. Idle pooled connections are retired after 300 s when the next request picks a connection, not by a timer. HTTP/3 connections keep quinn's 10 s keep-alive while open and close 30 s after their last request.
+- No `Accept-Encoding: gzip` is sent (Go adds it and decompresses transparently), and Xray's browser dialer does not exist. The HTTP/2 and QUIC framing is h2's and quinn's, not a browser's; over TLS the ClientHello is rustls' (see above), over REALITY it is the configured uTLS fingerprint.
+- As in Xray, a client with `uplinkDataPlacement: cookie` defaults its key to `x_data` while a server with `auto` reads `X-Data`; set `uplinkDataKey` on one side.
+
+Interop is tested against Xray-core 26.10.21 (`crates/sbr-engine/tests/xhttp.rs`, binary from `$SBR_XRAY` or `PATH`): every mode plus `auto` over HTTP/2 with TLS, HTTP/1.1 with TLS, HTTP/2 over REALITY, cleartext HTTP/1.1 and HTTP/3, each with a 1 MiB byte-exact round trip, four parallel 64 KiB streams sharing XMUX slots, and XUDP; non-default session, sequence and padding placements with tokenish padding; packet-up data in headers and in cookies; `extra`; `downloadSettings` (HTTP/1.1 upload, HTTP/2 download); plain VLESS UDP; and a wrong path failing promptly.
+
+`cargo run --release -p sbr-engine --example xhttp_bench -- <xray> [streams] [seconds] [rounds]` compares each mode over REALITY with VLESS + REALITY + Vision on the same Xray server; results are in `BENCHMARKS.md`.
 
 Interop is tested against real sing-box servers (`crates/sbr-engine/tests/singbox.rs`): every protocol over every transport with and without TLS, 1 MiB round trips plus UDP, Vision with TLS 1.3 inside (direct mode), REALITY with and without Vision, and each TLS option. The trojan + `httpupgrade` pair is excluded: sing-box's httpupgrade server flushes `101` before hijacking, so Go's HTTP server can swallow the first byte of the tunnel and its trojan server rejects the short read. That is a server-side race any client hits.
 

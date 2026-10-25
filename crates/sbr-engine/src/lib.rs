@@ -68,7 +68,8 @@ pub struct Settings {
     pub dns: Option<Arc<dyn Dns>>,
     /// Pre-opened TUN file descriptor (Apple Network Extension, Android
     /// VpnService). The `tun` inbound adopts it instead of creating an
-    /// interface, and takes ownership: it is closed when the instance stops.
+    /// interface, and takes ownership: it is closed when the instance stops or
+    /// fails to start.
     pub tun_fd: Option<i32>,
     /// Trust anchors for sbr's own HTTPS fetches (remote rule-sets, external
     /// UI, urltest). Defaults to the Mozilla roots (`webpki-roots`).
@@ -320,6 +321,12 @@ impl Instance {
         for w in &options.warnings {
             warn!("{w}");
         }
+        // The platform's tun fd is ours from here on: closed on every early
+        // return, and handed to exactly one tun inbound.
+        // SAFETY: the caller transfers ownership of `tun_fd` (see `Settings`).
+        let mut tun_fd = settings
+            .tun_fd
+            .map(|fd| unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) });
         let engine = Arc::new(Engine::new(options, &settings)?);
         if options.experimental.cache_file.is_some() && engine.cache.is_none() {
             return Err(Error::Service("cache file could not be opened".into()));
@@ -345,7 +352,19 @@ impl Instance {
             let p = match &ib.kind {
                 InboundKind::Mixed(p) | InboundKind::Socks(p) | InboundKind::Http(p) => p,
                 InboundKind::Tun(t) => {
-                    let stack = inbound::tun::start(engine.clone(), &ib.tag, t, &settings)
+                    if settings.tun_fd.is_some() && tun_fd.is_none() {
+                        return Err(Error::Inbound(
+                            i,
+                            ib.tag.clone(),
+                            "only one tun inbound can use the platform tun".into(),
+                        ));
+                    }
+                    let fd = tun_fd.take().map(std::os::fd::IntoRawFd::into_raw_fd);
+                    let tun_settings = Settings {
+                        tun_fd: fd,
+                        ..settings.clone()
+                    };
+                    let stack = inbound::tun::start(engine.clone(), &ib.tag, t, &tun_settings)
                         .await
                         .map_err(|e| Error::Inbound(i, ib.tag.clone(), e.to_string()))?;
                     tuns.push(stack);

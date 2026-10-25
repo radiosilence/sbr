@@ -179,21 +179,23 @@ impl ServerCertVerifier for Insecure {
     ) -> Result<ServerCertVerified, rustls::Error> {
         Ok(ServerCertVerified::assertion())
     }
+    // `insecure` skips the certificate check only; the handshake signature is
+    // still verified against the presented key, as in the shared TLS layer.
     fn verify_tls12_signature(
         &self,
-        _: &[u8],
-        _: &CertificateDer<'_>,
-        _: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &provider().signature_verification_algorithms)
     }
     fn verify_tls13_signature(
         &self,
-        _: &[u8],
-        _: &CertificateDer<'_>,
-        _: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &provider().signature_verification_algorithms)
     }
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         provider().signature_verification_algorithms.supported_schemes()

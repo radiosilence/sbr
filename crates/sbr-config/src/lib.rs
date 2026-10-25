@@ -18,6 +18,7 @@ pub mod srs;
 mod tls;
 pub mod types;
 mod wireguard;
+mod xhttp;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
@@ -34,6 +35,7 @@ pub use route::*;
 pub use srs::parse_rule_set;
 pub use tls::{Ech, Multiplex, Reality, TlsOutbound, Transport, Utls};
 pub use wireguard::{WIREGUARD_DEFAULT_MTU, WireGuardEndpoint, WireGuardPeer};
+pub use xhttp::{PaddingMethod, Placement, Range, Xhttp, XhttpDownload, XhttpMode, Xmux, predefined_table};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -215,7 +217,7 @@ pub enum DomainStrategy {
     Ipv6Only,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerAddr {
     pub server: String,
     pub server_port: u16,

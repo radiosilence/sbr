@@ -27,7 +27,16 @@ const MAGIC: [u8; 3] = *b"SRS";
 /// sing-box `C.RuleSetVersionCurrent`.
 pub const VERSION_CURRENT: u8 = 5;
 /// Decompressed size cap: geosite-style sets are a few MB; refuse zip bombs.
-const MAX_DECOMPRESSED: u64 = 256 << 20;
+/// Kept well under the ~50 MB iOS extension limit, since decoding expands.
+const MAX_DECOMPRESSED: u64 = 32 << 20;
+/// Bytes of keys a succinct domain set may expand to. A trie stores shared
+/// prefixes once, so a crafted chain-shaped trie of n labels would otherwise
+/// expand to n²/2 bytes.
+const MAX_SET_KEY_BYTES: usize = 64 << 20;
+/// Longer than any domain (253) or AdGuard rule a set should carry.
+const MAX_SET_KEY_LEN: usize = 1024;
+/// Up-front reservation cap; a count field cannot reserve more than this.
+const MAX_PREALLOC: usize = 1024;
 const MAX_DEPTH: usize = 100;
 
 const ITEM_QUERY_TYPE: u8 = 0;
@@ -295,7 +304,7 @@ pub fn read(data: &[u8]) -> Result<PlainRuleSet> {
     }
     let mut c = Cursor { buf: &raw, pos: 0 };
     let n = c.len(2).map_err(|e| Error::at("rules", e))?;
-    let mut rules = Vec::with_capacity(n);
+    let mut rules = Vec::with_capacity(n.min(MAX_PREALLOC));
     for i in 0..n {
         let path = format!("rules[{i}]");
         rules.push(read_rule(&mut c, 0, &path).map_err(|e| Error::at(&path, e))?);
@@ -316,7 +325,7 @@ fn read_rule(c: &mut Cursor, depth: usize, path: &str) -> std::result::Result<He
                 m => return Err(format!("unknown logical mode {m}")),
             };
             let n = c.len(2)?;
-            let mut rules = Vec::with_capacity(n);
+            let mut rules = Vec::with_capacity(n.min(MAX_PREALLOC));
             for i in 0..n {
                 rules.push(read_rule(c, depth + 1, &format!("{path}.rules[{i}]"))?);
             }
@@ -337,7 +346,7 @@ fn read_default(c: &mut Cursor) -> std::result::Result<DefaultRule, String> {
             ITEM_QUERY_TYPE => r.query_type = c.u16s()?,
             ITEM_NETWORK => r.network = c.strings()?,
             ITEM_DOMAIN => {
-                let (domain, suffix) = dump_domains(&Succinct::read(c)?.keys());
+                let (domain, suffix) = dump_domains(&Succinct::read(c)?.keys()?);
                 r.domain = domain;
                 r.domain_suffix = suffix;
             }
@@ -356,7 +365,7 @@ fn read_default(c: &mut Cursor) -> std::result::Result<DefaultRule, String> {
             ITEM_PACKAGE_NAME_REGEX => r.package_name_regex = c.strings()?,
             ITEM_WIFI_SSID => r.wifi_ssid = c.strings()?,
             ITEM_WIFI_BSSID => r.wifi_bssid = c.strings()?,
-            ITEM_ADGUARD_DOMAIN => r.adguard_domain = dump_adguard(&Succinct::read(c)?.keys()),
+            ITEM_ADGUARD_DOMAIN => r.adguard_domain = dump_adguard(&Succinct::read(c)?.keys()?),
             ITEM_NETWORK_TYPE => r.network_type = c.bytes()?,
             ITEM_NETWORK_IS_EXPENSIVE => r.network_is_expensive = true,
             ITEM_NETWORK_IS_CONSTRAINED => r.network_is_constrained = true,
@@ -480,7 +489,7 @@ impl Succinct {
     }
 
     /// Every key, in trie (sorted) order.
-    fn keys(&self) -> Vec<Vec<u8>> {
+    fn keys(&self) -> std::result::Result<Vec<Vec<u8>>, String> {
         // child_start[n]..child_start[n+1] are node n's edge (label) indices.
         let mut child_start = vec![0usize];
         let mut zeros = 0;
@@ -494,6 +503,7 @@ impl Succinct {
         }
         let mut out = Vec::new();
         let mut key = Vec::new();
+        let mut budget = MAX_SET_KEY_BYTES;
         // (node, next edge to visit)
         let mut stack = vec![(0usize, child_start[0])];
         while let Some(&mut (node, ref mut edge)) = stack.last_mut() {
@@ -506,12 +516,16 @@ impl Succinct {
             *edge += 1;
             let child = k + 1;
             key.push(self.labels[k]);
+            if key.len() > MAX_SET_KEY_LEN {
+                return Err("domain set key too long".into());
+            }
             if get_bit(&self.leaves, child) {
+                budget = budget.checked_sub(key.len()).ok_or("domain set too large")?;
                 out.push(key.clone());
             }
             stack.push((child, child_start[child]));
         }
-        out
+        Ok(out)
     }
 }
 
@@ -1450,7 +1464,7 @@ mod tests {
         s.write(&mut buf);
         let mut c = Cursor { buf: &buf, pos: 0 };
         let back = Succinct::read(&mut c).unwrap();
-        assert_eq!(back.keys(), keys);
+        assert_eq!(back.keys().unwrap(), keys);
     }
 
     #[test]
