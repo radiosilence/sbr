@@ -131,6 +131,16 @@ impl Outbound for Vless {
             if !self.udp {
                 return Err(disabled("udp"));
             }
+            // Xray's Vision client refuses QUIC: carried inside TLS-over-TCP it
+            // is slow and stands out, while the browser's TCP fallback rides
+            // Vision's splice. Failing it (the TUN answers ICMP unreachable)
+            // makes clients fall back at once.
+            if self.vision && dest.port == 443 {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    "XTLS rejected UDP/443 traffic",
+                ));
+            }
             let conn = if self.xudp {
                 StreamPacketConn::new(self.open(CMD_MUX, dest).await?, Framing::Xudp, dest.clone())
             } else {
