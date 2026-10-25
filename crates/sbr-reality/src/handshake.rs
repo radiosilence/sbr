@@ -15,8 +15,8 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::RealityConfig;
 use crate::hello::{
-    CERT_COMPRESSION_BROTLI, CERT_COMPRESSION_ZLIB, CERT_COMPRESSION_ZSTD, GROUP_X25519, GROUP_X25519_MLKEM768, Hello, HelloParams, KeyShares,
-    MLKEM768_CIPHERTEXT_LEN, SESSION_ID_OFFSET, ecdh_alg,
+    CERT_COMPRESSION_BROTLI, CERT_COMPRESSION_ZLIB, CERT_COMPRESSION_ZSTD, GROUP_X25519, GROUP_X25519_MLKEM768, Hello,
+    HelloParams, KeyShares, MLKEM768_CIPHERTEXT_LEN, SESSION_ID_OFFSET, ecdh_alg,
 };
 use crate::keys::{CipherSuite, KeySchedule, RecordKey, finished_verify_data};
 use crate::reality::AuthKey;
@@ -359,7 +359,11 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut hello = Hello::new(p)?;
-    let mut keys = KeyShares::generate(&hello.initial_share_groups(), hello.grease_group(), hello.reuse_x25519())?;
+    let mut keys = KeyShares::generate(
+        &hello.initial_share_groups(),
+        hello.grease_group(),
+        hello.reuse_x25519(),
+    )?;
     let fill_session_id = matches!(
         auth,
         Auth::Reality { .. }
@@ -666,4 +670,39 @@ where
         group,
         max_fragment,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Firefox offers zstd; rustls has no zstd compressor, so the end-to-end
+    /// tests cover brotli and zlib and this covers zstd and the bounds.
+    #[test]
+    fn zstd_certificate_and_length_checks() {
+        let hello = Hello::new(&HelloParams {
+            fingerprint: crate::Fingerprint::Firefox,
+            server_name: Some("a.test"),
+            alpn: &[],
+            post_quantum: true,
+        })
+        .unwrap();
+        let body: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
+        let compressed = ruzstd::encoding::compress_to_vec(&body[..], ruzstd::encoding::CompressionLevel::Fastest);
+        let msg = |alg: u16, len: usize, data: &[u8]| {
+            let mut m = alg.to_be_bytes().to_vec();
+            m.extend_from_slice(&(len as u32).to_be_bytes()[1..]);
+            m.extend_from_slice(&(data.len() as u32).to_be_bytes()[1..]);
+            m.extend_from_slice(data);
+            m
+        };
+        assert_eq!(
+            decompress_certificate(&msg(3, body.len(), &compressed), &hello).unwrap(),
+            body
+        );
+        // A wrong uncompressed_length, an algorithm not offered, garbage.
+        assert!(decompress_certificate(&msg(3, body.len() - 1, &compressed), &hello).is_err());
+        assert!(decompress_certificate(&msg(4, body.len(), &compressed), &hello).is_err());
+        assert!(decompress_certificate(&msg(1, body.len(), &compressed), &hello).is_err());
+    }
 }
