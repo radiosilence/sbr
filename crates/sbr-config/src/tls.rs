@@ -167,6 +167,8 @@ pub enum Transport {
         path: Option<String>,
         headers: Vec<(String, String)>,
     },
+    /// sbr extension: Xray's XHTTP (`splithttp`).
+    Xhttp(Box<crate::xhttp::Xhttp>),
 }
 
 /// `badoption.HTTPHeader`: values are a string or a list of strings.
@@ -187,7 +189,7 @@ fn json_str(v: Value) -> String {
     }
 }
 
-pub(crate) fn parse_transport(parent: &mut Obj, key: &str) -> Result<Option<Transport>> {
+pub(crate) fn parse_transport(parent: &mut Obj, key: &str, diag: &mut Diag) -> Result<Option<Transport>> {
     let Some(v) = parent.raw(key) else { return Ok(None) };
     let mut o = Obj::new(v, parent.sub(key))?;
     let ty: String = o.req("type")?;
@@ -218,6 +220,7 @@ pub(crate) fn parse_transport(parent: &mut Obj, key: &str) -> Result<Option<Tran
             path: o.string("path")?,
             headers: headers(&mut o, "headers")?,
         },
+        "xhttp" | "splithttp" => Transport::Xhttp(Box::new(crate::xhttp::parse_xhttp(&mut o, diag)?)),
         t => return Err(Error::at(&o.sub("type"), format!("unknown transport {t:?}"))),
     };
     o.finish()?;
