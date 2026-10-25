@@ -753,3 +753,103 @@ async fn cache_file_persists_selection_and_mode() {
     assert_eq!(i.engine.router().clash_mode().current(), "Direct", "mode restored");
     i.shutdown();
 }
+
+/// A zip with stored (uncompressed) entries.
+fn stored_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let (mut out, mut central) = (Vec::new(), Vec::new());
+    for (name, data) in files {
+        let offset = out.len() as u32;
+        let sizes = [(data.len() as u32).to_le_bytes(), (data.len() as u32).to_le_bytes()].concat();
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        out.extend_from_slice(&sizes);
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        central.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        central.extend_from_slice(&sizes);
+        central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        central.extend_from_slice(&[0; 12]);
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let at = out.len() as u32;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&at.to_le_bytes());
+    out.extend_from_slice(&[0, 0]);
+    out
+}
+
+#[tokio::test]
+async fn external_ui_downloads_only_from_the_configured_url() {
+    let zip = stored_zip(&[("dash-main/index.html", b"<p>v1</p>"), ("dash-main/a.js", b"1")]);
+    let hits = Arc::new(AtomicUsize::new(0));
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let web = l.local_addr().unwrap();
+    {
+        let hits = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = l.accept().await.unwrap();
+                let (zip, hits) = (zip.clone(), hits.clone());
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut b = [0u8; 512];
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let n = s.read(&mut b).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        head.extend_from_slice(&b[..n]);
+                    }
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    // GitHub-style redirect first.
+                    let resp = if head.starts_with(b"GET /latest ") {
+                        b"HTTP/1.1 302 Found\r\nLocation: /dash.zip\r\nContent-Length: 0\r\n\r\n".to_vec()
+                    } else {
+                        let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", zip.len()).into_bytes();
+                        r.extend_from_slice(&zip);
+                        r
+                    };
+                    let _ = s.write_all(&resp).await;
+                });
+            }
+        });
+    }
+    let target = echo().await;
+    let dir = temp_dir("ui-download");
+    let ui = format!(
+        r#","external_ui":"dash","external_ui_download_url":"http://{web}/latest","external_ui_download_detour":"direct""#
+    );
+    let i = start(
+        &api_config(target.port(), "", &ui),
+        Settings {
+            base_dir: Some(dir.clone()),
+            ..Settings::default()
+        },
+    )
+    .await;
+    let api = i.clash_api.unwrap();
+    let mut body = String::new();
+    for _ in 0..50 {
+        let (st, _, b) = http(api, "GET", "/ui/", &[], "").await;
+        if st == 200 {
+            body = b;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(body, "<p>v1</p>", "downloaded, single top directory trimmed");
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "redirect followed");
+    let (st, v) = api_json(api, "POST", "/upgrade/ui", "").await;
+    assert_eq!((st, v), (200, json!({"status": "ok"})));
+    assert_eq!(std::fs::read_to_string(dir.join("dash/a.js")).unwrap(), "1");
+    i.shutdown();
+}
