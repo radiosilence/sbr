@@ -83,7 +83,7 @@ impl Transport for Udp {
     fn exchange<'a>(&'a self, query: &'a Message) -> BoxFuture<'a, io::Result<Message>> {
         Box::pin(async move {
             let c = self.conn().await?;
-            let (id, mut rx, _unregister) = c.pending.register();
+            let (id, mut rx, _unregister) = c.pending.register()?;
             let raw = encode_with_id(query, id)?;
             c.pc.send_to(&raw, &c.dest).await?;
             let resp = match tokio::time::timeout(RETRANSMIT, &mut rx).await {

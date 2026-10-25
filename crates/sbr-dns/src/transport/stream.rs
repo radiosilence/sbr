@@ -24,6 +24,9 @@ pub(crate) struct StreamTransport {
     conn: tokio::sync::Mutex<Option<Arc<Conn>>>,
 }
 
+/// Outstanding queries per upstream connection.
+const MAX_PENDING: usize = 4096;
+
 /// State shared by a connection's task and its users.
 #[derive(Default)]
 pub(crate) struct Pending {
@@ -32,16 +35,21 @@ pub(crate) struct Pending {
 }
 
 impl Pending {
-    /// Register a waiter under a fresh ID.
-    pub fn register(self: &Arc<Self>) -> (u16, oneshot::Receiver<Message>, Unregister) {
-        let (tx, rx) = oneshot::channel();
+    /// Register a waiter under a fresh ID. Fails when too many queries are
+    /// outstanding on this connection; the ID search below would otherwise
+    /// spin forever once all 65536 IDs are taken.
+    pub fn register(self: &Arc<Self>) -> io::Result<(u16, oneshot::Receiver<Message>, Unregister)> {
         let mut map = self.map.lock().unwrap();
+        if map.len() >= MAX_PENDING {
+            return Err(io::Error::other("too many DNS queries in flight"));
+        }
+        let (tx, rx) = oneshot::channel();
         let mut id = crate::random_u16();
         while map.contains_key(&id) {
             id = id.wrapping_add(1);
         }
         map.insert(id, tx);
-        (id, rx, Unregister(self.clone(), id))
+        Ok((id, rx, Unregister(self.clone(), id)))
     }
 
     pub fn deliver(&self, m: Message) {
@@ -145,7 +153,10 @@ impl StreamTransport {
             Ok(c) => c,
             Err(e) => return (Err(e), false),
         };
-        let (id, rx, _unregister) = conn.pending.register();
+        let (id, rx, _unregister) = match conn.pending.register() {
+            Ok(r) => r,
+            Err(e) => return (Err(e), false),
+        };
         let raw = match encode_with_id(query, id) {
             Ok(r) => r,
             Err(e) => return (Err(e), false),
