@@ -17,6 +17,26 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// sing-box `C.TCPKeepAliveInitial` / `C.TCPKeepAliveInterval`.
 pub const KEEPALIVE_IDLE: Duration = Duration::from_secs(300);
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(75);
+/// Interface outbound sockets bind to when they don't name one: set by the
+/// TUN inbound's `auto_route` so our own traffic can't loop into the tunnel
+/// (sing-box `auto_detect_interface`).
+static DEFAULT_INTERFACE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+pub fn set_default_interface(iface: Option<String>) {
+    *DEFAULT_INTERFACE.write().unwrap() = iface;
+}
+
+fn effective_interface(opts: &DialOptions, dest: IpAddr) -> Option<String> {
+    // Loopback can't loop into a tunnel, and binding it to a physical NIC fails.
+    opts.bind_interface.clone().or_else(|| {
+        if dest.is_loopback() {
+            None
+        } else {
+            DEFAULT_INTERFACE.read().unwrap().clone()
+        }
+    })
+}
+
 /// RFC 8305 "Connection Attempt Delay".
 const ATTEMPT_DELAY: Duration = Duration::from_millis(250);
 
@@ -81,8 +101,8 @@ pub fn bind_udp(family_of: IpAddr, opts: &DialOptions) -> io::Result<tokio::net:
     };
     let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
     sock.set_nonblocking(true)?;
-    if let Some(iface) = &opts.bind_interface {
-        bind_device_sock(&sock, iface, family_of)?;
+    if let Some(iface) = effective_interface(opts, family_of) {
+        bind_device_sock(&sock, &iface, family_of)?;
     }
     let any: SocketAddr = if family_of.is_ipv4() {
         (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
@@ -95,14 +115,14 @@ pub fn bind_udp(family_of: IpAddr, opts: &DialOptions) -> io::Result<tokio::net:
 
 async fn happy_eyeballs(addrs: Vec<SocketAddr>, opts: &DialOptions) -> io::Result<TcpStream> {
     if addrs.len() == 1 {
-        return connect_one(addrs[0], opts.bind_interface.clone()).await;
+        return connect_one(addrs[0], effective_interface(opts, addrs[0].ip())).await;
     }
     let mut set = JoinSet::new();
     let mut last_err = None;
     let mut pending = addrs.into_iter();
     loop {
         if let Some(addr) = pending.next() {
-            set.spawn(connect_one(addr, opts.bind_interface.clone()));
+            set.spawn(connect_one(addr, effective_interface(opts, addr.ip())));
         }
         let next = if pending.len() > 0 {
             match tokio::time::timeout(ATTEMPT_DELAY, set.join_next()).await {
@@ -159,11 +179,11 @@ fn bind_device_sock(sock: &socket2::Socket, iface: &str, _ip: IpAddr) -> io::Res
     target_os = "watchos",
     target_os = "visionos"
 ))]
-fn bind_device(sock: &TcpSocket, iface: &str, ip: IpAddr) -> io::Result<()> {
+fn bind_device_sock(sock: &socket2::Socket, iface: &str, ip: IpAddr) -> io::Result<()> {
     let idx = std::num::NonZeroU32::new(nix_if_nametoindex(iface)?).ok_or_else(|| io::Error::other("bad interface"))?;
     match ip {
-        IpAddr::V4(_) => SockRef::from(sock).bind_device_by_index_v4(Some(idx)),
-        IpAddr::V6(_) => SockRef::from(sock).bind_device_by_index_v6(Some(idx)),
+        IpAddr::V4(_) => sock.bind_device_by_index_v4(Some(idx)),
+        IpAddr::V6(_) => sock.bind_device_by_index_v6(Some(idx)),
     }
 }
 

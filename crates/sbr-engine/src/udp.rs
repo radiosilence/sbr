@@ -177,6 +177,7 @@ impl Engine {
             Action::Route { outbound, options } => {
                 let out = self.outbounds[outbound].clone();
                 let first_dest = options.apply(&meta.destination);
+                let first_dest_c = first_dest.clone();
                 debug!(source = %source, dest = %meta.destination, outbound = out.tag(), "udp route");
                 let conn: Arc<dyn sbr_core::PacketConn> = match out.connect_udp(&first_dest).await {
                     Ok(c) => Arc::from(c),
@@ -195,10 +196,17 @@ impl Engine {
                 let epoch = Instant::now();
                 let last = Arc::new(AtomicU64::new(0));
 
-                // Remote → client.
-                let unmap = match (&meta.destination.host, options.udp_disable_domain_unmapping) {
-                    (Host::Domain(_), false) => Some(meta.destination.clone()),
-                    _ => None,
+                // Remote → client. Replies are reported from the address the
+                // client sent to: undo `override_address`/`override_port`, and
+                // map a resolved domain back (SOCKS5 clients sending to a name).
+                let original = meta.destination.clone();
+                let unmap_domain = matches!(original.host, Host::Domain(_)) && !options.udp_disable_domain_unmapping;
+                let unmap = move |from: Destination| -> Destination {
+                    if from == first_dest_c || (unmap_domain && from.port == original.port) {
+                        original.clone()
+                    } else {
+                        from
+                    }
                 };
                 let reader = {
                     let (conn, back, last) = (conn.clone(), back.clone(), last.clone());
@@ -212,10 +220,7 @@ impl Engine {
                             last.store(now_ms(epoch), Ordering::Relaxed);
                             // Report replies from the address the client asked for, so
                             // SOCKS5 clients that sent to a domain recognise them.
-                            let from = match &unmap {
-                                Some(d) if d.port == from.port => d.clone(),
-                                _ => from,
-                            };
+                            let from = unmap(from);
                             if back.write_back(&buf[..n], &from, source).is_err() {
                                 return;
                             }

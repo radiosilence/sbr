@@ -148,6 +148,7 @@ pub struct Instance {
     pub engine: Arc<Engine>,
     pub listening: Vec<(String, SocketAddr)>,
     tasks: JoinSet<()>,
+    tuns: Vec<Arc<sbr_tun::Stack>>,
 }
 
 impl Instance {
@@ -159,11 +160,16 @@ impl Instance {
         let engine = Arc::new(Engine::new(options, &settings)?);
         let mut tasks = JoinSet::new();
         let mut listening = Vec::new();
+        let mut tuns = Vec::new();
         for (i, ib) in options.inbounds.iter().enumerate() {
             let p = match &ib.kind {
                 InboundKind::Mixed(p) | InboundKind::Socks(p) | InboundKind::Http(p) => p,
-                InboundKind::Tun(_) => {
-                    return Err(Error::Inbound(i, ib.tag.clone(), "tun inbound not wired yet".into()));
+                InboundKind::Tun(t) => {
+                    let stack = inbound::tun::start(engine.clone(), &ib.tag, t, &settings)
+                        .await
+                        .map_err(|e| Error::Inbound(i, ib.tag.clone(), e.to_string()))?;
+                    tuns.push(stack);
+                    continue;
                 }
             };
             let addr = SocketAddr::new(p.listen.listen, p.listen.listen_port);
@@ -182,6 +188,7 @@ impl Instance {
             engine,
             listening,
             tasks,
+            tuns,
         })
     }
 
@@ -189,6 +196,7 @@ impl Instance {
     /// with the runtime.
     pub fn shutdown(mut self) {
         self.tasks.abort_all();
+        self.tuns.clear();
     }
 }
 
