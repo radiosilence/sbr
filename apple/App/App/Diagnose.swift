@@ -27,16 +27,19 @@ final class Diagnose: ObservableObject {
         checks = ["dns", "tcp", "quic", "bulk 10 MB (speed.cloudflare.com)"].map { Check(id: $0) }
         await check(0) { try await Self.dns("www.google.com") }
         await check(1) { try await Self.fetch(Self.probe, http3: false) }
-        await check(2) { try await Self.fetch(Self.page, http3: true, expect: "h3") }
+        // A Vision path refuses QUIC on purpose, and URLSession races TCP, so
+        // TCP here is a note, not a failure.
+        await check(2, note: { !$0.hasPrefix("h3") }) { try await Self.fetch(Self.page, http3: true) }
         await check(3) { try await Self.fetch(Self.bulk, http3: false, timeout: 30) }
     }
 
-    private func check(_ i: Int, _ body: () async throws -> String) async {
+    private func check(_ i: Int, note: (String) -> Bool = { _ in false }, _ body: () async throws -> String) async {
         let start = Date()
         do {
             let detail = try await body()
-            checks[i].ok = true
-            checks[i].detail = "\(detail) · \(Self.ms(start))"
+            let fellBack = note(detail)
+            checks[i].ok = fellBack ? nil : true
+            checks[i].detail = "\(fellBack ? "tcp, quic not used: " : "")\(detail) · \(Self.ms(start))"
         } catch {
             checks[i].ok = false
             checks[i].detail = "\(error.localizedDescription.lowercased()) · \(Self.ms(start))"
@@ -116,7 +119,7 @@ struct DiagnoseSection: View {
             }
             ForEach(model.checks) { c in
                 HStack(alignment: .firstTextBaseline, spacing: Theme.Space.m) {
-                    Text(c.ok == nil ? "·" : c.ok! ? "ok" : "fail")
+                    Text(c.ok == nil ? (model.running && c.detail == "…" ? "·" : "note") : c.ok! ? "ok" : "fail")
                         .foregroundStyle(c.ok == false ? Color.sbrBad : c.ok == true ? Color.sbrAccent : Color.sbrMuted)
                         .frame(width: 32, alignment: .leading)
                     Text(c.id).foregroundStyle(Color.sbrInk)
