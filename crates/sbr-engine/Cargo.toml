@@ -15,6 +15,19 @@ base64.workspace = true
 bytes.workspace = true
 httparse = "1.10"
 shadowsocks = { version = "1.25", default-features = false, features = ["aead-cipher", "aead-cipher-2022", "aead-cipher-extra"] }
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs", "log"] }
+quinn-proto = { version = "0.11.19", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "logging"] }
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+http = "1"
+blake2 = "0.10"
+rustls-pki-types = { version = "1", features = ["std"] }
+rustls-platform-verifier = "0.6"
+fastrand = "2"
+socket2 = "0.6"
 
 [dev-dependencies]
+serde_json.workspace = true
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 tokio = { workspace = true, features = ["full"] }
