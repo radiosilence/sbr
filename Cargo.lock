@@ -1037,6 +1037,7 @@ dependencies = [
 name = "sbr-apple"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "sbr-engine",
  "tokio",
  "tracing",
