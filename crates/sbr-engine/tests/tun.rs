@@ -1,6 +1,9 @@
 //! TUN end to end on a real kernel interface. Needs root and /dev/net/tun;
 //! skips (passes with a note) otherwise.
 
+#[path = "common/soak.rs"]
+mod soak;
+
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -176,5 +179,47 @@ async fn tun_udp_fragments_at_small_mtu() {
             .unwrap();
         assert_eq!(&b[..n], &msg[..], "{size}-byte echo corrupted");
     }
+    instance.shutdown();
+}
+
+/// TUN to engine to a local echo, through the kernel NAT, at the MTU the
+/// user's profile uses. See `common/soak.rs` for how to run it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "soak: moves 128 MiB"]
+async fn soak_tun() {
+    if !can_tun() {
+        eprintln!("skipping: needs root and /dev/net/tun");
+        return;
+    }
+    let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tcp_port = tcp.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (mut s, _) = tcp.accept().await.unwrap();
+            tokio::spawn(async move {
+                let (mut r, mut w) = s.split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            });
+        }
+    });
+    let cfg = r#"{
+        "inbounds": [{
+            "type": "tun", "tag": "tun-in", "interface_name": "sbrsoak0",
+            "address": ["172.19.1.1/30"], "mtu": 1280,
+            "auto_route": true, "route_address": ["198.18.98.0/24"]
+        }],
+        "outbounds": [{"type": "direct", "tag": "direct"}],
+        "route": {"rules": [
+            {"ip_cidr": "198.18.98.0/24", "action": "route-options", "override_address": "127.0.0.1"}
+        ]}
+    }"#;
+    let instance = Instance::start(&Options::parse(cfg).unwrap(), Settings::default())
+        .await
+        .unwrap();
+    let s = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(("198.18.98.1", tcp_port)))
+        .await
+        .expect("connect timed out")
+        .unwrap();
+    soak::soak_echo("tun", s, soak::soak_bytes(), 4).await;
     instance.shutdown();
 }

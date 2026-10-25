@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod censor;
+pub mod soak;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
