@@ -180,6 +180,10 @@ void sbr_runtime_stats(SbrInstance *instance, SbrRuntimeStats *out);
  * cache). Open TCP connections are left to survive or fail on their own. */
 void sbr_network_changed(SbrInstance *instance);
 
+/* Pin sbr's own sockets to a physical interface such as "en0" or "pdp_ip0",
+ * or unpin with NULL. Process-wide. Call it when the default path changes. */
+void sbr_set_default_interface(const char *name);
+
 /* NEPacketTunnelNetworkSettings for the config's tun inbound, as JSON
  * (sing-box libbox semantics; rules in src/tun_settings.rs):
  * {"mtu":9000,
