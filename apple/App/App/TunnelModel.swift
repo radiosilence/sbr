@@ -27,7 +27,7 @@ final class TunnelModel: ObservableObject {
             Task {
                 try? await self.install()
                 if self.isConnected, let session = self.session {
-                    _ = try? await session.send(.reload(config: self.installedConfig))
+                    _ = try? await session.send(.reload(config: self.config, remote: self.remote, logLevel: self.logLevel))
                 }
             }
         }
@@ -36,6 +36,8 @@ final class TunnelModel: ObservableObject {
     private var manager: NETunnelProviderManager?
     /// The active profile's config, carried in the VPN configuration.
     private var config: String?
+    /// Where it came from, for the tunnel to refresh it itself.
+    private var remote: SbrRemoteProfile?
     private var statusObserver: NSObjectProtocol?
 
     private var session: NETunnelProviderSession? { manager?.connection as? NETunnelProviderSession }
@@ -77,14 +79,15 @@ final class TunnelModel: ObservableObject {
 
     /// The active profile changed: save it into the VPN configuration (so a
     /// restart uses it) and hot-reload a running tunnel.
-    func apply(config: String?) async {
-        guard config != self.config else { return }
+    func apply(config: String?, remote: SbrRemoteProfile?) async {
+        guard config != self.config || remote != self.remote else { return }
         self.config = config
+        self.remote = remote
         guard manager != nil, config != nil else { return }
         do {
             try await install()
             if isConnected, let session {
-                groups = try await session.send(.reload(config: installedConfig)).groups ?? groups
+                groups = try await session.send(.reload(config: config, remote: remote, logLevel: logLevel)).groups ?? groups
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -154,18 +157,16 @@ final class TunnelModel: ObservableObject {
         }
     }
 
-    /// The profile as the tunnel runs it: with `verbose`, its log level is
-    /// raised to debug.
-    private var installedConfig: String? {
-        guard let config, verbose,
-              var root = (try? JSONSerialization.jsonObject(with: Data(config.utf8))) as? [String: Any]
-        else { return config }
-        var log = root["log"] as? [String: Any] ?? [:]
-        log["level"] = "debug"
-        root["log"] = log
-        guard let data = try? JSONSerialization.data(withJSONObject: root) else { return config }
-        return String(decoding: data, as: UTF8.self)
+    /// The remote profile as the running tunnel last downloaded it, if it
+    /// refreshed it since the app last looked.
+    func tunnelProfile() async -> SbrProfileSnapshot? {
+        guard isConnected, let session else { return nil }
+        return try? await session.send(.profile).profile
     }
+
+    /// With `verbose`, the tunnel raises the profile's log level to debug,
+    /// including in profiles it downloads itself.
+    private var logLevel: String? { verbose ? "debug" : nil }
 
     private func install() async throws {
         #if SBR_SYSTEM_EXTENSION
@@ -175,8 +176,11 @@ final class TunnelModel: ObservableObject {
         let proto = (m.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = AppConfig.tunnelBundleIdentifier
         proto.serverAddress = "sbr"
-        guard let config = installedConfig else { throw SbrError("no profile selected") }
-        proto.providerConfiguration = [SbrProviderKey.config: config]
+        guard let config else { throw SbrError("no profile selected") }
+        var pc: [String: Any] = [SbrProviderKey.config: config]
+        if let remote { pc[SbrProviderKey.remote] = try JSONEncoder().encode(remote) }
+        if let logLevel { pc[SbrProviderKey.logLevel] = logLevel }
+        proto.providerConfiguration = pc
         Sbr.applyLeakProtection(to: proto, enabled: strict)
         m.protocolConfiguration = proto
         m.localizedDescription = "sbr"

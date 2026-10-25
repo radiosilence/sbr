@@ -19,10 +19,14 @@ struct SbrApp: App {
                 .task {
                     profiles.load()
                     await tunnel.load()
-                    await tunnel.apply(config: profiles.activeText)
+                    await tunnel.apply(config: profiles.activeText, remote: profiles.activeRemote)
+                    await syncProfiles()
                 }
                 .onChange(of: profiles.activeText) { _, text in
-                    Task { await tunnel.apply(config: text) }
+                    Task { await tunnel.apply(config: text, remote: profiles.activeRemote) }
+                }
+                .onChange(of: profiles.activeRemote) { _, remote in
+                    Task { await tunnel.apply(config: profiles.activeText, remote: remote) }
                 }
                 .onOpenURL { url in
                     guard let link = ProfileLink(url) else { return }
@@ -30,9 +34,16 @@ struct SbrApp: App {
                 }
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else { return }
-                    Task { _ = await profiles.refreshStale() }
+                    Task { await syncProfiles() }
                 }
         }
+    }
+
+    /// A running tunnel refreshes the active remote profile itself, through
+    /// its own outbounds: take its copy rather than downloading another.
+    private func syncProfiles() async {
+        if let snapshot = await tunnel.tunnelProfile() { profiles.adopt(snapshot) }
+        _ = await profiles.refreshStale(except: tunnel.isConnected ? profiles.activeID : nil)
     }
 
     private func importLink(_ link: ProfileLink) async {

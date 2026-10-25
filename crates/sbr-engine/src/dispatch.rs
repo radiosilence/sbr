@@ -2,13 +2,15 @@
 //! connect, answer the inbound, relay.
 
 use std::io;
+use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use sbr_core::router::{Action, RouteOptions};
 use sbr_core::sniff::{self, Sniffed};
-use sbr_core::{AsyncStream, BoxFuture, Metadata, Protocol};
+use sbr_core::{AsyncStream, BoxFuture, Destination, Metadata, Network, Outbound, Protocol, Stream};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tracing::{debug, info, warn};
 
@@ -290,4 +292,61 @@ async fn sniff_stream<S: AsyncRead + Unpin>(
     client.head = buf;
     client.pos = 0;
     Ok(())
+}
+
+/// Connections the host itself opens (a remote profile download), routed
+/// like a TCP connection arriving on `inbound`: each takes the outbound the
+/// route rules give its destination, the same path the host's own traffic
+/// takes through the tunnel. Rules that need sniffing or a `resolve` action
+/// do not match, since there is no client stream to sniff.
+pub struct Routed<'a> {
+    engine: &'a Engine,
+    inbound: Arc<str>,
+    inbound_type: &'static str,
+}
+
+impl Engine {
+    pub fn routed(&self, inbound: Arc<str>, inbound_type: &'static str) -> Routed<'_> {
+        Routed {
+            engine: self,
+            inbound,
+            inbound_type,
+        }
+    }
+
+    pub fn http(&self) -> &crate::fetch::HttpClient {
+        &self.http
+    }
+}
+
+impl Outbound for Routed<'_> {
+    fn tag(&self) -> &str {
+        "route"
+    }
+    fn kind(&self) -> &'static str {
+        "route"
+    }
+    fn connect<'a>(&'a self, dest: &'a Destination) -> BoxFuture<'a, io::Result<Stream>> {
+        Box::pin(async move {
+            let source = SocketAddr::from(([0, 0, 0, 0], 0));
+            let meta = Metadata::new(
+                self.inbound.clone(),
+                self.inbound_type,
+                Network::Tcp,
+                source,
+                dest.clone(),
+            );
+            match self.engine.router.route(&meta) {
+                Action::Route { outbound, options } => {
+                    let out = &self.engine.outbounds[outbound];
+                    debug!(inbound = %meta.inbound, dest = %dest, outbound = out.tag(), "route (host)");
+                    out.connect(&options.apply(dest)).await
+                }
+                _ => Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "rejected by route rules",
+                )),
+            }
+        })
+    }
 }

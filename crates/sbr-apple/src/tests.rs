@@ -244,3 +244,157 @@ fn log_callback_receives_engine_logs() {
 fn panics_do_not_escape() {
     assert_eq!(guard(7, || panic!("boom")), 7);
 }
+
+/// Serves `body` to every request and records each request head.
+fn profile_server(body: &'static str) -> (SocketAddr, std::sync::mpsc::Receiver<String>) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let a = l.local_addr().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for mut s in l.incoming().flatten() {
+            let mut head = Vec::new();
+            let mut b = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && s.read(&mut b).unwrap_or(0) == 1 {
+                head.push(b[0]);
+            }
+            let _ = tx.send(String::from_utf8_lossy(&head).into_owned());
+            let _ = write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (a, rx)
+}
+
+fn fetch_blocking(i: *mut SbrInstance, url: &str) -> Result<String, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let url = Url::parse(url).unwrap();
+    assert!(unsafe { &*i }.fetch(url, move |r| tx.send(r).unwrap()));
+    rx.recv_timeout(Duration::from_secs(10)).expect("fetch finished")
+}
+
+#[test]
+fn profile_fetch_goes_through_routing_without_identifying_headers() {
+    let (addr, heads) = profile_server("{}");
+    let i = start(CFG, sbr_start_options_default());
+    assert_eq!(fetch_blocking(i, &format!("http://{addr}/p?token=x")).unwrap(), "{}");
+    let head = heads.recv().unwrap();
+    assert!(head.starts_with("GET /p?token=x HTTP/1.1\r\n"), "{head}");
+    let names: Vec<String> = head
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split_once(':'))
+        .map(|(k, _)| k.to_ascii_lowercase())
+        .collect();
+    assert_eq!(names, ["host", "connection"], "{head}");
+    unsafe { sbr_stop(i) };
+
+    // The route rules decide: a destination they reject is not fetched.
+    let cfg = CFG.replace(
+        r#""outbounds":[{"type":"selector""#,
+        r#""route":{"rules":[{"ip_cidr":["127.0.0.0/8"],"action":"reject"}]},"outbounds":[{"type":"selector""#,
+    );
+    let i = start(&cfg, sbr_start_options_default());
+    let e = fetch_blocking(i, &format!("http://{addr}/p")).unwrap_err();
+    assert!(e.contains("rejected"), "{e}");
+    unsafe { sbr_stop(i) };
+}
+
+type Sent = std::sync::mpsc::Sender<(Option<String>, Option<String>)>;
+
+unsafe extern "C" fn fetched(ctx: *mut c_void, profile: *const c_char, error: *const c_char) {
+    let tx = unsafe { Box::from_raw(ctx.cast::<Sent>()) };
+    let s = |p: *const c_char| (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned());
+    tx.send((s(profile), s(error))).unwrap();
+}
+
+fn fetch_abi(i: *mut SbrInstance, url: &str) -> (i32, std::sync::mpsc::Receiver<(Option<String>, Option<String>)>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+    let started = unsafe { sbr_fetch_profile(i, c(url).as_ptr(), Some(fetched), ctx) };
+    if started == 0 {
+        drop(unsafe { Box::from_raw(ctx.cast::<Sent>()) });
+    }
+    (started, rx)
+}
+
+#[test]
+fn profile_fetch_abi_calls_back_exactly_once() {
+    let i = start(CFG, sbr_start_options_default());
+    let (addr, _) = profile_server("{}");
+    assert_eq!(fetch_abi(i, &format!("http://{addr}/")).0, 0, "https only");
+    assert_eq!(fetch_abi(i, "not a url").0, 0);
+
+    // A peer that hangs up mid-handshake: an error, through the callback.
+    let closing = TcpListener::bind("127.0.0.1:0").unwrap();
+    let closing_addr = closing.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for s in closing.incoming() {
+            drop(s);
+        }
+    });
+    let (started, rx) = fetch_abi(i, &format!("https://{closing_addr}/"));
+    assert_eq!(started, 1);
+    let (p, e) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(p.is_none() && e.is_some_and(|e| e.contains("profile download failed")));
+
+    // A server that never answers: stopping the instance cancels the fetch.
+    let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (started, rx) = fetch_abi(i, &format!("https://{}/", silent.local_addr().unwrap()));
+    assert_eq!(started, 1);
+    let _held = silent.accept().unwrap();
+    unsafe { sbr_stop(i) };
+    let (p, e) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(p.is_none() && e.is_some_and(|e| e.contains("cancelled")));
+    assert!(rx.recv().is_err(), "called back once");
+}
+
+#[test]
+fn apply_profile_validates_before_swapping() {
+    let i = start(CFG, sbr_start_options_default());
+    let apply = |text: &str| {
+        let mut err = ptr::null_mut();
+        let r = unsafe { sbr_apply_profile(i, c(text).as_ptr(), &mut err) };
+        let e = (!err.is_null()).then(|| unsafe { take(err) });
+        (r, e)
+    };
+    let groups = || unsafe { take(sbr_groups(i)) };
+
+    assert_eq!(apply(CFG), (0, None), "same text: no restart");
+
+    let (r, e) = apply(r#"{"outbounds":[{"type":"warp-drive"}]}"#);
+    assert_eq!(r, -1);
+    assert!(e.unwrap().contains("outbounds[0].type"));
+    let (r, _) = apply("<html>captive portal</html>");
+    assert_eq!(r, -1);
+    assert!(groups().contains(r#""tag":"proxy""#), "old config still running");
+
+    // A different tun asks the host for new interface settings first.
+    let tun = CFG.replace(
+        r#""inbounds":["#,
+        r#""inbounds":[{"type":"tun","tag":"tun-in","address":["172.19.0.1/30"]},"#,
+    );
+    assert_eq!(apply(&tun), (2, None));
+    assert!(groups().contains(r#""tag":"proxy""#), "not applied yet");
+
+    let next = CFG.replace(r#""tag":"proxy""#, r#""tag":"main""#);
+    assert_eq!(apply(&next), (1, None));
+    assert!(groups().contains(r#""tag":"main""#));
+    assert_eq!(unsafe { &*i }.lock().config, next);
+    assert_eq!(apply(&next), (0, None));
+    unsafe { sbr_stop(i) };
+}
+
+#[test]
+fn host_traffic_is_routed_as_the_tun_inbound() {
+    let o = Options::parse(
+        r#"{"inbounds":[{"type":"mixed","tag":"m"},{"type":"tun","tag":"t","address":["172.19.0.1/30"]}],
+            "outbounds":[{"type":"direct","tag":"d"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(profile::host_inbound(&o), ("t".into(), "tun"));
+    let o = Options::parse(CFG).unwrap();
+    assert_eq!(profile::host_inbound(&o), ("in".into(), "mixed"));
+}

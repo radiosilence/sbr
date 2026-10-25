@@ -110,6 +110,7 @@ pub struct HttpClient {
     /// For data probes of a leaf's own server, which answers with whatever
     /// certificate its fallback site has. A liveness check, not trust.
     insecure: tokio_rustls::TlsConnector,
+    user_agent: Option<&'static str>,
 }
 
 /// What a data probe fetches.
@@ -155,6 +156,16 @@ impl HttpClient {
         Self {
             tls: tokio_rustls::TlsConnector::from(Arc::new(config)),
             insecure: tokio_rustls::TlsConnector::from(Arc::new(insecure)),
+            user_agent: Some(concat!("sbr/", env!("CARGO_PKG_VERSION"))),
+        }
+    }
+
+    /// The same client, sending no `User-Agent`: for fetches whose server
+    /// should learn nothing about the client (a remote profile).
+    pub fn anonymous(&self) -> Self {
+        Self {
+            user_agent: None,
+            ..self.clone()
         }
     }
 
@@ -263,9 +274,9 @@ impl HttpClient {
             let name =
                 ServerName::try_from(url.host.clone()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
             let tls = self.tls.connect(name, stream).await?;
-            exchange(tls, method, url, headers, limit).await
+            exchange(tls, method, url, self.user_agent, headers, limit).await
         } else {
-            exchange(stream, method, url, headers, limit).await
+            exchange(stream, method, url, self.user_agent, headers, limit).await
         }
     }
 
@@ -530,7 +541,14 @@ pub(crate) fn elapsed_ms(start: Instant) -> u16 {
     start.elapsed().as_millis().clamp(1, u16::MAX as u128) as u16
 }
 
-async fn exchange<S>(io: S, method: &str, url: &Url, headers: &[(&str, &str)], limit: usize) -> io::Result<Response>
+async fn exchange<S>(
+    io: S,
+    method: &str,
+    url: &Url,
+    user_agent: Option<&str>,
+    headers: &[(&str, &str)],
+    limit: usize,
+) -> io::Result<Response>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -542,8 +560,10 @@ where
         .method(method)
         .uri(&url.path)
         .header("host", url.host_header())
-        .header("user-agent", concat!("sbr/", env!("CARGO_PKG_VERSION")))
         .header("connection", "close");
+    if let Some(ua) = user_agent {
+        req = req.header("user-agent", ua);
+    }
     for (k, v) in headers {
         req = req.header(*k, *v);
     }

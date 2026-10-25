@@ -1,8 +1,10 @@
 import Foundation
 import SbrKit
 
-/// A sing-box config the user can switch to. Remote profiles keep their URL
-/// and refresh themselves when the app comes to the front and they're stale.
+/// A sing-box config the user can switch to. Remote profiles keep their URL.
+/// The active one is refreshed by the running tunnel itself (see
+/// `SbrPacketTunnelProvider`); the rest, and the active one while the tunnel
+/// is off, refresh when the app comes to the front and they're stale.
 struct Profile: Codable, Identifiable, Hashable {
     var id = UUID()
     var name: String
@@ -48,7 +50,9 @@ struct ProfileLink {
 /// `index.json` plus one JSON file per profile), protected until first
 /// unlock. The tunnel never reads them: the app hands it the active
 /// profile's text inside the VPN configuration (see `TunnelModel.apply`), so
-/// no shared container holds every profile's credentials.
+/// no shared container holds every profile's credentials. The tunnel keeps
+/// its own copy of what it downloads, which the app asks for over the
+/// provider message channel (`adopt`).
 @MainActor
 final class ProfileStore: ObservableObject {
     @Published private(set) var profiles: [Profile] = []
@@ -69,6 +73,12 @@ final class ProfileStore: ObservableObject {
     }
 
     var active: Profile? { profiles.first { $0.id == activeID } }
+
+    /// The active profile's source, for the tunnel to refresh it from.
+    var activeRemote: SbrRemoteProfile? {
+        guard let p = active, let url = p.remoteURL else { return nil }
+        return SbrRemoteProfile(url: url, refreshMinutes: p.autoUpdateMinutes, updated: p.updated)
+    }
 
     func load() {
         guard let indexURL, let data = try? Data(contentsOf: indexURL),
@@ -139,14 +149,26 @@ final class ProfileStore: ObservableObject {
         return true
     }
 
-    /// Refresh every stale remote profile. Run when the app comes to the
-    /// front: no background timers.
-    func refreshStale() async -> Bool {
+    /// Refresh every stale remote profile but `except` (the active one while
+    /// the tunnel refreshes it). Run when the app comes to the front: no
+    /// background timers.
+    func refreshStale(except: UUID? = nil) async -> Bool {
         var activeChanged = false
-        for p in profiles where p.isStale {
+        for p in profiles where p.isStale && p.id != except {
             if (try? await refresh(p)) == true { activeChanged = true }
         }
         return activeChanged
+    }
+
+    /// Store the tunnel's own download of the active profile when it is newer
+    /// than ours. Validated again before it is written.
+    func adopt(_ snapshot: SbrProfileSnapshot) {
+        guard var p = active, p.remoteURL == snapshot.url,
+              snapshot.updated > (p.updated ?? .distantPast)
+        else { return }
+        p.updated = snapshot.updated
+        guard (try? write(p, text: snapshot.text)) != nil else { return }
+        if activeText != snapshot.text { activeText = snapshot.text }
     }
 
     /// No disk cache (the response carries credentials), no cookies, and no

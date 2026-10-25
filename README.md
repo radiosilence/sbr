@@ -25,7 +25,7 @@ Which censors and surveillance programmes sbr is designed against, and what it s
 | `sbr-engine` | Inbounds, outbounds, runtime (`Instance`). |
 | `sbr` | CLI, flag-compatible with `sing-box run/check/version`. |
 | `sbr-reality` | TLS 1.3 client with browser ClientHellos: REALITY, and the default handshake for every other TCP TLS client. |
-| `sbr-apple` | C ABI (`include/sbr.h`) + `staticlib` for an xcframework: TUN fd adoption, log callback, reload, memory stats, network-change hook. |
+| `sbr-apple` | C ABI (`include/sbr.h`) + `staticlib` for an xcframework: TUN fd adoption, log callback, reload, remote profile refresh through the tunnel, memory stats, network-change hook. |
 | `apple/` | `SbrKit` Swift package (`Sbr`, `SbrPacketTunnelProvider`), `build-xcframework.sh` (iOS, macOS, Catalyst, tvOS), SwiftUI sample app. See [`apple/README.md`](apple/README.md). CI builds the app for iOS, tvOS and macOS. |
 
 ## Routing semantics

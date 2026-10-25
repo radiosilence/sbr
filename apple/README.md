@@ -46,8 +46,34 @@ That is the whole extension. The base class:
    interfaces changes. `wake()` calls it too, because UDP NAT mappings are likely gone
    after sleep. `sleep()` returns immediately: an idle sbr arms no timers, so there is
    nothing to pause.
-6. Answers `SbrRequest` app messages (`groups`, `select`, `stats`, `reload`).
+6. Answers `SbrRequest` app messages (`groups`, `select`, `stats`, `reload`, `profile`).
    On the app side, call `NETunnelProviderSession.send(_:)`.
+7. Refreshes a remote profile itself when `providerConfiguration["remote"]` names
+   one (an `SbrRemoteProfile`: URL, interval, when the config was downloaded).
+   See below.
+
+### Remote profile refresh
+
+A profile change on the server should reach a running tunnel without the app being
+opened, so the extension refreshes the active remote profile on its own interval
+(sing-box's default of 60 minutes). The download is done by the core
+(`sbr_fetch_profile`), not `URLSession`, because it has to go where the tunnel's
+traffic goes: it is routed by the running config's route rules exactly as a TCP
+connection arriving on the tun inbound would be, so the profile host sees the
+proxy's address rather than the device's, and a network that blocks the host cannot
+block the update. A `URLSession` in the extension would leave by the physical
+interface, since the provider's own traffic bypasses its tunnel. The request carries
+no `User-Agent` or other identifying header.
+
+The text is validated by the same checker as `sbr_check` and applied with
+`sbr_apply_profile`: unchanged text restarts nothing, a profile that fails
+validation leaves the running config untouched (retried in five minutes), and one
+whose tun inbound needs different interface settings gets them applied before the
+reload. The last good download is stored in the extension's own container (no App
+Group is needed) and used on the next start if it is newer than the config the app
+installed. The app asks for it with `SbrRequest.profile` when it comes to the front
+and stores it, so it shows what the tunnel runs. The URL and the profile text are
+never logged.
 
 Override `loadConfiguration()`, `coreOptions` (threads, buffer, connection cap)
 or `handle(_:)` to customise.
@@ -64,6 +90,8 @@ SbrStartOptions sbr_start_options_default(void);
 SbrInstance    *sbr_start_ex(const char *config_json, const SbrStartOptions *options, char **error_out);
 SbrInstance    *sbr_start(const char *config_json, const char *base_dir, char **error_out);
 char           *sbr_reload(SbrInstance *instance, const char *config_json);
+int32_t         sbr_apply_profile(SbrInstance *instance, const char *config_json, char **error_out);
+int32_t         sbr_fetch_profile(SbrInstance *instance, const char *url, SbrFetchCallback callback, void *context);
 void            sbr_stop(SbrInstance *instance);
 int32_t         sbr_select(SbrInstance *instance, const char *group, const char *member);
 char           *sbr_groups(SbrInstance *instance);

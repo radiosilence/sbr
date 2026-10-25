@@ -10,21 +10,62 @@ public enum SbrRequest: Codable, Sendable {
     case stats
     /// The extension's recent log lines (memory only).
     case logs
-    /// Reload with this config, or re-read the saved one when nil. The app
-    /// also saves it into `providerConfiguration` so a restart uses it.
-    case reload(config: String?)
+    /// Run this config (a no-op when it is already running), or re-read the
+    /// saved one when nil. The app also saves it into `providerConfiguration`
+    /// so a restart uses it. With a config, `remote` and `logLevel` replace
+    /// the tunnel's: nil `remote` stops background refresh.
+    case reload(config: String?, remote: SbrRemoteProfile? = nil, logLevel: String? = nil)
+    /// The remote profile the tunnel last downloaded itself, if any.
+    case profile
+}
+
+/// A remote profile the tunnel keeps fresh by itself. The URL usually
+/// carries credentials: never log it.
+public struct SbrRemoteProfile: Codable, Sendable, Hashable {
+    public var url: URL
+    /// sing-box's `auto_update_interval`: 60 by default.
+    public var refreshMinutes: Int
+    /// When the config handed to the tunnel was downloaded.
+    public var updated: Date?
+
+    public init(url: URL, refreshMinutes: Int = 60, updated: Date? = nil) {
+        self.url = url
+        self.refreshMinutes = refreshMinutes
+        self.updated = updated
+    }
+}
+
+/// A remote profile as the tunnel downloaded and validated it.
+public struct SbrProfileSnapshot: Codable, Sendable, Hashable {
+    public var url: URL
+    public var text: String
+    public var updated: Date
+
+    public init(url: URL, text: String, updated: Date) {
+        self.url = url
+        self.text = text
+        self.updated = updated
+    }
 }
 
 public struct SbrResponse: Codable, Sendable {
     public var groups: [SbrGroup]?
     public var stats: SbrStats?
     public var logs: [String]?
+    public var profile: SbrProfileSnapshot?
     public var error: String?
 
-    public init(groups: [SbrGroup]? = nil, stats: SbrStats? = nil, logs: [String]? = nil, error: String? = nil) {
+    public init(
+        groups: [SbrGroup]? = nil,
+        stats: SbrStats? = nil,
+        logs: [String]? = nil,
+        profile: SbrProfileSnapshot? = nil,
+        error: String? = nil
+    ) {
         self.groups = groups
         self.stats = stats
         self.logs = logs
+        self.profile = profile
         self.error = error
     }
 }
