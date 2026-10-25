@@ -4,7 +4,7 @@
 # ///
 """Install App Store provisioning profiles by name from App Store Connect.
 
-    uv run apple/tools/fetch-profiles.py "sbr App Store" "sbr tunnel App Store"
+    uv run apple/tools/fetch-profiles.py "sbr App Store" "sbr tunnel App Store" "sbr widgets App Store"
 
 Release builds for iOS sign manually (see App/project.yml), so a machine that
 has never opened Xcode with the team's account, such as a CI runner, needs the

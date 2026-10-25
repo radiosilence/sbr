@@ -25,6 +25,7 @@ struct TunnelView: View {
                     }
                 }
                 .tint(.sbrAccent)
+                AutoConnectSection()
                 #endif
             }
             .padding(.horizontal, Theme.Space.xl)

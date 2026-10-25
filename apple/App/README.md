@@ -22,6 +22,7 @@ open Sbr.xcodeproj
 | `SbrTunnel` | iOS, macOS, tvOS | packet tunnel **app extension**, embedded in `Sbr` |
 | `SbrMac` | macOS | the same app for Developer ID distribution |
 | `SbrTunnelSystemExtension` | macOS | the tunnel as a **system extension**, embedded in `SbrMac` |
+| `SbrWidgets` | iOS 18+ | Control Center and Lock Screen toggle (`cc.blit.sbr.widgets`), embedded in `Sbr` |
 
 The App Store and TestFlight route uses the app extension on every platform.
 Developer ID distribution outside the store needs the system extension, which
@@ -29,7 +30,10 @@ the user approves once in System Settings › Privacy & Security.
 
 Both bundle IDs need the **Network Extensions** and **App Groups**
 capabilities. The group is `group.cc.blit.sbr` on iOS and tvOS, and
-`<TEAM_ID>.cc.blit.sbr` on macOS. Packet tunnels do not run in simulators.
+`<TEAM_ID>.cc.blit.sbr` on macOS. On iOS the app ID also needs **Access WiFi
+Information**, and `cc.blit.sbr.widgets` needs **Network Extensions**, since
+the toggle loads and starts the VPN configuration itself. Packet tunnels do not
+run in simulators.
 
 The icon is drawn by `apple/tools/make-icon.swift`; re-run it to regenerate
 `AppIcon.appiconset/icon-1024.png`.
@@ -64,6 +68,28 @@ runs a latency test of that group and of any urltest groups inside it
 
 The header shows where traffic currently goes: the leaf of the outermost
 selector and its latency.
+
+## Auto-connect
+
+With auto-connect on, the VPN configuration carries on-demand rules: disconnect
+on the trusted Wi-Fi networks, connect on every other interface. Disconnecting
+by hand, from the app, Shortcuts or Control Center, disarms the rules
+(`isOnDemandEnabled`), because the system would otherwise reconnect at once;
+connecting by hand arms them again. On a trusted network that means a manual
+connect is undone by the disconnect rule, so turn auto-connect off to use the
+tunnel there.
+
+On iOS, **add <network>** trusts the joined Wi-Fi. `NEHotspotNetwork` reports
+it to an app with the Access WiFi Information entitlement that has installed a
+VPN configuration, so no location permission is asked for. macOS gives SSIDs
+only to apps with location access, so there networks are typed in.
+
+## Shortcuts and Control Center
+
+App Intents: **Connect**, **Disconnect**, **Toggle Tunnel** and **Select
+Outbound** (a selector group and one of its members, offered from the running
+tunnel). The Control Center toggle uses the same code (`Shared/`), which needs
+only the saved VPN configuration and so also runs in the widget extension.
 
 ## Connections
 
