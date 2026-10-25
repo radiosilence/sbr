@@ -122,6 +122,12 @@ Transports: `ws` (incl. early data in the path or a header), `httpupgrade`, `grp
 
 Interop is tested against real sing-box servers (`crates/sbr-engine/tests/singbox.rs`): every protocol over every transport with and without TLS, 1 MiB round trips plus UDP, Vision with TLS 1.3 inside (direct mode), REALITY with and without Vision, and each TLS option. The trojan + `httpupgrade` pair is excluded: sing-box's httpupgrade server flushes `101` before hijacking, so Go's HTTP server can swallow the first byte of the tunnel and its trojan server rejects the short read. That is a server-side race any client hits.
 
+The servers the jaritanet gateway actually runs are tested too (`crates/sbr-engine/tests/upstream_servers.rs`, binaries from `$SBR_XRAY` / `$SBR_HYSTERIA` or `PATH`): Xray-core VLESS + REALITY + Vision with a loopback `dest` behind `xver: 1`, several `serverNames` and a guest blackhole, and apernet hysteria2 on several ports with salamander and `userpass`. They cover 1 MiB round trips, Vision's direct copy, XUDP and plain VLESS UDP, fragmented hy2 datagrams, wrong credentials failing promptly, unauthenticated probes reaching `dest` while sbr clients are connected, and the whole `buildProfile` shape (urltest, both selectors, a Shadowsocks exit detoured through `entry-select`). Server behaviour those tests pin down:
+
+- XTLS/REALITY servers (Xray 26.10) refuse a ClientHello without an X25519MLKEM768 share ahead of X25519. sbr's `firefox` and `safari` therefore follow the uTLS profiles Xray itself uses (`HelloFirefox_148`, `HelloSafari_26_3`); `ios` is uTLS `HelloIOS_14`, has no ML-KEM, and is refused by such servers (it reaches `dest` like a probe), as it is for Xray's and sing-box's own clients.
+- Xray 26 `freedom` blackholes private, loopback and CGNAT destinations (`100.64.0.0/10` included) for vless inbounds unless `finalRules` allow them, so a profile that sends DNS to `127.0.0.1` or tailnet traffic over a REALITY leaf is refused by the server; over hy2 the same traffic works.
+- apernet hysteria2 serialises each downlink UDP message, header included, into a 4096-byte buffer, so a reply payload of more than about 4080 bytes is never delivered.
+
 Vision skips sing-box's 5 ms sleep before the first raw write; rustls is fed one TLS record per wakeup until the server's switch to direct, so no inner bytes ever reach the outer TLS.
 
 ## Known upstream issue worked around
