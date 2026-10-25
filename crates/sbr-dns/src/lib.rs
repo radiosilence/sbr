@@ -77,7 +77,8 @@ pub type FileReader<'a> = &'a dyn Fn(&str) -> io::Result<Vec<u8>>;
 
 /// Per-attempt timeout when another upstream server can be tried.
 const FAILOVER_ATTEMPT: Duration = Duration::from_secs(4);
-/// How long a failed upstream server is skipped.
+/// How often a failed upstream server is probed in the background; it is
+/// skipped until a probe succeeds.
 const FAILOVER_COOLDOWN: Duration = Duration::from_secs(60);
 
 pub(crate) fn random_u16() -> u16 {
@@ -655,16 +656,18 @@ impl Inner {
     /// loopback destinations) then resolves nothing. A failed server is
     /// skipped for a minute so later queries don't each wait for it.
     async fn exchange_with_failover(&self, idx: usize, query: &Message, timeout: Duration) -> io::Result<Message> {
-        let now = Instant::now();
-        let cooling = |i: usize| self.failed.lock().unwrap().get(&i).is_some_and(|until| *until > now);
+        let failed = |i: usize| self.failed.lock().unwrap().contains_key(&i);
         let mut order = vec![idx];
         if self.servers[idx].upstream {
             let others = (0..self.servers.len())
-                .filter(|&i| i != idx && self.servers[i].upstream && !cooling(i))
+                .filter(|&i| i != idx && self.servers[i].upstream && !failed(i))
                 .collect::<Vec<_>>();
             order.extend(others);
-            if cooling(idx) && order.len() > 1 {
+            // A failed server goes last, so queries never wait on it while it
+            // is down; a background probe brings it back to the front.
+            if failed(idx) && order.len() > 1 {
                 order.rotate_left(1);
+                self.probe(idx, query);
             }
         }
         // With somewhere to fail over to, don't wait the full timeout first.
@@ -705,10 +708,34 @@ impl Inner {
                 self.failed
                     .lock()
                     .unwrap()
-                    .insert(i, Instant::now() + FAILOVER_COOLDOWN);
+                    .entry(i)
+                    .or_insert_with(|| Instant::now() + FAILOVER_COOLDOWN);
             }
         }
         last.unwrap_or_else(|| Err(io::Error::other("no dns server")))
+    }
+
+    /// Re-try a failed server off the query path, at most once per cooldown.
+    fn probe(&self, idx: usize, query: &Message) {
+        let now = Instant::now();
+        {
+            let mut failed = self.failed.lock().unwrap();
+            match failed.get_mut(&idx) {
+                Some(next) if *next <= now => *next = now + FAILOVER_COOLDOWN,
+                _ => return,
+            }
+        }
+        let Some(this) = self.arc() else { return };
+        let query = query.clone();
+        tokio::spawn(async move {
+            let server = &this.servers[idx];
+            if let Ok(Ok(resp)) = tokio::time::timeout(this.timeout, server.transport.exchange(&query)).await
+                && !matches!(msg::rcode(&resp), 2 | 5)
+            {
+                tracing::debug!(server = %server.tag, "dns server recovered");
+                this.failed.lock().unwrap().remove(&idx);
+            }
+        });
     }
 
     /// `optimistic`: refresh a stale entry in the background, once per key.
