@@ -631,6 +631,13 @@ impl Inner {
                 return Err(XErr::Io(e));
             }
         };
+        if matches!(qtype, TYPE_HTTPS | TYPE_SVCB) {
+            match self.effective_strategy(idx, opts) {
+                Some(DomainStrategy::Ipv4Only) => msg::filter_hints(&mut resp, true, false),
+                Some(DomainStrategy::Ipv6Only) => msg::filter_hints(&mut resp, false, true),
+                _ => {}
+            }
+        }
         let mut ttl = msg::response_ttl(&resp);
         if let Some(t) = opts.rewrite_ttl {
             ttl = t;
