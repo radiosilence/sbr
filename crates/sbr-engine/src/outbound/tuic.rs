@@ -122,7 +122,8 @@ impl Tuic {
     pub fn new(tag: String, c: &TuicOutbound, upstream: Upstream) -> Result<Self, String> {
         let server = Destination::from_host_port(&c.server.server, c.server.server_port);
         // sing-box sets no default ALPN for TUIC.
-        let dialer = Dialer::new(upstream, server, &c.tls, &[], c.zero_rtt_handshake)?;
+        let mut dialer = Dialer::new(upstream, server, &c.tls, &[], c.zero_rtt_handshake)?;
+        dialer.scramble = !c.quic.disable_client_hello_scrambling;
         Ok(Self {
             tag,
             dialer,
