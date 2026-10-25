@@ -24,6 +24,15 @@ struct LogsView: View {
                     #endif
                 }
                 .padding(.bottom, Theme.Space.m)
+                Toggle(isOn: $tunnel.userspaceTCP) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("userspace tcp").font(.sbr(.control))
+                        Text("experimental. sbr's own tcp stack instead of the kernel's; reconnects.")
+                            .font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
+                    }
+                }
+                .tint(.sbrAccent)
+                .padding(.bottom, Theme.Space.m)
                 DiagnoseSection()
                 if tunnel.logs.isEmpty {
                     Text(tunnel.isConnected ? "nothing yet." : "connect to see the tunnel's logs.")

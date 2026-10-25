@@ -95,7 +95,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             let saved = Self.savedState(providerConfiguration)
             let (text, remote) = Self.newest(try loadConfiguration(), remote: saved.remote)
             setState(remote: remote, logLevel: saved.logLevel)
-            let config = Self.withLogLevel(text, saved.logLevel)
+            let config = Self.withLogLevel(text, saved.logLevel, stack: tunStack)
             try await setTunnelNetworkSettings(try Sbr.tunnelNetworkSettings(config: config))
             // The utun exists once the settings are applied.
             guard let fd = Sbr.findTunFileDescriptor() else { throw SbrError("utun file descriptor not found") }
@@ -183,7 +183,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     /// new interface settings applied when its tun inbound asks for them.
     private func run(_ config: String, logLevel: String?) async throws {
         guard let core else { throw SbrError("sbr is not running") }
-        let config = Self.withLogLevel(config, logLevel)
+        let config = Self.withLogLevel(config, logLevel, stack: tunStack)
         if try core.apply(config: config) == .needsNetworkSettings {
             try await setTunnelNetworkSettings(try Sbr.tunnelNetworkSettings(config: config))
             try core.reload(config: config)
@@ -270,13 +270,21 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
 
     /// The config with its `log.level` replaced; unchanged if `level` is nil
     /// or the config isn't plain JSON.
-    static func withLogLevel(_ config: String, _ level: String?) -> String {
-        guard let level,
+    static func withLogLevel(_ config: String, _ level: String?, stack: String? = nil) -> String {
+        guard level != nil || stack != nil,
               var root = (try? JSONSerialization.jsonObject(with: Data(config.utf8))) as? [String: Any]
         else { return config }
-        var log = root["log"] as? [String: Any] ?? [:]
-        log["level"] = level
-        root["log"] = log
+        if let level {
+            var log = root["log"] as? [String: Any] ?? [:]
+            log["level"] = level
+            root["log"] = log
+        }
+        if let stack, var inbounds = root["inbounds"] as? [[String: Any]] {
+            for i in inbounds.indices where inbounds[i]["type"] as? String == "tun" {
+                inbounds[i]["stack"] = stack
+            }
+            root["inbounds"] = inbounds
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: root) else { return config }
         return String(decoding: data, as: UTF8.self)
     }
@@ -352,6 +360,10 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
                 try? await Task.sleep(nanoseconds: 10_000_000_000)
             }
         }
+    }
+
+    private var tunStack: String? {
+        (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?[SbrProviderKey.tunStack] as? String
     }
 
     private var includeAllNetworks: Bool {

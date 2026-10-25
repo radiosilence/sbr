@@ -5,6 +5,9 @@ public enum SbrProviderKey {
     /// Inline sing-box JSON. Fine for small configs; the system stores it
     /// with the VPN preferences.
     public static let config = "config"
+    /// `"gvisor"` runs the TUN on sbr's userspace TCP stack whatever the
+    /// profile's `stack` says; absent leaves the profile's choice.
+    public static let tunStack = "tunStack"
     /// App Group identifier whose container holds `config.json` (preferred:
     /// no size concerns, and rule-set files can sit next to it).
     public static let appGroup = "appGroup"

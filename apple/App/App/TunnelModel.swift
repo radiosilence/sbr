@@ -38,6 +38,22 @@ final class TunnelModel: ObservableObject {
     }
 
     /// Debug-level engine logs in the logs tab, for diagnosing a profile.
+    /// Run the tunnel on sbr's userspace TCP stack instead of the kernel's.
+    /// Applied by reconnecting.
+    @Published var userspaceTCP = UserDefaults.standard.bool(forKey: "userspaceTCP") {
+        didSet {
+            UserDefaults.standard.set(userspaceTCP, forKey: "userspaceTCP")
+            Task {
+                try? await self.install()
+                if self.isOn, let manager = self.manager {
+                    manager.connection.stopVPNTunnel()
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    try? manager.connection.startVPNTunnel()
+                }
+            }
+        }
+    }
+
     @Published var verbose = UserDefaults.standard.bool(forKey: "verbose") {
         didSet {
             UserDefaults.standard.set(verbose, forKey: "verbose")
@@ -248,6 +264,7 @@ final class TunnelModel: ObservableObject {
         var pc: [String: Any] = [SbrProviderKey.config: config]
         if let remote { pc[SbrProviderKey.remote] = try JSONEncoder().encode(remote) }
         if let logLevel { pc[SbrProviderKey.logLevel] = logLevel }
+        if userspaceTCP { pc[SbrProviderKey.tunStack] = "gvisor" }
         proto.providerConfiguration = pc
         Sbr.applyLeakProtection(to: proto, enabled: strict)
         m.protocolConfiguration = proto
