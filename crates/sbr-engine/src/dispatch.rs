@@ -150,7 +150,7 @@ impl Engine {
             Action::Route { outbound, options } => {
                 let out = &self.outbounds[outbound];
                 let dest = options.apply(&meta.destination);
-                debug!(inbound = %meta.inbound, dest = %meta.destination, domain = ?meta.sniffed_domain, outbound = out.tag(), "route");
+                debug!(inbound = %meta.inbound, dest = %meta.destination, domain = meta.sniffed_domain.as_deref().unwrap_or(""), outbound = out.tag(), "route");
                 match out.connect(&dest).await {
                     Ok(remote) => {
                         client.inner.ready().await?;
@@ -189,7 +189,7 @@ impl Engine {
                 }
             }
             Action::Reject { drop, .. } => {
-                info!(inbound = %meta.inbound, dest = %meta.destination, domain = ?meta.sniffed_domain, "rejected");
+                info!(inbound = %meta.inbound, dest = %meta.destination, domain = meta.sniffed_domain.as_deref().unwrap_or(""), "rejected");
                 client.inner.fail(&OpenError::Rejected { drop }).await?;
                 if drop {
                     // Black-hole: hold the connection open without answering.

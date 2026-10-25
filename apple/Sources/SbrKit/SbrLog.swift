@@ -87,7 +87,9 @@ public final class SbrRecentLogs: @unchecked Sendable {
         let tag = switch level {
         case .error: "error"
         case .warn: "warn"
-        default: "info"
+        case .info: "info"
+        case .debug: "debug"
+        case .trace: "trace"
         }
         let line = "\(Self.time.string(from: Date())) \(tag) \(message)"
         lock.lock()
