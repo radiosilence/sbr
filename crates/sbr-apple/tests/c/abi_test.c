@@ -87,6 +87,16 @@ int main(void) {
     sbr_string_free(err);
     CHECK(sbr_start_ex("{bad", NULL, NULL) == NULL);
 
+    char *net = sbr_tun_network_settings(
+        "{\"inbounds\":[{\"type\":\"tun\",\"address\":[\"172.19.0.1/30\"],\"auto_route\":true}],"
+        "\"outbounds\":[{\"type\":\"direct\"}]}",
+        &err);
+    CHECK(net != NULL && strstr(net, "\"dns_servers\":[\"172.19.0.2\"]") != NULL);
+    sbr_string_free(net);
+    err = NULL;
+    CHECK(sbr_tun_network_settings(CONFIG, &err) == NULL && err != NULL); /* no tun inbound */
+    sbr_string_free(err);
+
     printf("ok (%d log lines)\n", atomic_load(&log_lines));
     return 0;
 }

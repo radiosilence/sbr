@@ -105,6 +105,17 @@ void sbr_runtime_stats(SbrInstance *instance, SbrRuntimeStats *out);
  * cache). Open TCP connections are left to survive or fail on their own. */
 void sbr_network_changed(SbrInstance *instance);
 
+/* NEPacketTunnelNetworkSettings for the config's tun inbound, as JSON
+ * (sing-box libbox semantics; rules in src/tun_settings.rs):
+ * {"mtu":9000,
+ *  "ipv4":{"addresses":["172.19.0.1"],"prefixes":[30],"subnet_masks":["255.255.255.252"],
+ *          "included_routes":[{"address":"0.0.0.0","prefix":0,"subnet_mask":"0.0.0.0"}],
+ *          "excluded_routes":[]},
+ *  "ipv6":null or the same shape,
+ *  "dns_servers":["172.19.0.2"], "auto_route":true, "strict_route":false}
+ * On error (bad config, no tun inbound) returns NULL and sets `error_out`. */
+char *sbr_tun_network_settings(const char *config_json, char **error_out);
+
 /* Inside an NEPacketTunnelProvider: the utun fd NetworkExtension opened for
  * this process, or -1. Call after setTunnelNetworkSettings completes. Always
  * -1 on non-Apple platforms. */

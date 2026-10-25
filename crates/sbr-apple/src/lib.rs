@@ -10,6 +10,7 @@
 mod log;
 mod runtime;
 mod sys;
+mod tun_settings;
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -372,6 +373,28 @@ pub unsafe extern "C" fn sbr_network_changed(instance: *mut SbrInstance) {
             e.network_changed();
         }
     })
+}
+
+/// # Safety
+/// `config_json` NULL or a valid C string; `error_out` NULL or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sbr_tun_network_settings(
+    config_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    let r = guard(Err("internal error (panic)".to_owned()), || {
+        tun_settings::network_settings(&parse(unsafe { str_arg(config_json) })?).map(|v| v.to_string())
+    });
+    match r {
+        Ok(s) => out_string(s),
+        Err(e) => {
+            if !error_out.is_null() {
+                // SAFETY: checked non-null; caller owns the slot.
+                unsafe { *error_out = out_string(e) };
+            }
+            ptr::null_mut()
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
