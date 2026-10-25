@@ -6,6 +6,8 @@ mod httpx;
 pub mod inbound;
 pub mod outbound;
 mod socks5;
+pub mod tls;
+pub mod transport;
 pub mod udp;
 
 use std::io;
@@ -80,7 +82,10 @@ pub struct Engine {
 impl Engine {
     pub fn new(options: &Options, settings: &Settings) -> Result<Self, Error> {
         let dns: Arc<dyn Dns> = settings.dns.clone().unwrap_or_else(|| Arc::new(SystemDns));
-        let ctx = BuildContext { dns: dns.clone() };
+        let ctx = BuildContext {
+            dns: dns.clone(),
+            base_dir: settings.base_dir.clone(),
+        };
         let outbounds = outbound::build_all(&options.outbounds, &ctx)?;
         let router = Router::new(
             &options.route.rules,

@@ -1,0 +1,333 @@
+//! TLS client on rustls + aws-lc-rs, built from sing-box's outbound `tls`
+//! object (`common/tls/std_client.go`).
+//!
+//! `utls` is accepted, but the ClientHello is rustls': we only borrow the
+//! cheap parts of a browser fingerprint (ALPN `h2, http/1.1`, AES-128-GCM
+//! first). `reality` has a hook ([`TlsClient::Reality`]) for the `sbr-reality`
+//! crate and is rejected until that lands.
+
+mod io;
+mod verify;
+
+use std::io as stdio;
+use std::sync::Arc;
+use std::time::Duration;
+
+use rustls::client::{EchConfig, EchMode};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, EchConfigListBytes, PrivateKeyDer, ServerName};
+use rustls::{ClientConfig, RootCertStore};
+use sbr_config::TlsOutbound;
+use sbr_core::Stream;
+
+pub(crate) use io::rand_u32;
+pub use io::{FRAGMENT_FALLBACK_DELAY, FragmentOptions, TlsIo};
+
+/// A client TLS connection over the dialed stream.
+pub type TlsStream = tokio_rustls::client::TlsStream<TlsIo>;
+
+/// sing-box `C.TCPTimeout`, its default handshake timeout.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How an outbound wraps its server connection in TLS.
+#[derive(Clone)]
+pub enum TlsClient {
+    Rustls(Arc<RustlsClient>),
+    /// Placeholder for the `sbr-reality` crate; never constructed yet.
+    Reality,
+}
+
+pub struct RustlsClient {
+    config: Arc<ClientConfig>,
+    server_name: ServerName<'static>,
+    /// `alpn` as configured (transports may substitute a default).
+    alpn_configured: bool,
+    utls: bool,
+    handshake_timeout: Duration,
+    fragment: Option<FragmentOptions>,
+}
+
+fn invalid(msg: impl Into<String>) -> String {
+    msg.into()
+}
+
+fn read_file(base: Option<&std::path::Path>, path: &str) -> Result<Vec<u8>, String> {
+    let p = std::path::Path::new(path);
+    let p = match base {
+        Some(b) if p.is_relative() => b.join(p),
+        _ => p.to_path_buf(),
+    };
+    std::fs::read(&p).map_err(|e| format!("read {}: {e}", p.display()))
+}
+
+fn inline_or_file(
+    inline: &Option<String>,
+    path: &Option<String>,
+    base: Option<&std::path::Path>,
+) -> Result<Option<Vec<u8>>, String> {
+    match (inline, path) {
+        (Some(s), _) => Ok(Some(s.as_bytes().to_vec())),
+        (None, Some(p)) => read_file(base, p).map(Some),
+        (None, None) => Ok(None),
+    }
+}
+
+impl TlsClient {
+    /// Build from options. `server` is the outbound's `server`, used when
+    /// `server_name` is unset. Errors name the offending `tls.*` field.
+    pub fn new(t: &TlsOutbound, server: &str, base: Option<&std::path::Path>) -> Result<Self, String> {
+        if t.reality.as_ref().is_some_and(|r| r.enabled) {
+            return Err(invalid("tls.reality: not supported by sbr yet"));
+        }
+        Ok(Self::Rustls(Arc::new(RustlsClient::new(t, server, base)?)))
+    }
+
+    /// The same client with `alpn` as default ALPN when the config set none
+    /// (what sing-box's v2ray transports do: `h2` for gRPC/HTTP, `http/1.1`
+    /// for WebSocket).
+    pub fn with_default_alpn(&self, alpn: &[&str]) -> Self {
+        match self {
+            Self::Rustls(c) if !c.alpn_configured => {
+                let mut config = (*c.config).clone();
+                config.alpn_protocols = effective_alpn(alpn.iter().map(|s| s.to_string()).collect(), c.utls);
+                Self::Rustls(Arc::new(RustlsClient {
+                    config: Arc::new(config),
+                    server_name: c.server_name.clone(),
+                    alpn_configured: true,
+                    utls: c.utls,
+                    handshake_timeout: c.handshake_timeout,
+                    fragment: c.fragment,
+                }))
+            }
+            other => other.clone(),
+        }
+    }
+
+    /// The configured or derived SNI / verification name.
+    pub fn server_name(&self) -> Option<String> {
+        match self {
+            Self::Rustls(c) => Some(match &c.server_name {
+                ServerName::DnsName(d) => d.as_ref().to_owned(),
+                ServerName::IpAddress(ip) => std::net::IpAddr::from(*ip).to_string(),
+                _ => return None,
+            }),
+            Self::Reality => None,
+        }
+    }
+
+    /// Handshake over `io`. `fd` is the raw socket when `io` was dialed
+    /// directly (used by `fragment` to wait for ACKs).
+    pub async fn connect(&self, io: Stream, fd: Option<i32>) -> stdio::Result<TlsStream> {
+        match self {
+            Self::Rustls(c) => c.connect(io, fd).await,
+            Self::Reality => Err(stdio::Error::new(
+                stdio::ErrorKind::Unsupported,
+                "reality is not supported by sbr yet",
+            )),
+        }
+    }
+}
+
+fn effective_alpn(mut alpn: Vec<String>, utls: bool) -> Vec<Vec<u8>> {
+    // uTLS fingerprints carry `h2, http/1.1` unless told otherwise, and
+    // sing-box widens a lone `h2` the same way.
+    if utls && (alpn.is_empty() || alpn == ["h2"]) {
+        alpn = vec!["h2".into(), "http/1.1".into()];
+    }
+    alpn.into_iter().map(String::into_bytes).collect()
+}
+
+impl RustlsClient {
+    fn new(t: &TlsOutbound, server: &str, base: Option<&std::path::Path>) -> Result<Self, String> {
+        let name = t.server_name.clone().unwrap_or_else(|| server.to_owned());
+        let name = name.trim_start_matches('[').trim_end_matches(']').to_owned();
+        let server_name = ServerName::try_from(name.clone())
+            .map_err(|_| invalid(format!("tls.server_name: invalid name {name:?}")))?;
+
+        let utls = match &t.utls {
+            Some(u) if u.enabled => {
+                const KNOWN: &[&str] = &[
+                    "",
+                    "chrome",
+                    "chrome_psk",
+                    "chrome_psk_shuffle",
+                    "chrome_padding_psk_shuffle",
+                    "chrome_pq",
+                    "chrome_pq_psk",
+                    "firefox",
+                    "edge",
+                    "safari",
+                    "360",
+                    "qq",
+                    "ios",
+                    "android",
+                    "random",
+                    "randomized",
+                ];
+                let fp = u.fingerprint.as_deref().unwrap_or_default();
+                if !KNOWN.contains(&fp) {
+                    return Err(invalid(format!("tls.utls.fingerprint: unknown uTLS fingerprint: {fp}")));
+                }
+                true
+            }
+            _ => false,
+        };
+
+        let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+        if utls {
+            // Browsers lead with AES-128-GCM.
+            provider
+                .cipher_suites
+                .sort_by_key(|s| !matches!(s.suite(), rustls::CipherSuite::TLS13_AES_128_GCM_SHA256));
+        }
+        let provider = Arc::new(provider);
+
+        let versions = versions(t)?;
+        let builder = ClientConfig::builder_with_provider(provider.clone());
+        let builder = match &t.ech {
+            Some(e) if e.enabled => {
+                let pem = inline_or_file(&e.config, &e.config_path, base)?.ok_or_else(|| {
+                    invalid("tls.ech.config: fetching ECH configs from DNS is not supported by sbr yet; set config")
+                })?;
+                let list = ech_config_list(&pem)?;
+                let cfg = EchConfig::new(
+                    EchConfigListBytes::from(list),
+                    rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES,
+                )
+                .map_err(|e| invalid(format!("tls.ech.config: {e}")))?;
+                if !versions.contains(&&rustls::version::TLS13) {
+                    return Err(invalid("tls.ech: requires TLS 1.3"));
+                }
+                builder
+                    .with_ech(EchMode::from(cfg))
+                    .map_err(|e| invalid(format!("tls.ech: {e}")))?
+            }
+            _ => builder
+                .with_protocol_versions(&versions)
+                .map_err(|e| invalid(format!("tls: {e}")))?,
+        };
+
+        let pinned = !t.certificate_sha256.is_empty() || !t.certificate_public_key_sha256.is_empty();
+        let ca = inline_or_file(&t.certificate, &t.certificate_path, base)?;
+        if pinned && ca.is_some() {
+            return Err(invalid(
+                "tls.certificate_sha256: conflicts with certificate or certificate_path",
+            ));
+        }
+        let builder = if t.insecure || pinned {
+            let v = verify::Pinned::new(
+                &t.certificate_sha256,
+                &t.certificate_public_key_sha256,
+                t.insecure && !pinned,
+                &provider,
+            )?;
+            builder.dangerous().with_custom_certificate_verifier(Arc::new(v))
+        } else {
+            let mut roots = RootCertStore::empty();
+            match &ca {
+                Some(pem) => {
+                    for c in CertificateDer::pem_slice_iter(pem) {
+                        let c = c.map_err(|e| invalid(format!("tls.certificate: {e}")))?;
+                        roots.add(c).map_err(|e| invalid(format!("tls.certificate: {e}")))?;
+                    }
+                    if roots.is_empty() {
+                        return Err(invalid("tls.certificate: no certificate found"));
+                    }
+                }
+                None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
+            }
+            builder.with_root_certificates(roots)
+        };
+
+        let cert = inline_or_file(&t.client_certificate, &t.client_certificate_path, base)?;
+        let key = inline_or_file(&t.client_key, &t.client_key_path, base)?;
+        let mut config = match (cert, key) {
+            (Some(cert), Some(key)) => {
+                let chain = CertificateDer::pem_slice_iter(&cert)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| invalid(format!("tls.client_certificate: {e}")))?;
+                let key = PrivateKeyDer::from_pem_slice(&key).map_err(|e| invalid(format!("tls.client_key: {e}")))?;
+                builder
+                    .with_client_auth_cert(chain, key)
+                    .map_err(|e| invalid(format!("tls.client_certificate: {e}")))?
+            }
+            (None, None) => builder.with_no_client_auth(),
+            _ => {
+                return Err(invalid(
+                    "tls.client_certificate: client certificate and client key must be provided together",
+                ));
+            }
+        };
+        config.enable_sni = !t.disable_sni;
+        config.alpn_protocols = effective_alpn(t.alpn.clone(), utls);
+        let fragment = (t.fragment || t.record_fragment).then(|| FragmentOptions {
+            split_packet: t.fragment,
+            split_record: t.record_fragment,
+            fallback_delay: t
+                .fragment_fallback_delay
+                .filter(|d| !d.is_zero())
+                .unwrap_or(FRAGMENT_FALLBACK_DELAY),
+        });
+        Ok(Self {
+            config: Arc::new(config),
+            server_name,
+            alpn_configured: !t.alpn.is_empty(),
+            utls,
+            handshake_timeout: t
+                .handshake_timeout
+                .filter(|d| !d.is_zero())
+                .unwrap_or(HANDSHAKE_TIMEOUT),
+            fragment,
+        })
+    }
+
+    async fn connect(&self, io: Stream, fd: Option<i32>) -> stdio::Result<TlsStream> {
+        let io = TlsIo::new(io, fd, self.fragment);
+        let connector = tokio_rustls::TlsConnector::from(self.config.clone());
+        match tokio::time::timeout(self.handshake_timeout, connector.connect(self.server_name.clone(), io)).await {
+            Ok(r) => r,
+            Err(_) => Err(stdio::Error::new(stdio::ErrorKind::TimedOut, "TLS handshake timed out")),
+        }
+    }
+}
+
+fn versions(t: &TlsOutbound) -> Result<Vec<&'static rustls::SupportedProtocolVersion>, String> {
+    // rustls implements TLS 1.2 and 1.3 only; a lower minimum is moot.
+    let rank = |v: &str| match v {
+        "1.0" => 0,
+        "1.1" => 1,
+        "1.2" => 2,
+        _ => 3,
+    };
+    let min = t.min_version.as_deref().map_or(0, rank);
+    let max = t.max_version.as_deref().map_or(3, rank);
+    if max < 2 {
+        return Err(invalid("tls.max_version: TLS 1.0/1.1 are not supported by sbr"));
+    }
+    if min > max {
+        return Err(invalid("tls.min_version: greater than max_version"));
+    }
+    let mut v = Vec::new();
+    if max >= 3 {
+        v.push(&rustls::version::TLS13);
+    }
+    if min <= 2 {
+        v.push(&rustls::version::TLS12);
+    }
+    Ok(v)
+}
+
+/// The `ECH CONFIGS` PEM block sing-box uses (`sing-box generate ech-keypair`).
+fn ech_config_list(pem: &[u8]) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    let text = std::str::from_utf8(pem).map_err(|_| invalid("tls.ech.config: invalid ECH configs pem"))?;
+    let body = text
+        .split("-----BEGIN ECH CONFIGS-----")
+        .nth(1)
+        .and_then(|r| r.split("-----END ECH CONFIGS-----").next())
+        .ok_or_else(|| invalid("tls.ech.config: invalid ECH configs pem"))?;
+    let b64: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|_| invalid("tls.ech.config: invalid ECH configs pem"))
+}

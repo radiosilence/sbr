@@ -4,8 +4,13 @@
 mod direct;
 mod group;
 mod http;
+mod proto;
 mod shadowsocks;
 mod socks;
+mod trojan;
+mod vision;
+mod vless;
+mod vmess;
 
 use std::collections::HashMap;
 use std::io;
@@ -23,6 +28,8 @@ pub use sbr_core::{Group, Outbound, PacketConn};
 #[derive(Clone)]
 pub struct BuildContext {
     pub dns: Arc<dyn Dns>,
+    /// Resolves relative file paths in outbound options (certificates).
+    pub base_dir: Option<std::path::PathBuf>,
 }
 
 /// How an outbound reaches its server: the system network, or another
@@ -45,6 +52,22 @@ impl Upstream {
         match self {
             Upstream::System(opts, dns) => Ok(Box::new(dial::connect(dest, opts, dns.as_ref()).await?)),
             Upstream::Detour(o) => o.connect(dest).await,
+        }
+    }
+
+    /// Like [`Upstream::connect`], plus the raw socket when dialed directly
+    /// (TLS fragmentation watches its ACKs).
+    pub async fn connect_raw(&self, dest: &Destination) -> io::Result<(Stream, Option<i32>)> {
+        match self {
+            Upstream::System(opts, dns) => {
+                let s = dial::connect(dest, opts, dns.as_ref()).await?;
+                #[cfg(unix)]
+                let fd = Some(std::os::fd::AsRawFd::as_raw_fd(&s));
+                #[cfg(not(unix))]
+                let fd = None;
+                Ok((Box::new(s), fd))
+            }
+            Upstream::Detour(o) => Ok((o.connect(dest).await?, None)),
         }
     }
 
@@ -125,7 +148,22 @@ impl Builder<'_> {
             }
             OutboundKind::Block => Arc::new(direct::Block { tag }),
             OutboundKind::Socks(s) => Arc::new(socks::Socks::new(tag, s, self.upstream(&s.dial)?)),
-            OutboundKind::Http(h) => Arc::new(http::HttpConnect::new(tag, h, self.upstream(&h.dial)?)),
+            OutboundKind::Http(h) => {
+                let up = self.upstream(&h.dial)?;
+                Arc::new(http::HttpConnect::new(tag, h, up, self.ctx).map_err(invalid)?)
+            }
+            OutboundKind::Trojan(c) => {
+                let up = self.upstream(&c.common.dial)?;
+                Arc::new(trojan::Trojan::new(tag, c, up, self.ctx).map_err(invalid)?)
+            }
+            OutboundKind::Vless(c) => {
+                let up = self.upstream(&c.common.dial)?;
+                Arc::new(vless::Vless::new(tag, c, up, self.ctx).map_err(invalid)?)
+            }
+            OutboundKind::Vmess(c) => {
+                let up = self.upstream(&c.common.dial)?;
+                Arc::new(vmess::Vmess::new(tag, c, up, self.ctx).map_err(invalid)?)
+            }
             OutboundKind::Shadowsocks(s) => {
                 Arc::new(shadowsocks::Shadowsocks::new(tag, s, self.upstream(&s.dial)?).map_err(invalid)?)
             }

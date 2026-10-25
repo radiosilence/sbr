@@ -8,6 +8,7 @@
 //! are accepted and reported in [`Options::warnings`].
 
 mod obj;
+mod proxy;
 mod route;
 mod tls;
 pub mod types;
@@ -18,6 +19,7 @@ use std::time::Duration;
 use obj::{Diag, Obj};
 use serde_json::Value;
 
+pub use proxy::{PacketEncoding, TrojanOutbound, V2rayCommon, VlessOutbound, VmessOutbound};
 pub use route::*;
 pub use tls::{Ech, Multiplex, Reality, TlsOutbound, Transport, Utls};
 
@@ -135,6 +137,9 @@ pub enum OutboundKind {
     Socks(SocksOutbound),
     Http(HttpOutbound),
     Shadowsocks(ShadowsocksOutbound),
+    Trojan(TrojanOutbound),
+    Vless(VlessOutbound),
+    Vmess(VmessOutbound),
     Selector(Selector),
     UrlTest(UrlTest),
 }
@@ -147,6 +152,9 @@ impl OutboundKind {
             Self::Socks(_) => "socks",
             Self::Http(_) => "http",
             Self::Shadowsocks(_) => "shadowsocks",
+            Self::Trojan(_) => "trojan",
+            Self::Vless(_) => "vless",
+            Self::Vmess(_) => "vmess",
             Self::Selector(_) => "selector",
             Self::UrlTest(_) => "urltest",
         }
@@ -199,6 +207,7 @@ pub struct HttpOutbound {
     pub password: Option<String>,
     pub path: Option<String>,
     pub headers: Vec<(String, String)>,
+    pub tls: Option<TlsOutbound>,
 }
 
 #[derive(Debug, Clone)]
@@ -359,6 +368,9 @@ impl Options {
                 OutboundKind::Socks(s) => Some(&s.dial),
                 OutboundKind::Http(s) => Some(&s.dial),
                 OutboundKind::Shadowsocks(s) => Some(&s.dial),
+                OutboundKind::Trojan(s) => Some(&s.common.dial),
+                OutboundKind::Vless(s) => Some(&s.common.dial),
+                OutboundKind::Vmess(s) => Some(&s.common.dial),
                 OutboundKind::Selector(g) => {
                     for t in &g.outbounds {
                         need(format!("{path}.outbounds"), t)?;
@@ -725,8 +737,22 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
                     v => vec![(k, json_str(v))],
                 })
                 .collect();
-            if o.has("tls") {
-                return Err(Error::at(&o.sub("tls"), "not supported by sbr yet"));
+            let tls = tls::parse_tls(&mut o, "tls", diag)?;
+            // sing-box 1.13 negotiates HTTP/2 CONNECT by default when TLS
+            // offers it and falls back to HTTP/1.1; sbr always speaks
+            // HTTP/1.1, which every such server also accepts.
+            let version: u8 = o.get("version")?;
+            let no_fallback = o.bool("disable_version_fallback")?;
+            match version {
+                0 | 1 => {}
+                2 if !no_fallback => {}
+                2 | 3 => {
+                    return Err(Error::at(
+                        &o.sub("version"),
+                        "HTTP/2 and HTTP/3 proxies are not supported by sbr yet",
+                    ));
+                }
+                v => return Err(Error::at(&o.sub("version"), format!("unknown HTTP version: {v}"))),
             }
             OutboundKind::Http(HttpOutbound {
                 server,
@@ -735,6 +761,7 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
                 password: o.string("password")?,
                 path: o.string("path")?,
                 headers,
+                tls,
             })
         }
         "shadowsocks" => {
@@ -762,6 +789,9 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
                 network,
             })
         }
+        "trojan" => OutboundKind::Trojan(proxy::parse_trojan(&mut o, diag)?),
+        "vless" => OutboundKind::Vless(proxy::parse_vless(&mut o, diag)?),
+        "vmess" => OutboundKind::Vmess(proxy::parse_vmess(&mut o, diag)?),
         "selector" => OutboundKind::Selector(Selector {
             outbounds: nonempty(o.req("outbounds")?, &o.sub("outbounds"))?,
             default: o.string("default")?,
