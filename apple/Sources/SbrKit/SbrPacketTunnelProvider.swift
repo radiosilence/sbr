@@ -90,6 +90,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     override open func startTunnel(options: [String: NSObject]?) async throws {
         Sbr.forwardLogs(to: Logger(subsystem: Self.subsystem, category: "core"), publicMessages: publicLogMessages)
         logger.info("starting sbr \(Sbr.version, privacy: .public)")
+        reportPreviousSession()
         do {
             let saved = Self.savedState(providerConfiguration)
             let (text, remote) = Self.newest(try loadConfiguration(), remote: saved.remote)
@@ -104,6 +105,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             _ = swapCore(try Sbr(config: config, options: opts))
             startPathMonitor()
             scheduleRefresh()
+            startHeartbeat()
             logger.info("tunnel up on fd \(fd)")
         } catch {
             logger.error("start failed: \(error.localizedDescription, privacy: .private)")
@@ -114,6 +116,9 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
 
     override open func stopTunnel(with reason: NEProviderStopReason) async {
         logger.info("stopping (reason \(reason.rawValue))")
+        heartbeat?.cancel()
+        heartbeat = nil
+        if let url = Self.heartbeatURL { try? FileManager.default.removeItem(at: url) }
         pathMonitor?.cancel()
         pathMonitor = nil
         setState(remote: nil, logLevel: nil)
@@ -305,6 +310,48 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         core?.networkChanged()
         // The refresh sleep may have been suspended along with the extension.
         scheduleRefresh()
+    }
+
+    // MARK: Previous-session report
+
+    private var heartbeat: Task<Void, Never>?
+    private static var crashURL: URL? { privateDirectory?.appendingPathComponent("crash.log") }
+    private static var heartbeatURL: URL? { privateDirectory?.appendingPathComponent("heartbeat") }
+
+    /// The last process's crash breadcrumbs, or, if it left none but never
+    /// stopped cleanly, its last heartbeat: a memory kill leaves no other trace.
+    private func reportPreviousSession() {
+        let fm = FileManager.default
+        if let url = Self.crashURL {
+            let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let lines = text.split(separator: "\n").suffix(5)
+            for line in lines {
+                SbrRecentLogs.shared.append(.error, "previous session: \(line)")
+            }
+            try? fm.removeItem(at: url)
+            Sbr.setCrashFile(url)
+            if !lines.isEmpty { return }
+        }
+        if let url = Self.heartbeatURL, let beat = try? String(contentsOf: url, encoding: .utf8) {
+            SbrRecentLogs.shared.append(.warn, "previous session ended without stopping; last seen \(beat)")
+            try? fm.removeItem(at: url)
+        }
+    }
+
+    /// Every 10 s: the time and memory in use, overwritten in place.
+    private func startHeartbeat() {
+        heartbeat?.cancel()
+        heartbeat = Task { [weak self] in
+            let clock = ISO8601DateFormatter()
+            while !Task.isCancelled {
+                if let self, let url = Self.heartbeatURL, let core = self.core {
+                    let mb = Double(core.stats().memoryFootprint) / 1_048_576
+                    let beat = String(format: "%@ with %.1f MB in use", clock.string(from: Date()), mb)
+                    try? beat.write(to: url, atomically: true, encoding: .utf8)
+                }
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+            }
+        }
     }
 
     private var includeAllNetworks: Bool {

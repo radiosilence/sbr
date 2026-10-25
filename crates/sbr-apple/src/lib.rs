@@ -7,6 +7,7 @@
 //! stays well below the ceiling. Every entry point catches panics; nothing
 //! unwinds into Swift.
 
+mod crash;
 mod log;
 mod profile;
 mod runtime;
@@ -690,6 +691,22 @@ pub unsafe extern "C" fn sbr_network_changed(instance: *mut SbrInstance) {
     guard((), || {
         if let Some(e) = engine_of(instance) {
             e.network_changed();
+        }
+    })
+}
+
+/// Record panics and fatal signals to the file at `path` (appended), so the
+/// host can report why the previous process died. Returns 0 on success.
+///
+/// # Safety
+/// `path` NULL or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sbr_set_crash_file(path: *const c_char) -> i32 {
+    guard(-1, || {
+        // SAFETY: NULL or valid per the contract.
+        match unsafe { str_arg(path) } {
+            Some(p) if crash::install(p).is_ok() => 0,
+            _ => -1,
         }
     })
 }

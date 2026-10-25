@@ -184,6 +184,10 @@ void sbr_network_changed(SbrInstance *instance);
  * or unpin with NULL. Process-wide. Call it when the default path changes. */
 void sbr_set_default_interface(const char *name);
 
+/* Append panics and fatal signals to the file at `path`, so the host can say
+ * why the previous process died. Returns 0 on success. */
+int32_t sbr_set_crash_file(const char *path);
+
 /* NEPacketTunnelNetworkSettings for the config's tun inbound, as JSON
  * (sing-box libbox semantics; rules in src/tun_settings.rs):
  * {"mtu":9000,
