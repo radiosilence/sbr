@@ -54,6 +54,12 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen:
           UIColorName: LaunchBackground
+        # iPad multitasking requires all four; App Store validation rejects none.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         # sing-box remote-profile links, and the same under sbr://.
         CFBundleURLTypes:
           - CFBundleURLName: cc.blit.sbr.profile
