@@ -22,7 +22,7 @@ sbr check -c config.json
 | `sbr-dns` | The `dns` section: DNS servers and transports, DNS rules, cache, FakeIP. |
 | `sbr-engine` | Inbounds, outbounds, runtime (`Instance`). |
 | `sbr` | CLI, flag-compatible with `sing-box run/check/version`. |
-| `sbr-reality` | REALITY TLS 1.3 client with uTLS-equivalent ClientHello fingerprints (not wired into an outbound yet). |
+| `sbr-reality` | REALITY TLS 1.3 client with uTLS-equivalent ClientHello fingerprints (used by `tls.reality`). |
 | `sbr-apple` | C ABI (`include/sbr.h`) + `staticlib` for an xcframework: TUN fd adoption, log callback, reload, memory stats, network-change hook. |
 | `apple/` | `SbrKit` Swift package (`Sbr`, `SbrPacketTunnelProvider`), `build-xcframework.sh` (iOS, macOS, Catalyst, tvOS), SwiftUI sample app. See [`apple/README.md`](apple/README.md). **The Swift code is syntax-checked only: written on Linux, not compiled with Xcode yet.** |
 
@@ -37,7 +37,7 @@ Lookups are built for large rule-sets: hash sets per label for domains, Aho-Cora
 | | supported | not yet (rejected with a path) |
 |---|---|---|
 | inbounds | `mixed`, `socks` (5), `http`, users/auth | **`tun`**, socks4, UDP associate, TLS on http, everything else |
-| outbounds | `direct`, `block`, `socks` (4/4a/5, UDP associate, UoT), `http` (CONNECT), `shadowsocks` (AEAD + 2022, TCP + UDP, UoT v1/v2), `shadowtls` (v1/v2/v3), `anytls`, `hysteria2` (salamander, port hopping, Brutal), `tuic` (v5, all UDP relay modes, 0-RTT), `selector`, `urltest`\*, `detour` chains, `interrupt_exist_connections` | vmess, vless (+reality), trojan, hysteria2 gecko obfs / realm, naive, ssh, tor, SIP003 plugins, … |
+| outbounds | `direct`, `block`, `socks` (4/4a/5, UDP associate, UoT), `http` (CONNECT, over TLS too), `trojan`, `vless` (+ `xtls-rprx-vision`, REALITY), `vmess` (AEAD), `shadowsocks` (AEAD + 2022, TCP + UDP, UoT v1/v2), `shadowtls` (v1/v2/v3), `anytls`, `hysteria2` (salamander, port hopping, Brutal), `tuic` (v5, all UDP relay modes, 0-RTT), `selector`, `urltest`\*, `detour` chains, `interrupt_exist_connections` | `multiplex` (sing-mux), VMess legacy (`alter_id` > 0, `aes-128-cfb`), `packet_encoding: packetaddr`, `quic` v2ray transport, HTTP/2-3 proxies, hysteria2 gecko obfs / realm, naive, ssh, tor, SIP003 plugins, … |
 | endpoints | `wireguard` (userspace: boringtun + smoltcp, as an outbound) | `system: true`, flows opened by the peer, tailscale |
 | route | all default-rule fields above, `clash_mode`, logical and/or, invert, actions `route` / `reject` (default, drop) / `sniff`\*\*, inline / local / remote rule-sets, source and binary (`.srs` v1–5) | `protocol`/sniffing, `process_*`, `wifi_*`, `hijack-dns`, `resolve`, `route-options`, rule-set `http_client` |
 | dns | servers `local`, `hosts`, `udp` (TC→TCP), `tcp` (pipelined), `tls`, `https` (HTTP/2, POST/GET), `fakeip`, legacy `address` URLs incl. `rcode://`; `detour`/`domain_resolver` on servers, outbounds and `route.default_domain_resolver`; rules with all route matchers plus `query_type`, `outbound`, `ip_accept_any` and legacy address filtering; actions `route`, `route-options`, `reject`, `predefined`; cache (TTL, `cache_capacity`, `disable_expire`, `optimistic`, coalescing), `strategy`, `client_subnet`, `reverse_mapping` | servers `quic`, `h3`, `dhcp`, `mdns`, `tailscale`, `resolved`; `evaluate`/`respond`/response matching (1.14); uTLS/reality/ECH/pinning on DNS TLS |
@@ -100,7 +100,29 @@ WireGuard (`cargo run --release -p sbr-engine --example wg_throughput -- /path/t
 | sbr (quinn, BBR) | 1.10–2.02 Gbit/s | 3.8–4.3 s |
 | sing-box (quic-go, BBR) | 0.98–1.23 Gbit/s | 4.6–5.2 s |
 
+`cargo run --release -p sbr-engine --example proxy_bench -- /path/to/sing-box 4 5` runs both cores as **clients** (same config, socks inbound) against one sing-box server, upload and download. Three runs, Gbit/s, same 4-vCPU box shared with other builds, so the spread is wide:
+
+| client path | sbr up | sing-box up | sbr down | sing-box down |
+|---|---|---|---|---|
+| vless + tls | 7.2–14.0 | 6.9–12.8 | 7.4–12.2 | 6.4–12.8 |
+| trojan + tls | 7.0–8.6 | 6.7–12.4 | 6.7–7.9 | 6.2–12.4 |
+| vmess aes-128-gcm | 6.9–7.4 | 6.4–11.2 | 6.1–11.9 | 6.4–11.8 |
+
+No clear winner at this noise level. rustls reads ciphertext 4 KiB at a time and shrinks its buffer whenever it empties, so sbr puts a 20 KiB read-ahead under it (one socket read per record).
+
 sing-box wins plain TCP relay **on Linux** because its `bufio` uses `splice(2)` zero-copy. Darwin has no splice, so on Apple targets that path is copy-vs-copy. sbr wins on encrypted relay. This is a single synthetic loopback test, so treat it as a smoke signal, not a verdict.
+
+## TLS and V2Ray transports
+
+The outbound `tls` object is rustls + aws-lc-rs (`crates/sbr-engine/src/tls`): `server_name`, `disable_sni`, `insecure`, `alpn`, `min_version`/`max_version` (rustls speaks 1.2 and 1.3 only), `certificate`/`certificate_path` (replaces the web PKI roots, like sing-box), `certificate_sha256` and `certificate_public_key_sha256` pins, client certificates, `handshake_timeout`, `fragment`/`record_fragment` (one split inside the SNI's first label, as sing-box effectively does; on Linux it waits for the ACK via `TCP_INFO`, elsewhere it sleeps `fragment_fallback_delay`), and `ech` with a static `config` (no DNS lookup of ECH configs, no retry with server-provided configs). `reality` goes through `sbr-reality` with its browser fingerprints.
+
+**`utls` without `reality` is not a browser fingerprint.** rustls cannot emit Chrome's ClientHello; sbr accepts `utls.enabled` and only borrows what is cheap (ALPN `h2, http/1.1` when none is set, AES-128-GCM first). The ClientHello is rustls', which a censor can tell apart from Chrome's. Use REALITY where that matters.
+
+Transports: `ws` (incl. early data in the path or a header), `httpupgrade`, `grpc` (the "gun" framing over one pooled HTTP/2 connection per outbound, h2c without TLS) and `http` (HTTP/2 over TLS, HTTP/1.1 without). gRPC/HTTP `idle_timeout`/`ping_timeout` are parsed but no health pings are sent (no idle timers).
+
+Interop is tested against real sing-box servers (`crates/sbr-engine/tests/singbox.rs`): every protocol over every transport with and without TLS, 1 MiB round trips plus UDP, Vision with TLS 1.3 inside (direct mode), REALITY with and without Vision, and each TLS option. The trojan + `httpupgrade` pair is excluded: sing-box's httpupgrade server flushes `101` before hijacking, so Go's HTTP server can swallow the first byte of the tunnel and its trojan server rejects the short read. That is a server-side race any client hits.
+
+Vision skips sing-box's 5 ms sleep before the first raw write; rustls is fed one TLS record per wakeup until the server's switch to direct, so no inner bytes ever reach the outer TLS.
 
 ## Known upstream issue worked around
 
@@ -113,7 +135,7 @@ sing-box wins plain TCP relay **on Linux** because its `bufio` uses `splice(2)` 
    - a userspace stack (smoltcp) for when `system` can't be used.
    UDP NAT table, then FakeIP.
 2. **DNS.** Done except QUIC-based servers (`quic`, `h3`) and FakeIP persistence in the cache file.
-3. **TLS layer** (rustls + aws-lc-rs, uTLS-style ClientHello fingerprints) → trojan, vless, vmess, http/socks over TLS. Then **reality**.
+3. ~~**TLS layer** → trojan, vless, vmess, http over TLS, reality~~ (done; `multiplex` next).
 4. ~~**QUIC** (quinn) → hysteria2, tuic.~~ Done; see `outbound/quic/`.
 5. **wireguard** (boringtun or gotatun).
 6. ~~Binary `.srs` rule-sets and remote rule-sets~~ (done).
