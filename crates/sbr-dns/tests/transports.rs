@@ -440,8 +440,11 @@ async fn client_hello(dns: &str) -> Vec<u8> {
         s.read_exact(&mut msg).await.unwrap();
         msg
     };
-    let (msg, _) = tokio::join!(server, r.lookup("1.test", None));
-    msg
+    // The lookup itself never completes usefully; only its hello matters.
+    tokio::select! {
+        msg = server => msg,
+        _ = r.lookup("1.test", None) => panic!("lookup ended before its ClientHello arrived"),
+    }
 }
 
 fn extension_types(msg: &[u8]) -> Vec<u16> {
@@ -480,6 +483,11 @@ async fn doh_and_dot_client_hellos() {
         !plain_dot.contains(&0xca34) && !plain_dot.contains(&0x001c),
         "{plain_dot:04x?}"
     );
-    let firefox_dot = extension_types(&client_hello(&dot(r#""utls":{"enabled":true,"fingerprint":"firefox"}"#)).await);
+    let firefox_dot = extension_types(
+        &client_hello(&dot(
+            r#""enabled":true,"utls":{"enabled":true,"fingerprint":"firefox"}"#,
+        ))
+        .await,
+    );
     assert!(firefox_dot.contains(&0x001c), "{firefox_dot:04x?}");
 }
