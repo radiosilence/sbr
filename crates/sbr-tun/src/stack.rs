@@ -147,6 +147,12 @@ impl Stack {
     /// Datagrams larger than the MTU are fragmented, as the sending host
     /// would; this applies to IPv6 too, since sbr is that source.
     pub fn write_udp(&self, from: SocketAddr, to: SocketAddr, payload: &[u8]) -> io::Result<()> {
+        // The IP and UDP length fields are 16 bits; a larger payload (a big
+        // DNS answer, a UDP-over-stream frame) would wrap them.
+        let max = if to.is_ipv4() { 65535 - 28 } else { 65535 - 8 };
+        if payload.len() > max {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
         UDP_BUF.with(|b| {
             let mut b = b.borrow_mut();
             let (pkt, frag) = &mut *b;
