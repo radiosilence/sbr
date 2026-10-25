@@ -322,12 +322,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
 /// XOR with the repeating 4-byte key, eight bytes at a time.
 fn mask(data: &mut [u8], key: [u8; 4]) {
     let k = u64::from_ne_bytes([key[0], key[1], key[2], key[3], key[0], key[1], key[2], key[3]]);
-    let mut chunks = data.chunks_exact_mut(8);
-    for c in &mut chunks {
-        let v = u64::from_ne_bytes((&*c).try_into().unwrap()) ^ k;
-        c.copy_from_slice(&v.to_ne_bytes());
+    let (chunks, rest) = data.as_chunks_mut::<8>();
+    for c in chunks {
+        *c = (u64::from_ne_bytes(*c) ^ k).to_ne_bytes();
     }
-    for (i, b) in chunks.into_remainder().iter_mut().enumerate() {
+    for (i, b) in rest.iter_mut().enumerate() {
         *b ^= key[i & 3];
     }
 }
