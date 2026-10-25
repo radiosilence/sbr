@@ -118,3 +118,59 @@ async fn socks4a_connect_vs_sing_box() {
         bulk_echo(s, 256 * 1024).await;
     }
 }
+
+// Two fixed key pairs: (server, client).
+const WG_SERVER_PRIV: &str = "UMw/nn/aarRTT0YpX2vhoKkkVyMMaRm//ZIp0NtcDVA=";
+const WG_SERVER_PUB: &str = "86aLVfau2HFqXMvhQCqNmZpmsBj+sA2NWZP18Q5d2is=";
+const WG_CLIENT_PRIV: &str = "wB84HEwMuUsqfS3lzc0uVwGCRj1/AazY6Z6ixqVOEGo=";
+const WG_CLIENT_PUB: &str = "fy+4MMVWHzNXfR+K+VPZ5qH2sA0M/HYanok123jxshI=";
+
+/// sing-box as the "server" peer: flows to its tunnel address 10.66.0.1
+/// are rewritten to 127.0.0.1 and leave through `direct`.
+async fn wg_server(bin: &std::path::Path) -> (SingBox, u16) {
+    let p = free_udp_port();
+    let cfg = format!(
+        r#"{{"log":{{"level":"warn"}},
+        "endpoints":[{{"type":"wireguard","tag":"wg","address":["10.66.0.1/32"],"private_key":"{WG_SERVER_PRIV}","listen_port":{p},
+            "peers":[{{"public_key":"{WG_CLIENT_PUB}","allowed_ips":["10.66.0.2/32"]}}]}}],
+        "outbounds":[{{"type":"direct","tag":"direct"}}],
+        "route":{{"final":"direct"}}}}"#
+    );
+    (SingBox::start(bin, &cfg, None).await, p)
+}
+
+fn wg_client(port: u16) -> String {
+    format!(
+        r#"{{"inbounds":[{{"type":"mixed","tag":"in","listen":"127.0.0.1","listen_port":0}}],
+        "endpoints":[{{"type":"wireguard","tag":"wg","address":["10.66.0.2/32"],"private_key":"{WG_CLIENT_PRIV}",
+            "peers":[{{"address":"127.0.0.1","port":{port},"public_key":"{WG_SERVER_PUB}","allowed_ips":["0.0.0.0/0"]}}]}}],
+        "route":{{"final":"wg"}}}}"#
+    )
+}
+
+#[tokio::test]
+async fn wireguard_vs_sing_box() {
+    let bin = need_sing_box!();
+    let (_sb, p) = wg_server(&bin).await;
+    let sbr = start(&wg_client(p)).await;
+    let echo = echo().await;
+    let via = std::net::SocketAddr::from(([10, 66, 0, 1], echo.port()));
+    let s = socks_connect(port(&sbr, "in"), via).await;
+    bulk_echo(s, 4 << 20).await;
+    // Several flows at once.
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        let s = socks_connect(port(&sbr, "in"), via).await;
+        set.spawn(bulk_echo(s, 1 << 20));
+    }
+    while let Some(r) = set.join_next().await {
+        r.unwrap();
+    }
+    let uecho = udp_echo().await;
+    let udp = SocksUdp::new(port(&sbr, "in")).await;
+    udp.echo_check(
+        std::net::SocketAddr::from(([10, 66, 0, 1], uecho.port())),
+        &[1, 100, 1300],
+    )
+    .await;
+}

@@ -7,6 +7,7 @@ mod http;
 mod shadowsocks;
 mod socks;
 mod uot;
+mod wireguard;
 
 use std::collections::HashMap;
 use std::io;
@@ -136,7 +137,10 @@ impl Builder<'_> {
                 let members = g.outbounds.iter().map(|t| self.dep(t)).collect::<Result<Vec<_>, _>>()?;
                 Arc::new(Selector::new(tag, "selector", members, g.default.as_deref()))
             }
-            OutboundKind::ShadowTls(_) | OutboundKind::AnyTls(_) | OutboundKind::WireGuard(_) => {
+            OutboundKind::WireGuard(w) => Arc::new(
+                wireguard::WireGuard::new(tag, w, self.upstream(&w.dial)?, self.ctx.dns.clone()).map_err(invalid)?,
+            ),
+            OutboundKind::ShadowTls(_) | OutboundKind::AnyTls(_) => {
                 return Err(invalid("not implemented yet".into()));
             }
             OutboundKind::UrlTest(g) => {

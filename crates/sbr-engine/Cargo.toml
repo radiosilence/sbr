@@ -16,6 +16,10 @@ bytes.workspace = true
 httparse = "1.10"
 shadowsocks = { version = "1.25", default-features = false, features = ["aead-cipher", "aead-cipher-2022", "aead-cipher-extra"] }
 aws-lc-rs = "1"
+ipnet.workspace = true
+socket2 = "0.6"
+boringtun = { version = "0.7", default-features = false }
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "proto-ipv4-fragmentation", "socket-tcp", "socket-udp", "async"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
