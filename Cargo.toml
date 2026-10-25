@@ -34,3 +34,10 @@ opt-level = 3
 
 [profile.bench]
 inherits = "release"
+
+# Parallel worktrees share one disk: keep dev artifacts small.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
