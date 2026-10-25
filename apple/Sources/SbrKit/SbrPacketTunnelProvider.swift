@@ -349,7 +349,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
                     let beat = String(format: "%@ with %.1f MB in use", clock.string(from: Date()), mb)
                     try? beat.write(to: url, atomically: true, encoding: .utf8)
                 }
-                try? await Task.sleep(for: .seconds(10))
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
             }
         }
     }
