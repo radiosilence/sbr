@@ -388,6 +388,23 @@ fn sockaddr(addr: SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
     (storage, len as libc::socklen_t)
 }
 
+/// Write one packet without ever waiting on the descriptor's writability:
+/// a Darwin utun's write readiness is unreliable, and a packet loop parked
+/// on it stops all traffic (iOS then kills the extension). A full queue is
+/// retried briefly, then the packet is dropped, as a router would; TCP
+/// retransmits it.
+async fn send_or_drop(device: &Device, buf: &mut [u8], len: usize) -> io::Result<()> {
+    for _ in 0..3 {
+        match device.try_send(buf, len) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.raw_os_error() == Some(libc::ENOBUFS) => {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            r => return r,
+        }
+    }
+    Ok(())
+}
+
 /// Send `buf[HEADROOM..]`, treating a full interface queue as a drop.
 fn try_send(device: &Device, buf: &mut [u8]) -> io::Result<()> {
     match device.try_send(buf, buf.len() - HEADROOM) {
@@ -475,7 +492,7 @@ async fn packet_loop(
             }
             let r = match process(&fams, &mut reasm, batch.buf(i), len, &on_udp, false) {
                 Out::None | Out::Tcp(_) | Out::TcpOwned(..) => continue,
-                Out::InPlace(len) => device.send(batch.buf(i), len).await,
+                Out::InPlace(len) => send_or_drop(&device, batch.buf(i), len).await,
                 Out::Owned(mut pkt) if pkt.len() - HEADROOM > mtu => {
                     // A reassembled TCP segment. Fragment it again with our
                     // own ID: the rewritten flows all share one address pair,
@@ -493,7 +510,7 @@ async fn packet_loop(
                 }
                 Out::Owned(mut pkt) => {
                     let len = pkt.len() - HEADROOM;
-                    device.send(&mut pkt, len).await
+                    send_or_drop(&device, &mut pkt, len).await
                 }
             };
             if let Err(e) = r {

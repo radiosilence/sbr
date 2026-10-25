@@ -5,7 +5,6 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 use ipnet::IpNet;
-use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 
 /// Bytes reserved in front of every packet buffer.
@@ -129,19 +128,6 @@ impl Device {
         // SAFETY: writing from a valid buffer range.
         let n = unsafe { libc::write(self.fd.as_raw_fd(), frame.as_ptr().cast(), frame.len()) };
         if n < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
-    }
-
-    /// Send, waiting for writability instead of dropping.
-    pub async fn send(&self, buf: &mut [u8], len: usize) -> io::Result<()> {
-        let start = self.frame(buf, len);
-        let frame = &buf[start..HEADROOM + len];
-        self.fd
-            .async_io(Interest::WRITABLE, |fd| {
-                // SAFETY: as above.
-                let n = unsafe { libc::write(fd.as_raw_fd(), frame.as_ptr().cast(), frame.len()) };
-                if n < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
-            })
-            .await
     }
 
     fn frame(&self, buf: &mut [u8], _len: usize) -> usize {
