@@ -95,15 +95,32 @@ fn main() -> Result<()> {
         Cmd::Run => {
             let o = load(&cli)?;
             init_log(&o, cli.disable_color);
-            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-            rt.block_on(async {
-                let instance = Instance::start(&o, Settings::default()).await?;
-                tracing::info!("sing-box compatible core started");
-                shutdown_signal().await;
-                tracing::info!("shutting down");
-                instance.shutdown();
-                anyhow::Ok(())
-            })
+            let run = move || {
+                // SBR_THREADS=1 runs everything on one thread, as the iOS
+                // extension does; SBR_STACK_KIB sets that thread's stack.
+                let mut b = if std::env::var("SBR_THREADS").as_deref() == Ok("1") {
+                    tokio::runtime::Builder::new_current_thread()
+                } else {
+                    tokio::runtime::Builder::new_multi_thread()
+                };
+                b.enable_all().build()?.block_on(async {
+                    let instance = Instance::start(&o, Settings::default()).await?;
+                    tracing::info!("sing-box compatible core started");
+                    shutdown_signal().await;
+                    tracing::info!("shutting down");
+                    instance.shutdown();
+                    anyhow::Ok(())
+                })
+            };
+            match std::env::var("SBR_STACK_KIB").ok().and_then(|k| k.parse::<usize>().ok()) {
+                Some(kib) => std::thread::Builder::new()
+                    .name("sbr".into())
+                    .stack_size(kib << 10)
+                    .spawn(run)?
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("engine thread panicked"))?,
+                None => run(),
+            }
         }
     }
 }
