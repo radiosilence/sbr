@@ -137,6 +137,15 @@ impl GroupEnv {
     /// `url` overrides the URL-less handshake measurement. A successful
     /// measurement starts a data probe in the background.
     pub async fn probe(self: &Arc<Self>, o: &Arc<dyn Outbound>, url: Option<&Url>) -> io::Result<u16> {
+        let r = self.measure(o, url).await;
+        if r.is_ok() {
+            let (env, leaf, url) = (self.clone(), real_leaf(o), url.cloned());
+            self.spawn(async move { env.check(leaf, url, false).await });
+        }
+        r
+    }
+
+    async fn measure(&self, o: &Arc<dyn Outbound>, url: Option<&Url>) -> io::Result<u16> {
         let tag = real_tag(o.as_ref());
         let r = match url {
             Some(u) => self.http.probe(o.as_ref(), u).await,
@@ -155,7 +164,6 @@ impl GroupEnv {
             Ok(d) => {
                 debug!(outbound = %tag, delay = d, "available");
                 self.store(&tag, *d);
-                self.check(real_leaf(o), url.cloned(), false);
             }
             Err(e) => {
                 debug!(outbound = %tag, error = %e, "unavailable");
@@ -230,7 +238,8 @@ impl GroupEnv {
             match self.leaf(leaf) {
                 Some(o) => {
                     let url = self.containing(leaf).iter().find_map(|g| g.url.clone());
-                    self.check(o, url, true);
+                    let env = self.clone();
+                    self.spawn(async move { env.check(o, url, true).await });
                 }
                 None => self.probed(leaf, Verdict::Inconclusive),
             }
@@ -251,9 +260,9 @@ impl GroupEnv {
         }
     }
 
-    /// Data-probe `leaf` in the background. `claimed`: the caller already
-    /// holds the record's probe slot.
-    fn check(self: &Arc<Self>, leaf: Arc<dyn Outbound>, url: Option<Url>, claimed: bool) {
+    /// Data-probe `leaf`. `claimed`: the caller already holds the record's
+    /// probe slot. Dropping the future mid-probe releases the slot.
+    async fn check(self: &Arc<Self>, leaf: Arc<dyn Outbound>, url: Option<Url>, claimed: bool) {
         let tag = leaf.tag().to_owned();
         let target = match url {
             Some(u) => Some(Target::Url(u)),
@@ -272,12 +281,14 @@ impl GroupEnv {
             return;
         };
         debug!(outbound = %tag, ?target, "data probe started");
-        let env = self.clone();
-        self.spawn(async move {
-            let v = env.http.data_probe(leaf.as_ref(), &target).await;
-            debug!(outbound = %tag, verdict = ?v, "data probe");
-            env.probed(&tag, v);
-        });
+        let slot = ProbeSlot {
+            health: &self.health,
+            tag: &tag,
+        };
+        let v = self.http.data_probe(leaf.as_ref(), &target).await;
+        std::mem::forget(slot);
+        debug!(outbound = %tag, verdict = ?v, "data probe");
+        self.probed(&tag, v);
     }
 
     fn probed(self: &Arc<Self>, tag: &str, v: Verdict) {
@@ -331,7 +342,9 @@ impl GroupEnv {
             return;
         }
         let Some(o) = self.leaf(tag) else { return };
-        let _ = self.probe(&o, url.as_ref()).await;
+        if self.measure(&o, url.as_ref()).await.is_ok() {
+            self.check(o, url, false).await;
+        }
     }
 
     /// See `Engine::network_changed`.
@@ -340,6 +353,19 @@ impl GroupEnv {
         for g in self.urltests() {
             g.network_changed();
         }
+    }
+}
+
+/// Frees a leaf's probe slot if a data probe is dropped before it finishes
+/// (a Clash API delay test that timed out).
+struct ProbeSlot<'a> {
+    health: &'a Health,
+    tag: &'a str,
+}
+
+impl Drop for ProbeSlot<'_> {
+    fn drop(&mut self) {
+        self.health.with(self.tag, Record::abort_probe);
     }
 }
 
@@ -726,7 +752,13 @@ pub async fn test_outbounds(
     let sem = tokio::sync::Semaphore::new(CONCURRENCY);
     let leaf_results = futures_util::future::join_all(leaves.iter().map(|o| async {
         let _p = sem.acquire().await;
-        (o.tag().to_owned(), env.probe(o, url).await)
+        // The data probe runs inside the check, so a group's check (and its
+        // radio use) ends when the last probe does.
+        let r = env.measure(o, url).await;
+        if r.is_ok() {
+            env.check(real_leaf(o), url.cloned(), false).await;
+        }
+        (o.tag().to_owned(), r)
     }));
     let nested_results = futures_util::future::join_all(nested.iter().map(|g| g.url_test(force)));
     let (leaf_results, nested_results) = tokio::join!(leaf_results, nested_results);
