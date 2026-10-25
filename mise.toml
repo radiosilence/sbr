@@ -1,2 +1,6 @@
 [tools]
 xcodegen = "2.46.0"
+
+[tasks."test:apple-tunnel"]
+description = "Run sbr in a real macOS packet tunnel and check TCP, DNS, UDP and bulk through it"
+run = "apple/TunnelCheck/tunnel-check.sh"

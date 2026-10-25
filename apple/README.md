@@ -189,6 +189,15 @@ that needs an Apple SDK, so on Linux the script swaps in a stand-in compiler
 that emits empty objects. The Rust code is fully type-checked; the C code is
 only compiled by the real macOS build.
 
+## Tunnel check
+
+`mise run test:apple-tunnel` runs sbr inside a real macOS packet tunnel
+extension and checks TCP, DNS, UDP and a bulk download through it, without
+touching the Mac's default route or DNS. It is the only test that exercises a
+Network Extension, whose own sockets bypass its tunnel; CI cannot run it,
+because an NE needs a signed app and a one-time approval of its VPN
+configuration. See [`TunnelCheck/README.md`](TunnelCheck/README.md).
+
 ## TestFlight
 
 ```sh
