@@ -21,6 +21,7 @@ sbr check -c config.json
 | `sbr-core` | Session metadata, the router (sing-box match semantics, see below), Happy Eyeballs dialer, relay. No protocol code. |
 | `sbr-engine` | Inbounds, outbounds, runtime (`Instance`). |
 | `sbr` | CLI, flag-compatible with `sing-box run/check/version`. |
+| `sbr-reality` | REALITY TLS 1.3 client with uTLS-equivalent ClientHello fingerprints (not wired into an outbound yet). |
 | `sbr-apple` | C ABI (`include/sbr.h`) + `staticlib` for an xcframework. |
 | `apple/` | `SbrKit` Swift package, `build-xcframework.sh`, example `PacketTunnelProvider`. **Untested: written on Linux, not compiled with Xcode yet.** |
 
