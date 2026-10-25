@@ -24,6 +24,7 @@ struct LogsView: View {
                     #endif
                 }
                 .padding(.bottom, Theme.Space.m)
+                DiagnoseSection()
                 if tunnel.logs.isEmpty {
                     Text(tunnel.isConnected ? "nothing yet." : "connect to see the tunnel's logs.")
                         .font(.sbr(.meta)).foregroundStyle(Color.sbrMuted)
