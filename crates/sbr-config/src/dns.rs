@@ -809,7 +809,7 @@ pub fn parse_record(s: &str) -> std::result::Result<DnsRecord, String> {
     let name = fqdn(&name);
     let mut ttl = RECORD_TTL;
     let mut ty = None;
-    while let Some(tok) = it.next() {
+    for tok in it.by_ref() {
         if let Ok(n) = tok.parse::<u32>() {
             ttl = n;
         } else if tok.eq_ignore_ascii_case("IN") {

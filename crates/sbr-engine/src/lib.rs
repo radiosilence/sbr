@@ -2,6 +2,7 @@
 //! moves bytes between them.
 
 pub mod dispatch;
+mod dns;
 mod httpx;
 pub mod inbound;
 pub mod outbound;
@@ -16,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use sbr_config::{InboundKind, Options};
 use sbr_core::dns::{Dns, SystemDns};
 use sbr_core::relay::{self, Traffic};
-use sbr_core::router::Router;
+use sbr_core::router::{Router, RuleSets};
 use sbr_core::{Metadata, Stream};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
@@ -35,6 +36,8 @@ pub enum Error {
     Outbound(#[from] outbound::BuildError),
     #[error(transparent)]
     Router(#[from] sbr_core::router::BuildError),
+    #[error(transparent)]
+    Dns(#[from] sbr_dns::BuildError),
     #[error("inbounds[{0}] ({1}): listen {2}: {3}")]
     Listen(usize, String, SocketAddr, io::Error),
     #[error("inbounds[{0}] ({1}): {2}")]
@@ -48,7 +51,9 @@ pub struct Settings {
     pub relay_buffer: usize,
     /// Resolves relative paths (local rule-sets, cache files).
     pub base_dir: Option<std::path::PathBuf>,
-    /// DNS implementation; defaults to the OS resolver.
+    /// DNS implementation, overriding the config's `dns` section (which
+    /// otherwise builds an `sbr_dns::DnsRouter`; no section means the OS
+    /// resolver).
     pub dns: Option<Arc<dyn Dns>>,
     /// Pre-opened TUN file descriptor (Apple Network Extension, Android
     /// VpnService). When set, the `tun` inbound adopts it instead of creating
@@ -72,6 +77,8 @@ pub struct Engine {
     pub(crate) router: Router,
     pub(crate) dns: Arc<dyn Dns>,
     pub(crate) nat: udp::Nat,
+    /// Owns the outbounds DNS servers dial through (see `dns::LateOutbounds`).
+    _dns_outbounds: dns::LateOutbounds,
     pub traffic: Traffic,
     active: AtomicUsize,
     relay_buffer: usize,
@@ -79,21 +86,31 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(options: &Options, settings: &Settings) -> Result<Self, Error> {
-        let dns: Arc<dyn Dns> = settings.dns.clone().unwrap_or_else(|| Arc::new(SystemDns));
-        let ctx = BuildContext { dns: dns.clone() };
+        // Rule-sets are compiled once, for the route and DNS rules both.
+        let rule_sets = RuleSets::compile(&options.route.rule_sets, |path| {
+            std::fs::read_to_string(resolve_path(settings, path))
+        })?;
+        let late = dns::LateOutbounds::default();
+        let dns: Arc<dyn Dns> = match (&settings.dns, &options.dns) {
+            (Some(d), _) => d.clone(),
+            (None, Some(cfg)) => Arc::new(dns::build(cfg, options, &rule_sets, &late, settings)?),
+            (None, None) => Arc::new(SystemDns),
+        };
+        let ctx = BuildContext {
+            dns: dns.clone(),
+            default_resolver: options.route.default_domain_resolver.clone(),
+        };
         let outbounds = outbound::build_all(&options.outbounds, &ctx)?;
-        let router = Router::new(
-            &options.route.rules,
-            &options.route.rule_sets,
-            options.final_outbound(),
-            |tag| outbounds.iter().position(|o| o.tag() == tag),
-            |path| std::fs::read_to_string(resolve_path(settings, path)),
-        )?;
+        let _ = late.set(outbounds.clone());
+        let router = Router::with_sets(&options.route.rules, &rule_sets, options.final_outbound(), |tag| {
+            outbounds.iter().position(|o| o.tag() == tag)
+        })?;
         Ok(Self {
             outbounds,
             router,
             dns,
             nat: udp::Nat::default(),
+            _dns_outbounds: late,
             traffic: Traffic::default(),
             active: AtomicUsize::new(0),
             relay_buffer: settings.relay_buffer,

@@ -6,7 +6,7 @@
 //! on access; nothing sweeps in the background.
 
 use std::collections::HashMap;
-use std::hash::{BuildHasher, Hash, Hasher, RandomState};
+use std::hash::{BuildHasher, RandomState};
 use std::io;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
@@ -112,9 +112,7 @@ impl Cache {
     }
 
     fn hash(&self, k: &Key) -> u64 {
-        let mut h = self.hasher.build_hasher();
-        k.hash(&mut h);
-        h.finish()
+        self.hasher.hash_one(k)
     }
 
     pub fn get(&self, k: &Key, now: Instant) -> Option<Hit> {
@@ -188,7 +186,7 @@ pub enum Join<'a> {
 /// waiters of a cancelled leader see the channel close and retry.
 pub struct Leader<'a> {
     owner: &'a Inflight,
-    key: Key,
+    key: Box<Key>,
     tx: watch::Sender<Option<Outcome>>,
 }
 
@@ -214,7 +212,7 @@ impl Inflight {
         map.insert(key.clone(), rx);
         Join::Lead(Leader {
             owner: self,
-            key: key.clone(),
+            key: Box::new(key.clone()),
             tx,
         })
     }

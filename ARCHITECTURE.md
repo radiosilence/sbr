@@ -7,7 +7,9 @@ Read this before adding a protocol, inbound or service.
 - `sbr-config`: sing-box JSON → typed options. **Strict**: every field sing-box knows is either parsed, `tolerate`d (accepted with a warning, only when it cannot change where traffic goes), or rejected with its JSON path. Never silently ignore a field. Use `Obj` (`src/obj.rs`): `opt/get/req/list/string/duration/tolerate/finish`. Shared objects: `tls` (`parse_tls`), v2ray `transport` (`parse_transport`), `multiplex` (`parse_multiplex`), dial fields (`parse_dial`), `server`/`server_port` (`parse_server`).
 - `sbr-core`: protocol-free data plane.
   - `Outbound` / `PacketConn` / `Group` traits (`src/outbound.rs`).
-  - `Dns` trait (`src/dns.rs`): `lookup` (for dialing) and `exchange` (raw DNS messages, used by `hijack-dns`). `SystemDns` is the default.
+  - `Dns` trait (`src/dns.rs`): `lookup` (for dialing) and `exchange` (raw DNS messages, used by `hijack-dns`), plus `bind` (a resolver for one dialer's `domain_resolver`), `fakeip_lookup` and `reverse_lookup`. `SystemDns` is used when the config has no `dns` section.
+  - `router::Matcher` / `RuleSets`: rule matching for callers with their own actions (DNS rules); rule-sets are compiled once and shared.
+- `sbr-dns`: the `dns` section as a `Dns` (`DnsRouter`): transports (hickory-proto wire format, rustls/aws-lc-rs, h2), rules, cache, FakeIP. Servers dial through `Arc<dyn Outbound>`s the engine supplies (`detour`, or a direct dialer); `sbr-engine/src/dns.rs` is the glue.
   - `Router` (`src/router`): a stepper. `next(meta, from)` returns the next matching rule; the engine performs sniff/resolve/route-options and continues. sing-box group semantics; see the module docs.
   - `sniff` (`src/sniff.rs`), `dial` (Happy Eyeballs TCP, `bind_udp`), `relay`.
 - `sbr-engine`: runtime.

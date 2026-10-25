@@ -1,7 +1,7 @@
 //! Outbound registry. Each protocol lives in its own module and registers in
 //! `build_one`; protocol modules only depend on `BuildContext` and `Upstream`.
 
-mod direct;
+pub(crate) mod direct;
 mod group;
 mod http;
 mod shadowsocks;
@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
-use sbr_config::{Dial, Outbound as OutboundConfig, OutboundKind};
+use sbr_config::{Dial, DomainResolver, Outbound as OutboundConfig, OutboundKind};
 use sbr_core::dial::{self, DialOptions};
-use sbr_core::dns::Dns;
+use sbr_core::dns::{Dns, ResolverSpec};
 use sbr_core::{BoxPacketConn, Destination, Stream};
 
 pub use group::Selector;
@@ -23,6 +23,21 @@ pub use sbr_core::{Group, Outbound, PacketConn};
 #[derive(Clone)]
 pub struct BuildContext {
     pub dns: Arc<dyn Dns>,
+    /// `route.default_domain_resolver`.
+    pub default_resolver: Option<DomainResolver>,
+}
+
+impl BuildContext {
+    /// The resolver an outbound's dialer uses: its `domain_resolver`, else
+    /// `route.default_domain_resolver`, else the DNS rules (which may match
+    /// the outbound's tag with the deprecated `outbound` item).
+    pub fn dns_for(&self, tag: Option<&str>, d: &Dial) -> Arc<dyn Dns> {
+        let spec = ResolverSpec {
+            resolver: d.domain_resolver.as_ref().or(self.default_resolver.as_ref()),
+            outbound: tag,
+        };
+        self.dns.bind(&spec).unwrap_or_else(|| self.dns.clone())
+    }
 }
 
 /// How an outbound reaches its server: the system network, or another
@@ -36,6 +51,12 @@ pub enum Upstream {
 impl Upstream {
     pub fn new(d: &Dial, ctx: &BuildContext, detour: Option<Arc<dyn Outbound>>) -> Self {
         match detour {
+            // With its own domain_resolver the server's domain is resolved here, not by the detour.
+            Some(o) if d.domain_resolver.is_some() => Upstream::Detour(Arc::new(crate::dns::ResolveFirst::new(
+                o,
+                ctx.dns.clone(),
+                d.domain_strategy,
+            ))),
             Some(o) => Upstream::Detour(o),
             None => Upstream::System(DialOptions::from(d), ctx.dns.clone()),
         }
@@ -77,6 +98,7 @@ pub fn build_all(configs: &[OutboundConfig], ctx: &BuildContext) -> Result<Vec<A
         ctx,
         built: vec![None; configs.len()],
         visiting: vec![false; configs.len()],
+        current: None,
     };
     for i in 0..configs.len() {
         b.build(i)?;
@@ -90,6 +112,8 @@ struct Builder<'a> {
     ctx: &'a BuildContext,
     built: Vec<Option<Arc<dyn Outbound>>>,
     visiting: Vec<bool>,
+    /// The outbound being built, whose tag DNS rules may match.
+    current: Option<usize>,
 }
 
 impl Builder<'_> {
@@ -102,7 +126,12 @@ impl Builder<'_> {
             Some(t) => Some(self.dep(t)?),
             None => None,
         };
-        Ok(Upstream::new(d, self.ctx, detour))
+        let tag = self.current.map(|i| self.configs[i].tag.as_str());
+        let ctx = BuildContext {
+            dns: self.ctx.dns_for(tag, d),
+            default_resolver: None,
+        };
+        Ok(Upstream::new(d, &ctx, detour))
     }
 
     fn build(&mut self, i: usize) -> Result<Arc<dyn Outbound>, BuildError> {
@@ -114,6 +143,7 @@ impl Builder<'_> {
             return Err(BuildError::Cycle(i, cfg.tag.clone()));
         }
         self.visiting[i] = true;
+        let outer = self.current.replace(i);
         let tag = cfg.tag.clone();
         let invalid = |e: String| BuildError::Invalid(i, cfg.tag.clone(), e);
         let out: Arc<dyn Outbound> = match &cfg.kind {
@@ -139,6 +169,7 @@ impl Builder<'_> {
                 Arc::new(Selector::new(tag, "urltest", members, None))
             }
         };
+        self.current = outer;
         self.visiting[i] = false;
         self.built[i] = Some(out.clone());
         Ok(out)

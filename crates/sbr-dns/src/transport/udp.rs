@@ -59,14 +59,9 @@ impl Udp {
             let (pc, pending) = (pc.clone(), pending.clone());
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 65535];
-                loop {
-                    match pc.recv_from(&mut buf).await {
-                        Ok((n, _)) => {
-                            if let Ok(m) = msg::decode(&buf[..n]) {
-                                pending.deliver(m);
-                            }
-                        }
-                        Err(_) => break,
+                while let Ok((n, _)) = pc.recv_from(&mut buf).await {
+                    if let Ok(m) = msg::decode(&buf[..n]) {
+                        pending.deliver(m);
                     }
                 }
                 pending.close();

@@ -194,6 +194,9 @@ fn rcode_error(rcode: u16) -> io::Error {
     io::Error::new(kind, format!("DNS rcode {rcode}"))
 }
 
+/// `reverse_mapping`: address → (domain, expiry).
+type ReverseMap = LruCache<IpAddr, (Arc<str>, Instant)>;
+
 struct Inner {
     servers: Vec<Server>,
     by_tag: HashMap<String, usize>,
@@ -207,7 +210,7 @@ struct Inner {
     timeout: Duration,
     client_subnet: Option<IpNet>,
     fakeips: Vec<Arc<FakeIp>>,
-    reverse: Option<Mutex<LruCache<IpAddr, (Arc<str>, Instant)>>>,
+    reverse: Option<Mutex<ReverseMap>>,
     weak: Weak<Inner>,
 }
 

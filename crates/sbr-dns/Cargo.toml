@@ -25,6 +25,7 @@ http = "1"
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 rcgen = "0.14"
+serde_json.workspace = true
 hyper = { version = "1", features = ["server", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"

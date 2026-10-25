@@ -19,6 +19,7 @@ sbr check -c config.json
 |---|---|
 | `sbr-config` | sing-box JSON model. Strict like sing-box: unknown fields are errors, reported with the exact JSON path. Anything sing-box accepts that sbr hasn't implemented is **rejected**, never silently ignored, unless it can't change where traffic goes. Those cases are reported as warnings. |
 | `sbr-core` | Session metadata, the router (sing-box match semantics, see below), Happy Eyeballs dialer, relay. No protocol code. |
+| `sbr-dns` | The `dns` section: DNS servers and transports, DNS rules, cache, FakeIP. |
 | `sbr-engine` | Inbounds, outbounds, runtime (`Instance`). |
 | `sbr` | CLI, flag-compatible with `sing-box run/check/version`. |
 | `sbr-apple` | C ABI (`include/sbr.h`) + `staticlib` for an xcframework. |
@@ -37,7 +38,7 @@ Lookups are built for large rule-sets: hash sets per label for domains, Aho-Cora
 | inbounds | `mixed`, `socks` (5), `http`, users/auth | **`tun`**, socks4, UDP associate, TLS on http, everything else |
 | outbounds | `direct`, `block`, `socks` (5), `http` (CONNECT), `shadowsocks` (AEAD + 2022), `selector`, `urltest`\*, `detour` chains | vmess, vless (+reality), trojan, hysteria2, tuic, wireguard, anytls, shadowtls, naive, ssh, tor, … |
 | route | all default-rule fields above, logical and/or, invert, actions `route` / `reject` (default, drop) / `sniff`\*\*, inline + local *source* rule-sets | binary `.srs`, remote rule-sets, `protocol`/sniffing, `process_*`, `wifi_*`, `hijack-dns`, `resolve`, `route-options` |
-| dns | system resolver (warns) | the whole `dns` section |
+| dns | servers `local`, `hosts`, `udp` (TC→TCP), `tcp` (pipelined), `tls`, `https` (HTTP/2, POST/GET), `fakeip`, legacy `address` URLs incl. `rcode://`; `detour`/`domain_resolver` on servers, outbounds and `route.default_domain_resolver`; rules with all route matchers plus `query_type`, `outbound`, `ip_accept_any` and legacy address filtering; actions `route`, `route-options`, `reject`, `predefined`; cache (TTL, `cache_capacity`, `disable_expire`, `optimistic`, coalescing), `strategy`, `client_subnet`, `reverse_mapping` | servers `quic`, `h3`, `dhcp`, `mdns`, `tailscale`, `resolved`; `evaluate`/`respond`/response matching (1.14); uTLS/reality/ECH/pinning on DNS TLS |
 | experimental | ignored with warning | clash API, cache file |
 
 \* `urltest` doesn't probe yet. It is pinned to the first member.
@@ -66,7 +67,7 @@ sing-box wins plain TCP relay **on Linux** because its `bufio` uses `splice(2)` 
    - `system`: rewrite TCP SYNs to a local listener and let the kernel run TCP. This is the fast path and works on macOS and iOS.
    - a userspace stack (smoltcp) for when `system` can't be used.
    UDP NAT table, then FakeIP.
-2. **DNS.** The `dns` section: servers (udp/tcp/tls/https/quic), rules, cache, `hijack-dns`, FakeIP.
+2. **DNS.** Done except QUIC-based servers (`quic`, `h3`) and FakeIP persistence in the cache file.
 3. **TLS layer** (rustls + aws-lc-rs, uTLS-style ClientHello fingerprints) → trojan, vless, vmess, http/socks over TLS. Then **reality**.
 4. **QUIC** (quinn) → hysteria2, tuic.
 5. **wireguard** (boringtun or gotatun).

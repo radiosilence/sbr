@@ -3,7 +3,8 @@
 use std::io;
 use std::net::IpAddr;
 
-use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
+pub use hickory_proto::op::Message;
+use hickory_proto::op::{Edns, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsCode, EdnsOption};
 use hickory_proto::rr::rdata::{A, AAAA, CNAME, MX, NS, PTR, TXT};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};

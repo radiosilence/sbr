@@ -110,6 +110,11 @@ impl Engine {
         back: Arc<dyn UdpWriteBack>,
     ) -> io::Result<()> {
         let source = meta.source;
+        // DNS: FakeIP destination → domain before routing; replies must
+        // still appear to come from the fake address.
+        let fake_origin = Some(meta.destination.clone());
+        self.restore_domain(&mut meta)?;
+        let fake_origin = fake_origin.filter(|o| *o != meta.destination);
         let mut opts = RouteOptions::default();
         let mut i = 0;
         let action = loop {
@@ -130,7 +135,7 @@ impl Engine {
                     }
                 }
                 Action::RouteOptions(o) => opts.merge(o),
-                Action::Resolve { strategy, .. } => self.resolve(&mut meta, *strategy).await,
+                Action::Resolve { server, strategy } => self.resolve(&mut meta, server.as_deref(), *strategy).await,
                 Action::Route { outbound, options } => {
                     opts.merge(options);
                     break Action::Route {
@@ -197,6 +202,7 @@ impl Engine {
 
                 // Remote → client.
                 let unmap = match (&meta.destination.host, options.udp_disable_domain_unmapping) {
+                    _ if fake_origin.is_some() => fake_origin.clone(),
                     (Host::Domain(_), false) => Some(meta.destination.clone()),
                     _ => None,
                 };
@@ -242,6 +248,7 @@ impl Engine {
                         }
                     };
                     last.store(now_ms(epoch), Ordering::Relaxed);
+                    let dest = self.unfake(dest); // FakeIP
                     let target = if options.udp_connect {
                         first_dest.clone()
                     } else {
