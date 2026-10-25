@@ -510,6 +510,6 @@ async fn data_probe_of_own_server_pipelines_past_the_threshold() {
         http.data_probe(direct.as_ref(), &target(closed)).await,
         Verdict::Inconclusive
     );
-    assert!(PROOF_BYTES > 100 * 120, "the limit above is below the threshold");
+    const { assert!(PROOF_BYTES > 100 * 120, "the limit above is below the threshold") };
     i.shutdown();
 }
