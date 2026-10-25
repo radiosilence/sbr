@@ -159,11 +159,12 @@ fn bind_device_sock(sock: &socket2::Socket, iface: &str, _ip: IpAddr) -> io::Res
     target_os = "watchos",
     target_os = "visionos"
 ))]
-fn bind_device(sock: &TcpSocket, iface: &str, ip: IpAddr) -> io::Result<()> {
+fn bind_device_sock(sock: &socket2::Socket, iface: &str, ip: IpAddr) -> io::Result<()> {
     let idx = std::num::NonZeroU32::new(nix_if_nametoindex(iface)?).ok_or_else(|| io::Error::other("bad interface"))?;
+    // IP_BOUND_IF / IPV6_BOUND_IF: Darwin's SO_BINDTODEVICE.
     match ip {
-        IpAddr::V4(_) => SockRef::from(sock).bind_device_by_index_v4(Some(idx)),
-        IpAddr::V6(_) => SockRef::from(sock).bind_device_by_index_v6(Some(idx)),
+        IpAddr::V4(_) => sock.bind_device_by_index_v4(Some(idx)),
+        IpAddr::V6(_) => sock.bind_device_by_index_v6(Some(idx)),
     }
 }
 
