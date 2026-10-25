@@ -36,7 +36,7 @@ Lookups are built for large rule-sets: hash sets per label for domains, Aho-Cora
 | | supported | not yet (rejected with a path) |
 |---|---|---|
 | inbounds | `mixed`, `socks` (5), `http`, users/auth | **`tun`**, socks4, UDP associate, TLS on http, everything else |
-| outbounds | `direct`, `block`, `socks` (5), `http` (CONNECT), `shadowsocks` (AEAD + 2022), `selector`, `urltest`\*, `detour` chains | vmess, vless (+reality), trojan, hysteria2, tuic, wireguard, anytls, shadowtls, naive, ssh, tor, … |
+| outbounds | `direct`, `block`, `socks` (5), `http` (CONNECT), `shadowsocks` (AEAD + 2022), `hysteria2` (salamander, port hopping, Brutal), `tuic` (v5, all UDP relay modes, 0-RTT), `selector`, `urltest`\*, `detour` chains | vmess, vless (+reality), trojan, hysteria2 gecko obfs / realm, wireguard, anytls, shadowtls, naive, ssh, tor, … |
 | route | all default-rule fields above, logical and/or, invert, actions `route` / `reject` (default, drop) / `sniff`\*\*, inline + local *source* rule-sets | binary `.srs`, remote rule-sets, `protocol`/sniffing, `process_*`, `wifi_*`, `hijack-dns`, `resolve`, `route-options` |
 | dns | system resolver (warns) | the whole `dns` section |
 | experimental | ignored with warning | clash API, cache file |
@@ -55,6 +55,13 @@ This feeds **the same config file** to both cores. Setup: 4 streams of loopback 
 | socks → direct | 30–33 Gbit/s | 34–37 Gbit/s |
 | socks → shadowsocks-2022 → server | 16.7–17.4 Gbit/s | 15.7–16.2 Gbit/s |
 
+`cargo run --release -p sbr-engine --example quic_throughput -- /path/to/sing-box 4 5` runs both cores as hysteria2 **clients** (same config file, separate processes) against one sing-box hysteria2 server; CPU is from `/proc/<pid>/stat`. Three runs:
+
+| hysteria2 client, 4 streams upload | throughput | client CPU per GB |
+|---|---|---|
+| sbr (quinn, BBR) | 1.10–2.02 Gbit/s | 3.8–4.3 s |
+| sing-box (quic-go, BBR) | 0.98–1.23 Gbit/s | 4.6–5.2 s |
+
 sing-box wins plain TCP relay **on Linux** because its `bufio` uses `splice(2)` zero-copy. Darwin has no splice, so on Apple targets that path is copy-vs-copy. sbr wins on encrypted relay. This is a single synthetic loopback test, so treat it as a smoke signal, not a verdict.
 
 ## Known upstream issue worked around
@@ -69,7 +76,7 @@ sing-box wins plain TCP relay **on Linux** because its `bufio` uses `splice(2)` 
    UDP NAT table, then FakeIP.
 2. **DNS.** The `dns` section: servers (udp/tcp/tls/https/quic), rules, cache, `hijack-dns`, FakeIP.
 3. **TLS layer** (rustls + aws-lc-rs, uTLS-style ClientHello fingerprints) → trojan, vless, vmess, http/socks over TLS. Then **reality**.
-4. **QUIC** (quinn) → hysteria2, tuic.
+4. ~~**QUIC** (quinn) → hysteria2, tuic.~~ Done; see `outbound/quic/`.
 5. **wireguard** (boringtun or gotatun).
 6. Binary `.srs` rule-sets and remote rule-sets. Real-world configs depend on these heavily.
 7. `urltest` probing, clash API (dashboards and the iOS app UI use it).
