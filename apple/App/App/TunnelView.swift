@@ -58,6 +58,7 @@ struct TunnelView: View {
         }
         AutoConnectSection()
         #endif
+        EraseSection()
     }
 
     private var header: some View {

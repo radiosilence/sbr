@@ -131,6 +131,8 @@ final class TunnelModel: ObservableObject {
     private var config: String?
     /// Where it came from, for the tunnel to refresh it itself.
     private var remote: SbrRemoteProfile?
+    /// Its Keychain item, which the tunnel reads it from on start.
+    private var stored: SbrStoredProfile?
     private var statusObserver: NSObjectProtocol?
 
     private var session: NETunnelProviderSession? { manager?.connection as? NETunnelProviderSession }
@@ -161,12 +163,13 @@ final class TunnelModel: ObservableObject {
         }
     }
 
-    /// The active profile changed: save it into the VPN configuration (so a
+    /// The active profile changed: point the VPN configuration at it (so a
     /// restart uses it) and hot-reload a running tunnel.
-    func apply(config: String?, remote: SbrRemoteProfile?) async {
-        guard config != self.config || remote != self.remote else { return }
+    func apply(config: String?, remote: SbrRemoteProfile?, stored: SbrStoredProfile?) async {
+        guard config != self.config || remote != self.remote || stored != self.stored else { return }
         self.config = config
         self.remote = remote
+        self.stored = stored
         profileStrict = config.map(Sbr.strictRoute) ?? false
         guard manager != nil, config != nil else { return }
         do {
@@ -336,6 +339,7 @@ final class TunnelModel: ObservableObject {
     /// Save the VPN configuration. `onDemand` arms or disarms auto-connect;
     /// nil keeps whatever a manual connect or disconnect last left it as.
     private func install(onDemand: Bool? = nil) async throws {
+        guard config != nil else { throw SbrError("no profile selected") }
         #if SBR_SYSTEM_EXTENSION
         try await SystemExtensionActivator.activate(identifier: AppConfig.tunnelBundleIdentifier)
         #endif
@@ -345,9 +349,14 @@ final class TunnelModel: ObservableObject {
         let proto = (m.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = AppConfig.tunnelBundleIdentifier
         proto.serverAddress = "sbr"
-        guard let config else { throw SbrError("no profile selected") }
-        var pc: [String: Any] = [SbrProviderKey.config: config]
+        #if SBR_SYSTEM_EXTENSION
+        // A system extension runs as root, outside the user's Keychain.
+        var pc: [String: Any] = [SbrProviderKey.config: config ?? ""]
         if let remote { pc[SbrProviderKey.remote] = try JSONEncoder().encode(remote) }
+        #else
+        guard let stored else { throw SbrError("the profile is not in the Keychain") }
+        var pc: [String: Any] = [SbrProviderKey.stored: try JSONEncoder().encode(stored)]
+        #endif
         if let logLevel { pc[SbrProviderKey.logLevel] = logLevel }
         pc[SbrProviderKey.personalRules] = SbrPersonalRules.encode(rules)
         pc[SbrProviderKey.tunStack] = userspaceTCP ? "gvisor" : "system"
@@ -363,6 +372,43 @@ final class TunnelModel: ObservableObject {
         try await m.loadFromPreferences()
         manager = m
         observeStatus()
+    }
+
+    /// Remove the VPN configuration and everything the app remembers about
+    /// it: settings, personal rules, trusted networks and the saved logs. A
+    /// running tunnel first deletes its own files (`SbrRequest.erase`).
+    func erase() async {
+        config = nil
+        remote = nil
+        stored = nil
+        if isConnected, let session { _ = try? await session.send(.erase) }
+        for m in (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? [] {
+            m.connection.stopVPNTunnel()
+            do {
+                try await m.removeFromPreferences()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+        if let statusObserver { NotificationCenter.default.removeObserver(statusObserver) }
+        statusObserver = nil
+        manager = nil
+        status = .invalid
+        groups = []
+        stats = nil
+        connections = []
+        connectionsTotal = 0
+        lastStop = nil
+        rules = []
+        trustedNetworks = []
+        strictChoice = nil
+        profileStrict = false
+        allowLocalNetwork = false
+        logs = []
+        if let url = Self.logsURL { try? FileManager.default.removeItem(at: url) }
+        URLCache.shared.removeAllCachedResponses()
+        if let domain = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: domain) }
+        TunnelControl.reloadControl()
     }
 
     private func observeStatus() {

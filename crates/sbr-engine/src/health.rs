@@ -15,6 +15,11 @@
 //!   a byte, a request with no answer at all for [`STALL`], a failed connect.
 //!   A burst of them from [`BURST`] distinct destinations within [`WINDOW`]
 //!   degrades the leaf; distinct destinations, so one dead website cannot.
+//!   A clean close before any data is the weakest of these (servers and
+//!   push endpoints do it on purpose, and a starved relay tears flows down
+//!   the same way), so a burst made only with closes asks for a probe and
+//!   degrades only if that fails. Closes are ignored outright while the
+//!   leaf is moving [`PROOF_BYTES`] for other connections.
 //!   *Soft* signals are what a freeze looks like but a long poll does too: the
 //!   remote silent for [`STALL`] mid-TLS-record, or while the client waits.
 //!   They never degrade on their own; they ask for a data probe.
@@ -34,9 +39,7 @@
 //! connection has no timer. The map lock is taken per signal, not per chunk.
 
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
 use std::convert::Infallible;
-use std::hash::{Hash, Hasher};
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -44,7 +47,6 @@ use std::sync::{Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use sbr_core::Destination;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::Notify;
 
@@ -118,6 +120,8 @@ pub enum Verdict {
     /// Nothing to conclude: no target, the target closed early or served
     /// too little, the inner handshake failed.
     Inconclusive,
+    /// The group's delay probe through the leaf failed.
+    Unreachable,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -126,10 +130,11 @@ pub struct Degraded {
     pub until: Instant,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Event {
     at: Instant,
-    dest: u64,
+    signal: Signal,
+    dest: String,
     conn: Option<u64>,
 }
 
@@ -140,6 +145,11 @@ pub struct Outcome {
     pub degraded: bool,
     /// Run a data probe; the record now counts one as running.
     pub probe: bool,
+    /// Like `probe`, for a burst of closes that degrades only if the leaf's
+    /// delay probe or data probe then fails.
+    pub confirm: bool,
+    /// A close while the leaf carries data elsewhere; not counted.
+    pub ignored: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,30 +170,68 @@ pub struct Record {
     soft_probe: bool,
     last_triggered: Option<Instant>,
     false_alarm: Option<Instant>,
+    /// The running probe decides a burst of closes.
+    confirming: bool,
+    last_carried: Option<Instant>,
 }
 
 impl Record {
-    pub fn report(&mut self, now: Instant, signal: Signal, dest: u64, conn: Option<u64>) -> Outcome {
+    pub fn report(&mut self, now: Instant, signal: Signal, dest: &str, conn: Option<u64>) -> Outcome {
         let mut out = Outcome::default();
         // A degraded leaf gets no new connections; stragglers prove nothing.
         if self.degraded.is_some() {
             return out;
         }
+        if signal == Signal::Closed && self.last_carried.is_some_and(|t| now.duration_since(t) < WINDOW) {
+            out.ignored = true;
+            return out;
+        }
         if signal.hard() {
             self.events
                 .retain(|e| now.duration_since(e.at) < WINDOW && (conn.is_none() || e.conn != conn));
-            self.events.push(Event { at: now, dest, conn });
-            let mut dests: Vec<u64> = self.events.iter().map(|e| e.dest).collect();
-            dests.sort_unstable();
-            dests.dedup();
-            if dests.len() >= BURST {
+            self.events.push(Event {
+                at: now,
+                signal,
+                dest: dest.to_owned(),
+                conn,
+            });
+            if self.distinct(|e| e.signal != Signal::Closed) >= BURST {
                 self.degrade(now, signal);
                 out.degraded = true;
+                return out;
+            }
+            if self.distinct(|_| true) >= BURST {
+                if self.claim_probe(now, false) {
+                    self.confirming = true;
+                    out.confirm = true;
+                }
                 return out;
             }
         }
         out.probe = self.claim_probe(now, !signal.hard());
         out
+    }
+
+    fn distinct(&self, f: impl Fn(&Event) -> bool) -> usize {
+        let mut dests: Vec<&str> = self.events.iter().filter(|e| f(e)).map(|e| e.dest.as_str()).collect();
+        dests.sort_unstable();
+        dests.dedup();
+        dests.len()
+    }
+
+    /// Destinations counting towards a burst, for logs.
+    pub fn suspects(&self) -> Vec<&str> {
+        let mut dests: Vec<&str> = self.events.iter().map(|e| e.dest.as_str()).collect();
+        dests.sort_unstable();
+        dests.dedup();
+        dests
+    }
+
+    /// Another connection on the leaf is receiving data and has moved
+    /// [`PROOF_BYTES`]: closes within [`WINDOW`] of this are not the path.
+    pub fn carrying(&mut self, now: Instant) {
+        self.last_carried = Some(now);
+        self.events.retain(|e| e.signal != Signal::Closed);
     }
 
     fn claim_probe(&mut self, now: Instant, soft: bool) -> bool {
@@ -213,10 +261,12 @@ impl Record {
     /// A probe was abandoned before it finished.
     pub fn abort_probe(&mut self) {
         self.probing = false;
+        self.confirming = false;
     }
 
     pub fn probe_done(&mut self, now: Instant, v: Verdict) -> Change {
         self.probing = false;
+        let confirming = std::mem::take(&mut self.confirming);
         let expired = self.degraded.is_some_and(|d| now >= d.until);
         match v {
             Verdict::Pass => {
@@ -245,9 +295,13 @@ impl Record {
                 self.degrade(now, reason);
                 Change::Degraded
             }
+            Verdict::Unreachable if confirming && self.degraded.is_none() => {
+                self.degrade(now, Signal::Closed);
+                Change::Degraded
+            }
             // Without a conclusive probe the handshake probe is the best
             // evidence there is; passive detection catches a relapse.
-            Verdict::Inconclusive if expired => {
+            Verdict::Inconclusive | Verdict::Unreachable if expired => {
                 self.degraded = None;
                 Change::Readmitted
             }
@@ -256,12 +310,13 @@ impl Record {
     }
 
     /// A connection moved [`PROOF_BYTES`] downstream.
-    pub fn success(&mut self) {
+    pub fn success(&mut self, now: Instant) {
         // Connections opened before the demotion still finish; they don't
         // speak for new ones (port-443 policing kills later flows only).
         if self.degraded.is_none() {
             self.events.clear();
             self.strikes = 0;
+            self.last_carried = Some(now);
         }
     }
 
@@ -317,13 +372,6 @@ impl Health {
     }
 }
 
-/// Destinations are compared by host and port.
-pub fn dest_key(d: &Destination) -> u64 {
-    let mut h = DefaultHasher::new();
-    d.to_string().hash(&mut h);
-    h.finish()
-}
-
 // ---------------------------------------------------------------------------
 // Per-connection bookkeeping
 
@@ -377,6 +425,12 @@ impl Activity {
             self.armed.store(true, Ordering::Relaxed);
             self.notify.notify_one();
         }
+    }
+
+    /// The remote sent data within `within`.
+    pub fn receiving(&self, within: Duration) -> bool {
+        let last = self.last_down.load(Ordering::Relaxed);
+        last != 0 && now_ms().saturating_sub(last) < within.as_millis() as u64
     }
 
     /// [`watch`] has reported this connection and it has not recovered.
@@ -591,20 +645,20 @@ mod tests {
     fn burst_of_distinct_destinations_degrades() {
         let t = Instant::now();
         let mut r = Record::default();
-        let o = r.report(t, Signal::Reset, 1, Some(1));
+        let o = r.report(t, Signal::Reset, "1", Some(1));
         assert_eq!(
             o,
             Outcome {
-                degraded: false,
-                probe: true
+                probe: true,
+                ..Default::default()
             }
         );
         r.probe_done(t, Verdict::Inconclusive);
         // The same destination failing again is one website, not the path.
-        assert!(!r.report(t + S, Signal::Reset, 1, Some(2)).degraded);
-        assert!(!r.report(t + S, Signal::Closed, 1, Some(3)).degraded);
-        assert!(!r.report(t + 2 * S, Signal::NoResponse, 2, Some(4)).degraded);
-        assert!(r.report(t + 3 * S, Signal::Connect, 3, None).degraded);
+        assert!(!r.report(t + S, Signal::Reset, "1", Some(2)).degraded);
+        assert!(!r.report(t + S, Signal::Closed, "1", Some(3)).degraded);
+        assert!(!r.report(t + 2 * S, Signal::NoResponse, "2", Some(4)).degraded);
+        assert!(r.report(t + 3 * S, Signal::Connect, "3", None).degraded);
         let d = r.degraded().unwrap();
         assert_eq!(d.reason, Signal::Connect);
         assert_eq!(d.until, t + 3 * S + BACKOFF_BASE);
@@ -614,10 +668,10 @@ mod tests {
     fn failures_outside_the_window_do_not_add_up() {
         let t = Instant::now();
         let mut r = Record::default();
-        r.report(t, Signal::Reset, 1, None);
-        r.report(t + 10 * S, Signal::Reset, 2, None);
-        assert!(!r.report(t + WINDOW + S, Signal::Reset, 3, None).degraded);
-        assert!(r.report(t + WINDOW + 2 * S, Signal::Reset, 4, None).degraded);
+        r.report(t, Signal::Reset, "1", None);
+        r.report(t + 10 * S, Signal::Reset, "2", None);
+        assert!(!r.report(t + WINDOW + S, Signal::Reset, "3", None).degraded);
+        assert!(r.report(t + WINDOW + 2 * S, Signal::Reset, "4", None).degraded);
     }
 
     #[test]
@@ -625,19 +679,19 @@ mod tests {
         let t = Instant::now();
         let mut r = Record::default();
         for i in 0..10u32 {
-            let o = r.report(t + i * S, Signal::MidRecord, i as u64, Some(i as u64));
+            let o = r.report(t + i * S, Signal::MidRecord, &i.to_string(), Some(i as u64));
             assert!(!o.degraded);
             assert_eq!(o.probe, i == 0, "one probe at a time");
         }
         assert_eq!(r.probe_done(t + 10 * S, Verdict::Pass), Change::None);
         // Within the cooldown nothing; after it, soft signals stay quiet
         // because the last one was a false alarm, hard ones still probe.
-        assert!(!r.report(t + 20 * S, Signal::Waiting, 1, None).probe);
-        assert!(!r.report(t + 50 * S, Signal::Waiting, 1, None).probe);
-        assert!(r.report(t + 50 * S, Signal::Reset, 1, None).probe);
+        assert!(!r.report(t + 20 * S, Signal::Waiting, "1", None).probe);
+        assert!(!r.report(t + 50 * S, Signal::Waiting, "1", None).probe);
+        assert!(r.report(t + 50 * S, Signal::Reset, "1", None).probe);
         r.probe_done(t + 51 * S, Verdict::Pass);
         assert!(
-            r.report(t + 10 * S + QUIET_AFTER_FALSE_ALARM, Signal::Waiting, 1, None)
+            r.report(t + 10 * S + QUIET_AFTER_FALSE_ALARM, Signal::Waiting, "1", None)
                 .probe
         );
 
@@ -645,20 +699,20 @@ mod tests {
         let mut r = Record::default();
         assert!(r.begin_probe());
         r.probe_done(t, Verdict::Pass);
-        assert!(r.report(t + S, Signal::MidRecord, 1, None).probe);
+        assert!(r.report(t + S, Signal::MidRecord, "1", None).probe);
     }
 
     #[test]
     fn retracted_stalls_do_not_count() {
         let t = Instant::now();
         let mut r = Record::default();
-        r.report(t, Signal::NoResponse, 1, Some(10));
-        r.report(t, Signal::NoResponse, 2, Some(11));
+        r.report(t, Signal::NoResponse, "1", Some(10));
+        r.report(t, Signal::NoResponse, "2", Some(11));
         r.retract(10);
-        assert!(!r.report(t, Signal::NoResponse, 3, Some(12)).degraded);
+        assert!(!r.report(t, Signal::NoResponse, "3", Some(12)).degraded);
         // The same connection reporting again replaces its event.
-        assert!(!r.report(t, Signal::Closed, 3, Some(12)).degraded);
-        assert!(r.report(t, Signal::Closed, 4, Some(13)).degraded);
+        assert!(!r.report(t, Signal::Reset, "3", Some(12)).degraded);
+        assert!(r.report(t, Signal::Reset, "4", Some(13)).degraded);
     }
 
     #[test]
@@ -692,17 +746,17 @@ mod tests {
         assert_eq!(r.degraded().unwrap().reason, Signal::Reset);
         let until = r.degraded().unwrap().until;
         // Success on an old connection while degraded changes nothing.
-        r.success();
+        r.success(t);
         assert!(r.degraded().is_some());
         assert_eq!(r.probe_done(until, Verdict::Pass), Change::Readmitted);
         // Relapse: the second exclusion is twice as long.
         for d in 1..=3 {
-            r.report(until + S, Signal::Reset, d, None);
+            r.report(until + S, Signal::Reset, &d.to_string(), None);
         }
         assert_eq!(r.degraded().unwrap().until, until + S + 2 * BACKOFF_BASE);
         let until = r.degraded().unwrap().until;
         assert_eq!(r.probe_done(until, Verdict::Inconclusive), Change::Readmitted);
-        r.success();
+        r.success(t);
         r.probe_done(until + 10 * S, Verdict::Frozen);
         assert_eq!(
             r.degraded().unwrap().until,
@@ -716,7 +770,82 @@ mod tests {
         let t = Instant::now();
         let mut r = Record::default();
         r.probe_done(t, Verdict::Frozen);
-        assert_eq!(r.report(t, Signal::Reset, 1, None), Outcome::default());
+        assert_eq!(r.report(t, Signal::Reset, "1", None), Outcome::default());
+    }
+
+    #[test]
+    fn closes_alone_wait_for_a_probe() {
+        let t = Instant::now();
+        let mut r = Record::default();
+        let first = r.report(t, Signal::Closed, "a", Some(1));
+        assert!(first.probe);
+        r.probe_done(t, Verdict::Inconclusive);
+        assert_eq!(r.report(t + S, Signal::Closed, "b", Some(2)), Outcome::default());
+        let o = r.report(t + PROBE_COOLDOWN, Signal::Closed, "c", Some(3));
+        assert!(!o.degraded && o.confirm && !o.probe);
+        assert!(r.degraded().is_none());
+        assert_eq!(r.suspects(), ["a", "b", "c"]);
+        // One reset among the closes is still not three non-close failures.
+        assert!(!r.report(t + PROBE_COOLDOWN, Signal::Reset, "d", Some(4)).degraded);
+        assert!(r.degraded().is_none());
+    }
+
+    #[test]
+    fn close_burst_with_a_failing_probe_degrades() {
+        let t = Instant::now();
+        for v in [Verdict::Unreachable, Verdict::Reset, Verdict::Frozen] {
+            let mut r = Record::default();
+            assert!(r.report(t, Signal::Closed, "a", Some(1)).probe);
+            r.probe_done(t, Verdict::Inconclusive);
+            r.report(t + S, Signal::Closed, "b", Some(2));
+            assert!(r.report(t + PROBE_COOLDOWN, Signal::Closed, "c", Some(3)).confirm);
+            assert!(r.degraded().is_none());
+            assert_eq!(r.probe_done(t + PROBE_COOLDOWN + S, v), Change::Degraded, "{v:?}");
+            assert!(r.degraded().is_some());
+        }
+        // Unreachable degrades only when it answers a burst.
+        let mut r = Record::default();
+        assert!(r.begin_probe());
+        assert_eq!(r.probe_done(t, Verdict::Unreachable), Change::None);
+        assert!(r.degraded().is_none());
+    }
+
+    #[test]
+    fn close_burst_with_a_passing_probe_clears() {
+        let t = Instant::now();
+        let mut r = Record::default();
+        r.report(t, Signal::Closed, "a", Some(1));
+        r.probe_done(t, Verdict::Inconclusive);
+        r.report(t + S, Signal::Closed, "b", Some(2));
+        assert!(r.report(t + PROBE_COOLDOWN, Signal::Closed, "c", Some(3)).confirm);
+        assert_eq!(r.probe_done(t + PROBE_COOLDOWN, Verdict::Pass), Change::None);
+        assert!(r.suspects().is_empty());
+        // A later close starts from nothing.
+        let later = t + 2 * PROBE_COOLDOWN;
+        assert!(!r.report(later, Signal::Closed, "d", Some(4)).confirm);
+        assert!(r.degraded().is_none());
+    }
+
+    #[test]
+    fn closes_while_carrying_data_are_ignored() {
+        let t = Instant::now();
+        let mut r = Record::default();
+        r.report(t, Signal::Closed, "a", Some(1));
+        r.probe_done(t, Verdict::Inconclusive);
+        r.carrying(t + S);
+        assert!(r.suspects().is_empty(), "earlier closes are dropped too");
+        for (i, d) in ["b", "c", "d", "e"].into_iter().enumerate() {
+            let o = r.report(t + S * (i as u32 + 2), Signal::Closed, d, Some(i as u64 + 2));
+            assert!(o.ignored && !o.confirm && !o.probe && !o.degraded);
+        }
+        assert!(r.degraded().is_none());
+        // Other failures still count while it carries data.
+        assert!(!r.report(t + 2 * S, Signal::Reset, "x", None).ignored);
+        // A finished connection that moved PROOF_BYTES counts as carrying.
+        let mut r = Record::default();
+        r.success(t);
+        assert!(r.report(t + S, Signal::Closed, "a", Some(1)).ignored);
+        assert!(!r.report(t + WINDOW, Signal::Closed, "a", Some(1)).ignored);
     }
 
     #[test]
