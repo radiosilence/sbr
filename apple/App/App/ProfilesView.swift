@@ -10,6 +10,9 @@ struct ProfilesView: View {
     @State private var problem: String?
     @State private var showImporter = false
     @State private var showScanner = false
+    #if os(iOS)
+    @EnvironmentObject private var inbox: PairInbox
+    #endif
 
     var body: some View {
         ScrollView {
@@ -105,6 +108,9 @@ struct ProfilesView: View {
     private var add: some View {
         VStack(alignment: .leading, spacing: Theme.Space.s) {
             SectionHeader("add")
+            #if os(tvOS)
+            ReceiveFromPhone().padding(.bottom, Theme.Space.l)
+            #endif
             TextField("https://… or sing-box://import-remote-profile…", text: $link)
                 .font(.sbr(.control))
                 .textFieldStyle(.plain)
@@ -139,6 +145,14 @@ struct ProfilesView: View {
     }
 
     private func addLink() async {
+        #if os(iOS)
+        // A TV's code: send it a profile rather than adding one.
+        if let invite = Pairing.Invite(link) {
+            link = ""
+            inbox.invite = invite
+            return
+        }
+        #endif
         busy = true
         defer { busy = false }
         do {

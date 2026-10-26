@@ -35,7 +35,7 @@ struct WelcomeView: View {
                 Button("open a file") { showImporter = true }.sbrButton(.bordered)
                 #endif
                 #if os(tvOS)
-                Text("add one from the profiles tab.").font(.sbr(.meta)).foregroundStyle(Color.sbrMuted)
+                ReceiveFromPhone()
                 #endif
             }
             .disabled(busy)

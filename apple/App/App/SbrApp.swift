@@ -5,6 +5,9 @@ import SwiftUI
 struct SbrApp: App {
     @StateObject private var tunnel = TunnelModel()
     @StateObject private var profiles = ProfileStore()
+    #if os(iOS)
+    @StateObject private var inbox = PairInbox()
+    #endif
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
@@ -16,6 +19,10 @@ struct SbrApp: App {
             RootView()
                 .environmentObject(tunnel)
                 .environmentObject(profiles)
+                #if os(iOS)
+                .environmentObject(inbox)
+                .sheet(item: $inbox.invite) { SendToTVSheet(invite: $0).environmentObject(profiles) }
+                #endif
                 .task {
                     profiles.load()
                     await profiles.restore()
@@ -30,6 +37,12 @@ struct SbrApp: App {
                     Task { await tunnel.apply(config: profiles.activeText, remote: remote) }
                 }
                 .onOpenURL { url in
+                    #if os(iOS)
+                    if let invite = Pairing.Invite(url) {
+                        inbox.invite = invite
+                        return
+                    }
+                    #endif
                     guard let link = ProfileLink(url) else { return }
                     Task { await importLink(link) }
                 }

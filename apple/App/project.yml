@@ -73,6 +73,8 @@ targets:
           - CFBundleURLName: cc.blit.sbr.profile
             CFBundleURLSchemes: [sing-box, sbr]
         NSCameraUsageDescription: sbr uses the camera only to read a profile's QR code.
+        NSLocalNetworkUsageDescription: sbr uses your local network only to send a profile between your own devices, such as from your iPhone to your Apple TV.
+        NSBonjourServices: [_sbr-pair._tcp]
         SbrTunnelBundleIdentifier: $(SBR_BUNDLE_ID).tunnel
     settings:
       base:
