@@ -39,6 +39,8 @@ const MAX_MESSAGE: u64 = 2048;
 const MAX_PADDING: u64 = 4096;
 /// hysteria `DefaultStreamReceiveWindow` / `DefaultConnReceiveWindow`.
 const STREAM_WINDOW: u64 = 8 << 20;
+/// Connections dialed together; see [`Pool`].
+const STRIPES: usize = 2;
 const CONN_WINDOW: u64 = STREAM_WINDOW * 5 / 2;
 const KEEP_ALIVE: Duration = Duration::from_secs(10);
 /// hysteria `MbpsToBps`: megabits to bytes.
@@ -99,7 +101,9 @@ impl Hysteria2 {
         Ok(Self {
             tag,
             dialer,
-            pool: Pool::new(),
+            // Brutal paces each connection at the configured rate, so striping
+            // would multiply it.
+            pool: Pool::new(if c.up_mbps == 0 && c.down_mbps == 0 { STRIPES } else { 1 }),
             password: c.password.clone(),
             send_bps: u64::from(c.up_mbps) * MBPS,
             recv_bps: u64::from(c.down_mbps) * MBPS,
@@ -262,15 +266,16 @@ impl Outbound for Hysteria2 {
             return None;
         }
         Some(Box::pin(async move {
-            match self.pool.live() {
-                Some(s) => self.dialer.migrate(&s.endpoint, &s.conn).await,
-                None => true,
+            let mut ok = true;
+            for s in self.pool.live() {
+                ok &= self.dialer.migrate(&s.endpoint, &s.conn).await;
             }
+            ok
         }))
     }
 
     fn network_changed(&self) {
-        if let Some(s) = self.pool.live() {
+        for s in self.pool.live() {
             s.conn.close(0u32.into(), b"");
         }
     }

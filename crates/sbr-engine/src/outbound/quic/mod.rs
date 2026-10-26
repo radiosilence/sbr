@@ -1,9 +1,9 @@
 //! Shared QUIC plumbing for `hysteria2` and `tuic`.
 //!
-//! Each outbound keeps **one** QUIC connection ([`Pool`]) and multiplexes
-//! every TCP stream and UDP session over it. The connection is dialed on
-//! first use, replaced when it dies, and closed by its watcher task once it
-//! has carried nothing for `idle_timeout`. While closed it costs nothing:
+//! Each outbound keeps a small set of QUIC connections ([`Pool`]) and
+//! multiplexes every TCP stream and UDP session over them. They are dialed on
+//! first use, replaced once all have died, and each is closed by its watcher
+//! task once it has carried nothing for `idle_timeout`. While closed it costs nothing:
 //! no socket, no keep-alive, no timers. That matters more than the
 //! reconnect RTT on a phone.
 
@@ -327,42 +327,49 @@ pub(crate) trait Pooled: Send + Sync {
     fn usage(&self) -> &Arc<Usage>;
 }
 
-/// The outbound's one live connection, dialed on demand. Concurrent misses
+/// The outbound's live connections, dialed on demand. Concurrent misses
 /// share one dial.
+///
+/// A pool `width` wide dials that many connections at once and hands each
+/// new stream to the one carrying fewest. quinn runs a connection's packet
+/// protection, ACKs and congestion control on one task, so a single
+/// connection is bound to one core; striping lets bulk transfers use more.
 pub(crate) struct Pool<S> {
-    current: Mutex<Option<Arc<S>>>,
+    slots: Mutex<Vec<Arc<S>>>,
+    width: usize,
     dialing: tokio::sync::Mutex<()>,
 }
 
 impl<S: Pooled> Pool<S> {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(width: usize) -> Self {
         Self {
-            current: Mutex::new(None),
+            slots: Mutex::new(Vec::new()),
+            width: width.max(1),
             dialing: tokio::sync::Mutex::new(()),
         }
     }
 
     fn try_current(&self) -> Option<(Arc<S>, UseGuard)> {
-        let s = self.current.lock().unwrap().clone()?;
-        if s.conn().close_reason().is_some() {
-            return None;
-        }
-        let g = s.usage().acquire()?;
-        Some((s, g))
+        let mut slots = self.slots.lock().unwrap();
+        slots.retain(|s| s.conn().close_reason().is_none());
+        let mut order: Vec<_> = slots.iter().collect();
+        order.sort_by_key(|s| s.usage().users.load(Ordering::Acquire));
+        order.into_iter().find_map(|s| Some((s.clone(), s.usage().acquire()?)))
     }
 
-    /// The live connection, if any.
-    pub(crate) fn live(&self) -> Option<Arc<S>> {
-        self.current
-            .lock()
-            .unwrap()
-            .clone()
+    /// The live connections.
+    pub(crate) fn live(&self) -> Vec<Arc<S>> {
+        let slots = self.slots.lock().unwrap();
+        slots
+            .iter()
             .filter(|s| s.conn().close_reason().is_none())
+            .cloned()
+            .collect()
     }
 
     pub(crate) async fn get<F, Fut>(&self, dial: F) -> io::Result<(Arc<S>, UseGuard)>
     where
-        F: FnOnce() -> Fut,
+        F: Fn() -> Fut,
         Fut: Future<Output = io::Result<Arc<S>>>,
     {
         if let Some(hit) = self.try_current() {
@@ -372,12 +379,25 @@ impl<S: Pooled> Pool<S> {
         if let Some(hit) = self.try_current() {
             return Ok(hit);
         }
-        let s = dial().await?;
+        let mut first_err = None;
+        let mut fresh = Vec::with_capacity(self.width);
+        for r in futures_util::future::join_all((0..self.width).map(|_| dial())).await {
+            match r {
+                Ok(s) => fresh.push(s),
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        if fresh.is_empty() {
+            return Err(first_err.unwrap_or_else(|| io_err("QUIC dial failed")));
+        }
+        let s = fresh[0].clone();
         let g = s
             .usage()
             .acquire()
             .ok_or_else(|| io_err("fresh QUIC connection closed"))?;
-        *self.current.lock().unwrap() = Some(s.clone());
+        *self.slots.lock().unwrap() = fresh;
         Ok((s, g))
     }
 }

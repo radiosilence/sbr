@@ -127,7 +127,7 @@ impl Tuic {
         Ok(Self {
             tag,
             dialer,
-            pool: Pool::new(),
+            pool: Pool::new(1),
             uuid: c.uuid,
             password: c.password.clone(),
             cc: c.congestion_control,
