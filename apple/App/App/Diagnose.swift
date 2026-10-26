@@ -61,7 +61,7 @@ final class Diagnose: ObservableObject {
         await verdict(6) {
             // Without a real IPv6 address on the tun, the tunnel claims ::/0
             // only to drop it, so any IPv6 answer came by another route.
-            let v6 = plan?.ipv6Settings?.addresses.filter { !$0.hasPrefix("fdfe:dcba:9876:") } ?? []
+            let v6 = plan?.ipv6Settings?.addresses.filter { $0 != Sbr.unroutedIPv6Address } ?? []
             guard let t = try? await Self.trace(Self.trace6, timeout: 5) else {
                 return (true, "no ipv6 route, so none leaves outside the tunnel")
             }

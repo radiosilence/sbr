@@ -15,11 +15,26 @@ final class TunnelModel: ObservableObject {
     @Published var errorMessage: String?
     /// Why the tunnel last stopped without being asked to, from the system.
     @Published private(set) var lastStop: String?
-    /// "Block traffic outside the tunnel": `includeAllNetworks`. Applied the
-    /// next time the tunnel connects.
-    @Published var strict = UserDefaults.standard.bool(forKey: "strict") {
+    /// "Block traffic outside the tunnel": `Sbr.applyLeakProtection`. Follows
+    /// the profile's `strict_route` until the user sets it. Applied the next
+    /// time the tunnel connects.
+    var strict: Bool {
+        get { strictChoice ?? profileStrict }
+        set {
+            strictChoice = newValue
+            UserDefaults.standard.set(newValue, forKey: "strict")
+            Task { try? await self.install() }
+        }
+    }
+
+    @Published private var strictChoice = UserDefaults.standard.object(forKey: "strict") as? Bool
+    @Published private var profileStrict = false
+
+    /// Under `strict`, let traffic to the local network bypass the tunnel
+    /// (`excludeLocalNetworks`), for AirPlay, printers and LAN media servers.
+    @Published var allowLocalNetwork = UserDefaults.standard.bool(forKey: "allowLocalNetwork") {
         didSet {
-            UserDefaults.standard.set(strict, forKey: "strict")
+            UserDefaults.standard.set(allowLocalNetwork, forKey: "allowLocalNetwork")
             Task { try? await self.install() }
         }
     }
@@ -152,6 +167,7 @@ final class TunnelModel: ObservableObject {
         guard config != self.config || remote != self.remote else { return }
         self.config = config
         self.remote = remote
+        profileStrict = config.map(Sbr.strictRoute) ?? false
         guard manager != nil, config != nil else { return }
         do {
             try await install()
@@ -336,7 +352,7 @@ final class TunnelModel: ObservableObject {
         pc[SbrProviderKey.personalRules] = SbrPersonalRules.encode(rules)
         pc[SbrProviderKey.tunStack] = userspaceTCP ? "gvisor" : "system"
         proto.providerConfiguration = pc
-        Sbr.applyLeakProtection(to: proto, enabled: strict)
+        Sbr.applyLeakProtection(to: proto, enabled: strict, allowLocalNetwork: allowLocalNetwork)
         m.protocolConfiguration = proto
         m.localizedDescription = "sbr"
         m.isEnabled = true

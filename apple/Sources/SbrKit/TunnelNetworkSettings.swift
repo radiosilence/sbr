@@ -35,12 +35,13 @@ extension Sbr {
     /// enters the tunnel where `hijack-dns` answers it.
     ///
     /// With `auto_route` and no IPv6 address in the config, the tunnel still
-    /// claims `::/0` on a ULA address: the engine has no IPv6 stack for it, so
-    /// IPv6 flows fail (and clients fall back to IPv4 through the tunnel)
-    /// instead of leaving by the physical interface.
+    /// claims `::/0` on `unroutedIPv6Address`: the engine has no IPv6 address
+    /// to carry it on and refuses those flows, so clients fall back to IPv4
+    /// through the tunnel instead of leaving by the physical interface.
     ///
     /// `strict_route` has no per-route equivalent here; see
-    /// `Sbr.applyLeakProtection(to:)` for the provider-level switches.
+    /// `Sbr.applyLeakProtection(to:enabled:allowLocalNetwork:)` for the
+    /// provider-level switches.
     public static func tunnelNetworkSettings(
         config: String,
         tunnelRemoteAddress: String = "127.0.0.1"
@@ -74,10 +75,6 @@ extension Sbr {
                 NEIPv6Route(destinationAddress: $0.address, networkPrefixLength: NSNumber(value: $0.prefix))
             }
             settings.ipv6Settings = ip
-        } else if plan.auto_route {
-            let ip = NEIPv6Settings(addresses: ["fdfe:dcba:9876::1"], networkPrefixLengths: [126])
-            ip.includedRoutes = [.default()]
-            settings.ipv6Settings = ip
         }
         if !plan.dns_servers.isEmpty {
             let dns = NEDNSSettings(servers: plan.dns_servers)
@@ -88,18 +85,47 @@ extension Sbr {
         }
         return settings
     }
+
+    /// The tun address `tunnelNetworkSettings` uses for IPv6 the engine
+    /// does not carry (`UNROUTED_IPV6` in crates/sbr-apple/src/tun_settings.rs).
+    public static let unroutedIPv6Address = "fd73:6272::1"
+
+    /// The config's `tun` inbound sets `strict_route`. False when the config
+    /// has no tun inbound or doesn't parse.
+    public static func strictRoute(config: String) -> Bool {
+        var err: UnsafeMutablePointer<CChar>?
+        let json = takeString(sbr_tun_network_settings(config, &err))
+        _ = takeString(err)
+        guard let json, let plan = try? JSONDecoder().decode(TunNetworkPlan.self, from: Data(json.utf8)) else {
+            return false
+        }
+        return plan.strict_route
+    }
 }
 
 extension Sbr {
-    /// Route everything through the tunnel, including connections that
-    /// predate it, and refuse the "local network" exemption that TunnelCrack's
-    /// LocalNet attack abuses. Off by default until it's proven on devices:
-    /// some VPNs have seen their own extension's sockets stall under it.
-    public static func applyLeakProtection(to proto: NETunnelProviderProtocol, enabled: Bool) {
+    /// Leak protection, the NE form of sing-box's `strict_route`.
+    ///
+    /// `includeAllNetworks` sends everything through the tunnel, connections
+    /// opened before it came up included, and blocks traffic while the tunnel
+    /// is down. `excludeLocalNetworks` stays off unless `allowLocalNetwork`:
+    /// it exempts whatever the current network calls local, which is how
+    /// TunnelCrack's LocalNet attack takes public ranges out of the tunnel.
+    /// `enforceRoutes` makes the tunnel's routes win over more specific ones
+    /// the network pushes (DHCP option 121, TunnelVision).
+    ///
+    /// tvOS has only `enforceRoutes`. Off by default: it also breaks AirDrop,
+    /// CarPlay and other local traffic, and an app update with it on can leave
+    /// the device offline (see apple/README.md).
+    public static func applyLeakProtection(
+        to proto: NETunnelProviderProtocol,
+        enabled: Bool,
+        allowLocalNetwork: Bool = false
+    ) {
         #if !os(tvOS)
         proto.includeAllNetworks = enabled
-        proto.excludeLocalNetworks = false
-        proto.enforceRoutes = enabled
+        proto.excludeLocalNetworks = enabled && allowLocalNetwork
         #endif
+        proto.enforceRoutes = enabled
     }
 }

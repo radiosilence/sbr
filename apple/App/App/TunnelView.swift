@@ -30,16 +30,32 @@ struct TunnelView: View {
                 GroupSection(group: group, lookup: groupsByTag)
             }
         }
-        #if !os(tvOS)
         SectionHeader("protection")
         Toggle(isOn: $tunnel.strict) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("block traffic outside the tunnel").font(.sbr(.control))
-                Text("includes connections opened before connecting. while the tunnel is down nothing gets through, including app updates: turn this off before updating sbr. auto-connect below is the gentler option. takes effect on reconnect.")
+                #if os(tvOS)
+                Text("the tunnel's routes win over any the network pushes. devices on the local network are reached through the tunnel too, so streaming from a box at home stops unless the profile excludes its addresses. takes effect on reconnect.")
                     .font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
+                #else
+                Text("includes connections opened before connecting and the local network, so airdrop, carplay and lan devices stop working. while the tunnel is down nothing gets through, including app updates: turn this off before updating sbr. auto-connect below is the gentler option. takes effect on reconnect.")
+                    .font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
+                #endif
             }
         }
         .tint(.sbrAccent)
+        #if !os(tvOS)
+        if tunnel.strict {
+            Toggle(isOn: $tunnel.allowLocalNetwork) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("allow local network").font(.sbr(.control))
+                    Text("lan devices, airplay and printers bypass the tunnel. a hostile network can call public addresses local and take them out of the tunnel too.")
+                        .font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
+                }
+            }
+            .tint(.sbrAccent)
+            .padding(.top, Theme.Space.m)
+        }
         AutoConnectSection()
         #endif
     }
