@@ -777,6 +777,7 @@ pub unsafe extern "C" fn sbr_set_default_interface(name: *const c_char) {
     guard((), || {
         // SAFETY: NULL or valid per the contract.
         let name = unsafe { str_arg(name) }.filter(|n| !n.is_empty()).map(str::to_owned);
+        tracing::info!(interface = name.as_deref().unwrap_or("none"), "outbound sockets bound");
         sbr_engine::sbr_core::dial::set_default_interface(name);
     })
 }

@@ -373,6 +373,13 @@ impl Options {
         // the default outbound.
         outbounds.extend(endpoints);
 
+        if dns.is_none() && inbounds.iter().any(|i| matches!(i.kind, InboundKind::Tun(_))) {
+            diag.warnings.push(
+                "dns: missing with a tun inbound: server names and hijacked DNS queries go to the system resolver, \
+                 which on Apple platforms is the physical network's, outside the tunnel"
+                    .into(),
+            );
+        }
         let options = Options {
             log,
             inbounds,

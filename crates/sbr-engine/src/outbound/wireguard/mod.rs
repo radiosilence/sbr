@@ -13,7 +13,7 @@ mod device;
 mod stack;
 
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -60,9 +60,6 @@ impl Drop for WireGuard {
 
 impl WireGuard {
     pub fn new(tag: String, cfg: &WireGuardEndpoint, upstream: Upstream, dns: Arc<dyn Dns>) -> Result<Self, String> {
-        if cfg.listen_port != 0 && cfg.dial.bind_interface.is_some() {
-            return Err("`listen_port` together with `bind_interface` is not supported by sbr yet".into());
-        }
         if cfg.workers > 1 {
             debug!(
                 tag,
@@ -211,21 +208,12 @@ fn fill_random(buf: &mut [u8]) {
 /// The endpoint's UDP socket, with large kernel buffers: one socket carries
 /// every flow in the tunnel.
 fn bind(v6: bool, port: u16, opts: &DialOptions) -> io::Result<tokio::net::UdpSocket> {
-    let sock = if port == 0 {
-        let family: IpAddr = if v6 {
-            std::net::Ipv6Addr::UNSPECIFIED.into()
-        } else {
-            std::net::Ipv4Addr::UNSPECIFIED.into()
-        };
-        dial::bind_udp(family, opts)?.into_std()?
+    let family: IpAddr = if v6 {
+        std::net::Ipv6Addr::UNSPECIFIED.into()
     } else {
-        let addr: SocketAddr = if v6 {
-            (std::net::Ipv6Addr::UNSPECIFIED, port).into()
-        } else {
-            (std::net::Ipv4Addr::UNSPECIFIED, port).into()
-        };
-        std::net::UdpSocket::bind(addr)?
+        std::net::Ipv4Addr::UNSPECIFIED.into()
     };
+    let sock = dial::bind_udp_port(family, port, opts)?.into_std()?;
     let s2 = socket2::SockRef::from(&sock);
     if v6 {
         let _ = s2.set_only_v6(false);
