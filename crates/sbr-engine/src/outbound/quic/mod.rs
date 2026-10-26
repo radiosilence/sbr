@@ -57,11 +57,7 @@ pub(crate) struct Tuning {
 /// the protocols' defaults (up to 20 MiB) put a speed test over the iOS
 /// Network Extension's ~50 MB jetsam limit. 4 MiB still covers 1 Gbit/s at
 /// 30 ms.
-const MOBILE_WINDOW_CAP: u64 = if cfg!(any(target_os = "ios", target_os = "tvos", target_os = "visionos")) {
-    4 << 20
-} else {
-    u64::MAX
-};
+const MOBILE_WINDOW_CAP: u64 = if crate::MOBILE { 4 << 20 } else { u64::MAX };
 
 pub(crate) fn transport(q: &QuicOptions, d: Tuning, cc: Arc<dyn ControllerFactory + Send + Sync>) -> TransportConfig {
     let mut t = TransportConfig::default();
@@ -442,10 +438,15 @@ struct Partial {
     id: u16,
     parts: Vec<Option<Bytes>>,
     have: usize,
+    size: usize,
     dest: Option<Destination>,
 }
 
 const MAX_PARTIAL: usize = 4;
+/// Largest reassembled packet: a UDP payload never exceeds this, and without
+/// a cap 255 fragments of a jumbo-sized path could each pin a partial packet
+/// hundreds of kilobytes long.
+const MAX_PACKET: usize = 65_535;
 
 impl Defrag {
     /// `dest` may be absent on later fragments (TUIC).
@@ -476,6 +477,7 @@ impl Defrag {
                     id,
                     parts: vec![None; usize::from(total)],
                     have: 0,
+                    size: 0,
                     dest: None,
                 });
                 self.partial.len() - 1
@@ -483,6 +485,11 @@ impl Defrag {
         };
         let p = &mut self.partial[pos];
         if p.parts[usize::from(index)].is_some() {
+            return None;
+        }
+        p.size += data.len();
+        if p.size > MAX_PACKET {
+            self.partial.remove(pos);
             return None;
         }
         p.parts[usize::from(index)] = Some(data);
@@ -494,7 +501,7 @@ impl Defrag {
             return None;
         }
         let p = self.partial.remove(pos);
-        let mut out = BytesMut::with_capacity(p.parts.iter().flatten().map(Bytes::len).sum());
+        let mut out = BytesMut::with_capacity(p.size);
         for part in p.parts.iter().flatten() {
             out.extend_from_slice(part);
         }
@@ -583,5 +590,19 @@ mod tests {
         }
         assert!(f.partial.len() <= MAX_PARTIAL);
         assert_eq!(parse_host_port("[::1]:53").unwrap().to_string(), "[::1]:53");
+    }
+
+    #[test]
+    fn defrag_drops_packets_over_the_size_cap() {
+        let d = || Some(Destination::from_host_port("1.2.3.4", 5));
+        let mut f = Defrag::default();
+        let part = Bytes::from(vec![0u8; 1400]);
+        // Fragments up to one more than fits under the cap.
+        let fit = MAX_PACKET / part.len();
+        let total = (fit + 2) as u8;
+        for i in 0..=fit as u8 {
+            assert!(f.feed(1, i, total, d(), part.clone()).is_none());
+        }
+        assert!(f.partial.is_empty(), "the oversized packet is discarded");
     }
 }

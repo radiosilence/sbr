@@ -864,7 +864,7 @@ async fn download_ui(api: &ApiState) -> Result<usize, String> {
     let u = Url::parse(url).ok_or("invalid external_ui_download_url")?;
     let resp = e
         .http
-        .get(via.as_ref(), &u, &[], 128 << 20)
+        .get(via.as_ref(), &u, &[], ui::MAX_DOWNLOAD)
         .await
         .map_err(|e| e.to_string())?;
     // Extract next to the target, then swap, so a bad archive leaves the old UI.

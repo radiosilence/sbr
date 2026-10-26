@@ -41,6 +41,12 @@ const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(10);
 /// quic-go's maximum receive windows (it auto-tunes up to these).
 const STREAM_WINDOW: u64 = 6 << 20;
 const CONN_WINDOW: u64 = 15 << 20;
+/// Server-opened unidirectional streams in flight under `udp_relay: quic`,
+/// one UDP packet each.
+const UNI_STREAMS: u32 = if crate::MOBILE { 64 } else { 1024 };
+/// How long a server-opened stream may take to deliver its packet before it
+/// is dropped, freeing its slot and buffer.
+const UNI_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const UOT_MAGIC: &str = "sp.v2.udp-over-tcp.arpa";
 
 pub struct Tuic {
@@ -151,7 +157,11 @@ impl Tuic {
                 stream_window: STREAM_WINDOW,
                 conn_window: CONN_WINDOW,
                 keep_alive: None,
-                incoming_uni: if self.relay == TuicUdpRelay::Quic { 1024 } else { 16 },
+                incoming_uni: if self.relay == TuicUdpRelay::Quic {
+                    UNI_STREAMS
+                } else {
+                    16
+                },
             },
             cc,
         );
@@ -274,7 +284,7 @@ async fn recv_uni(conn: Connection, sessions: Arc<Sessions<u16>>) {
     while let Ok(mut s) = conn.accept_uni().await {
         let sessions = sessions.clone();
         tokio::spawn(async move {
-            if let Ok(msg) = s.read_to_end(u16::MAX as usize + 512).await {
+            if let Ok(Ok(msg)) = tokio::time::timeout(UNI_READ_TIMEOUT, s.read_to_end(u16::MAX as usize + 512)).await {
                 deliver(&sessions, &Bytes::from(msg));
             }
         });

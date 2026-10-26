@@ -37,6 +37,10 @@ const MAX_QUEUED_BYTES: usize = 4 << 20;
 /// task and upstream state until its timeout, so a flood of distinct names
 /// against a stalled upstream must not grow without bound.
 const MAX_DNS_INFLIGHT: usize = 128;
+/// Each session's reply buffer; a longer reply is truncated. Where memory is
+/// capped (the iOS extension), 512 sessions of 64 KiB would take 32 MiB, so
+/// it covers sing-box's default TUN MTU (9000) and EDNS answers instead.
+const READ_BUFFER: usize = if crate::MOBILE { 16 * 1024 } else { 65535 };
 
 /// How a packet inbound delivers datagrams back to its client.
 pub trait UdpWriteBack: Send + Sync + 'static {
@@ -341,7 +345,7 @@ impl Engine {
                     let (conn, back, last) = (conn.clone(), back.clone(), last.clone());
                     let tracked = reg.conn.clone();
                     tokio::spawn(async move {
-                        let mut buf = vec![0u8; 65535];
+                        let mut buf = vec![0u8; READ_BUFFER];
                         loop {
                             let (n, from) = match conn.recv_from(&mut buf).await {
                                 Ok(r) => r,

@@ -5,6 +5,12 @@
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
+/// The archive and each file in it are held in memory whole. Dashboards are
+/// a few megabytes; the smaller caps keep a hostile or mistaken URL from
+/// pushing the iOS extension (~50 MB) into jetsam.
+pub const MAX_DOWNLOAD: usize = if crate::MOBILE { 16 << 20 } else { 128 << 20 };
+const MAX_ENTRY: u64 = if crate::MOBILE { 16 << 20 } else { 256 << 20 };
+
 /// Pick the content type the browser needs to run the dashboard.
 pub fn content_type(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
@@ -119,8 +125,11 @@ pub fn extract_zip(zip: &[u8], out: &Path) -> io::Result<usize> {
             8 => {
                 let mut v = Vec::new();
                 flate2::read::DeflateDecoder::new(data)
-                    .take(256 << 20)
+                    .take(MAX_ENTRY + 1)
                     .read_to_end(&mut v)?;
+                if v.len() as u64 > MAX_ENTRY {
+                    return Err(bad("entry too large"));
+                }
                 v
             }
             m => return Err(bad(&format!("unsupported compression method {m}"))),
