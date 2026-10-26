@@ -10,6 +10,7 @@
 //!   UDP-over-TCP v2 inside a TCP stream. `5 3 assoc` dissociates.
 //! - Heartbeat: datagram `5 4`, only while the connection has users.
 
+use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -274,6 +275,21 @@ fn deliver(sessions: &Sessions<u16>, msg: &Bytes) {
     }
 }
 
+/// The next association ID no live session holds, or `None` when all 65,536
+/// are taken. The counter wraps, and reusing a live ID would hand that
+/// session's replies to the new one.
+fn free_assoc_id(next: &AtomicU16, live: &HashMap<u16, SessionEntry>) -> Option<u16> {
+    if live.len() > usize::from(u16::MAX) {
+        return None;
+    }
+    loop {
+        let id = next.fetch_add(1, Ordering::Relaxed);
+        if !live.contains_key(&id) {
+            return Some(id);
+        }
+    }
+}
+
 async fn recv_datagrams(conn: Connection, sessions: Arc<Sessions<u16>>) {
     while let Ok(d) = conn.read_datagram().await {
         deliver(&sessions, &d);
@@ -333,15 +349,20 @@ impl Outbound for Tuic {
                 }) as BoxPacketConn);
             }
             let (s, guard) = self.pool.get(|| self.dial()).await?;
-            let id = s.next_udp.fetch_add(1, Ordering::Relaxed);
             let (tx, rx) = mpsc::channel(UDP_QUEUE);
-            s.udp.map.lock().unwrap().insert(
-                id,
-                SessionEntry {
-                    tx,
-                    defrag: Default::default(),
-                },
-            );
+            let id = {
+                let mut map = s.udp.map.lock().unwrap();
+                let id = free_assoc_id(&s.next_udp, &map)
+                    .ok_or_else(|| io_err("tuic: every UDP association ID is in use"))?;
+                map.insert(
+                    id,
+                    SessionEntry {
+                        tx,
+                        defrag: Default::default(),
+                    },
+                );
+                id
+            };
             Ok(Box::new(TuicUdp {
                 session: s,
                 id,
@@ -593,6 +614,20 @@ impl PacketConn for Uot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assoc_ids_skip_live_sessions() {
+        let entry = || SessionEntry {
+            tx: mpsc::channel(1).0,
+            defrag: Default::default(),
+        };
+        let mut live: HashMap<u16, SessionEntry> = [u16::MAX, 0, 1, 3].into_iter().map(|id| (id, entry())).collect();
+        let next = AtomicU16::new(u16::MAX);
+        assert_eq!(free_assoc_id(&next, &live), Some(2), "wraps past the live IDs");
+        assert_eq!(free_assoc_id(&next, &live), Some(4));
+        live.extend((0..=u16::MAX).map(|id| (id, entry())));
+        assert_eq!(free_assoc_id(&next, &live), None);
+    }
 
     #[test]
     fn addresses_roundtrip() {
