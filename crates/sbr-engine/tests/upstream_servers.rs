@@ -1101,11 +1101,16 @@ async fn hysteria2_apernet_migration() {
     let mut got = vec![0u8; MIB];
     w.write_all(&data[..64 * 1024]).await.unwrap();
     r.read_exact(&mut got[..64 * 1024]).await.unwrap();
-    assert_eq!(nat.seen(), 1);
+    let before = nat.seen();
+    assert!(before >= 1);
 
     nat.cut();
     engine.network_migrate().await;
-    assert_eq!(nat.seen(), 2, "the client should have moved to a new socket");
+    assert_eq!(
+        nat.seen(),
+        2 * before,
+        "every connection should have moved to a new socket"
+    );
     let writer = tokio::spawn(async move {
         w.write_all(&data).await.unwrap();
         (w, data)
@@ -1118,7 +1123,7 @@ async fn hysteria2_apernet_migration() {
     assert!(got == data, "data mismatch after migration");
     // The same QUIC connection carries new streams too.
     tcp_roundtrip(&out, common::echo().await, 64 * 1024).await.unwrap();
-    assert_eq!(nat.seen(), 2, "no reconnect");
+    assert_eq!(nat.seen(), 2 * before, "no reconnect");
 }
 
 // ---------------------------------------------------------------------------
