@@ -16,7 +16,7 @@
 <body>
 <header class="top"><div class="wrap">
 <a class="mark" href="/"><img src="/icon-96.png" alt="" width="24" height="24">sbr</a>
-<nav><a href="/features/">features</a><a href="/benchmarks/">benchmarks</a><a href="/censorship/">censorship</a><a href="/privacy/" aria-current="page">privacy</a><a href="https://github.com/radiosilence/sbr">github</a></nav>
+<nav><a href="/features/">features</a><a href="/benchmarks/">benchmarks</a><a href="/censorship/">censorship</a><a href="/compare/">compare</a><a href="/privacy/" aria-current="page">privacy</a><a href="https://github.com/radiosilence/sbr">github</a></nav>
 </div></header>
 
 <main class="wrap">
@@ -35,7 +35,8 @@
 <li>the proxy servers, DNS servers, rule-set URLs and test URLs the profile lists.</li>
 </ul>
 <p>While the tunnel is connected, other apps' traffic passes through it and goes where the profile's rules send it. Those servers are chosen by you or by whoever gave you the profile, and their operators' own policies apply to that traffic.</p>
-<p>There is one exception, which runs only when you start it: the diagnose checks in the logs tab fetch <code>https://www.gstatic.com/generate_204</code>, <code>https://www.google.com/</code> and a 10 MB test file from <code>https://speed.cloudflare.com</code>, through the tunnel, to test it. These requests send no cookies and an empty User-Agent.</p>
+<p>There is one exception, which runs only when you start it: the diagnose checks in the logs tab fetch <code>https://www.gstatic.com/generate_204</code>, <code>https://www.google.com/</code> and a 10 MB test file from <code>https://speed.cloudflare.com</code>, through the tunnel, to test it. While the tunnel is connected they also fetch <code>https://speed.cloudflare.com/cdn-cgi/trace</code> and the same page from <code>https://[2606:4700:4700::1111]</code> (Cloudflare's 1.1.1.1 over IPv6), which reply with the address and country the request arrived from, to show your exit address and whether IPv6 leaves outside the tunnel. These requests send no cookies and an empty User-Agent.</p>
+<p>On iPhone and iPad the app uses the camera only while you scan a profile's QR code. The image is read on the device and is not stored or sent anywhere.</p>
 
 <h2>what stays on your device</h2>
 <p>Your profiles, the routing rules you add, the Wi-Fi networks you mark as trusted and the app's settings are stored on the device, in the app's own storage. Logs stay on the device: the tunnel writes to the system log, where connection destinations are marked private, and the app keeps a record of crashes and a periodic memory reading so it can explain why the tunnel stopped. None of this is uploaded. Deleting the app deletes it.</p>

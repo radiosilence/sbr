@@ -1,4 +1,5 @@
 import Foundation
+import SbrKit
 import SwiftUI
 
 /// End-to-end checks run from the app, so their traffic takes the same path
@@ -20,17 +21,113 @@ final class Diagnose: ObservableObject {
     private static let probe = URL(string: "https://www.gstatic.com/generate_204")!
     private static let page = URL(string: "https://www.google.com/")!
     private static let bulk = URL(string: "https://speed.cloudflare.com/__down?bytes=10000000")!
+    /// Cloudflare's plain-text trace: the address and country a request
+    /// arrived from. The bulk test already uses this host.
+    private static let trace = URL(string: "https://speed.cloudflare.com/cdn-cgi/trace")!
+    /// The same trace on an IPv6 literal (1.1.1.1's certificate covers it),
+    /// so the request has no IPv4 path to fall back to.
+    private static let trace6 = URL(string: "https://[2606:4700:4700::1111]/cdn-cgi/trace")!
 
-    func run() async {
+    /// `config` is the active profile, whose tun inbound says where DNS and
+    /// IPv6 should go. The leak checks run only while connected.
+    func run(connected: Bool, config: String?) async {
         running = true
         defer { running = false }
-        checks = ["dns", "tcp", "quic", "bulk 10 MB (speed.cloudflare.com)"].map { Check(id: $0) }
+        let names = ["dns", "tcp", "quic", "bulk 10 MB (speed.cloudflare.com)"]
+        let leaks = ["exit ip (speed.cloudflare.com)", "dns via tunnel", "ipv6 (1.1.1.1)", "webrtc"]
+        checks = (names + (connected ? leaks : [])).map { Check(id: $0) }
         await check(0) { try await Self.dns("www.google.com") }
         await check(1) { try await Self.fetch(Self.probe, http3: false) }
         // A Vision path refuses QUIC on purpose, and URLSession races TCP, so
         // TCP here is a note, not a failure.
         await check(2, note: { !$0.hasPrefix("h3") }) { try await Self.fetch(Self.page, http3: true) }
         await check(3) { try await Self.fetch(Self.bulk, http3: false, timeout: 30) }
+        guard connected else { return }
+
+        let plan = config.flatMap { try? Sbr.tunnelNetworkSettings(config: $0) }
+        await check(4) {
+            let t = try await Self.trace(Self.trace)
+            return "\(t.ip) · \(t.loc.lowercased())"
+        }
+        await verdict(5) { try await Self.dnsLeak(expected: plan?.dnsSettings?.servers ?? []) }
+        await verdict(6) {
+            // Without a real IPv6 address on the tun, the tunnel claims ::/0
+            // only to drop it, so any IPv6 answer came by another route.
+            let v6 = plan?.ipv6Settings?.addresses.filter { !$0.hasPrefix("fdfe:dcba:9876:") } ?? []
+            guard let t = try? await Self.trace(Self.trace6, timeout: 5) else {
+                return (true, "no ipv6 route, so none leaves outside the tunnel")
+            }
+            return v6.isEmpty
+                ? (false, "reached the internet outside the tunnel as \(t.ip)")
+                : (true, "via the tunnel as \(t.ip)")
+        }
+        let routesAll = plan?.ipv4Settings?.includedRoutes?.contains { $0.destinationAddress == "0.0.0.0" } ?? false
+        checks[7].ok = nil
+        checks[7].detail = routesAll
+            ? "not testable in the app. all traffic is routed through the tunnel, so browsers' webrtc is too"
+            : "the profile routes only some addresses through the tunnel, so webrtc may bypass it"
+    }
+
+    /// A check that reports a verdict and a plain explanation rather than a
+    /// timing.
+    private func verdict(_ i: Int, _ body: () async throws -> (Bool, String)) async {
+        do {
+            let (ok, detail) = try await body()
+            checks[i].ok = ok
+            checks[i].detail = detail
+        } catch {
+            checks[i].ok = false
+            checks[i].detail = error.localizedDescription.lowercased()
+        }
+    }
+
+    private static func trace(_ url: URL, timeout: TimeInterval = 10) async throws -> (ip: String, loc: String) {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = timeout
+        config.httpAdditionalHeaders = ["User-Agent": ""]
+        let session = URLSession(configuration: config)
+        defer { session.finishTasksAndInvalidate() }
+        let (data, _) = try await session.data(from: url)
+        var fields: [String: String] = [:]
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+            let kv = line.split(separator: "=", maxSplits: 1)
+            if kv.count == 2 { fields[String(kv[0])] = String(kv[1]) }
+        }
+        guard let ip = fields["ip"] else { throw SbrDiagnoseError("unexpected reply") }
+        return (ip, fields["loc"] ?? "?")
+    }
+
+    /// The system resolver should be the address the tunnel gave it, and a
+    /// lookup through it should work.
+    private static func dnsLeak(expected: [String]) async throws -> (Bool, String) {
+        guard let want = expected.first else { throw SbrDiagnoseError("the profile's tun inbound sets no dns address") }
+        guard let first = resolvers().first else { throw SbrDiagnoseError("no system resolver") }
+        guard expected.contains(first) else {
+            return (false, "the system asks \(first), not the tunnel's \(want)")
+        }
+        _ = try await dns("example.com")
+        return (true, "the system asks the tunnel's \(first), and lookups work")
+    }
+
+    /// The system's DNS servers, in order, as libresolv reports them.
+    private static func resolvers() -> [String] {
+        let state = UnsafeMutablePointer<__res_9_state>.allocate(capacity: 1)
+        defer { state.deallocate() }
+        memset(state, 0, MemoryLayout<__res_9_state>.size)
+        guard res_9_ninit(state) == 0 else { return [] }
+        defer { res_9_ndestroy(state) }
+        var servers = [res_9_sockaddr_union](repeating: res_9_sockaddr_union(), count: 8)
+        let n = Int(res_9_getservers(state, &servers, Int32(servers.count)))
+        return servers.prefix(max(n, 0)).map { server in
+            var s = server
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            withUnsafePointer(to: &s) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    _ = getnameinfo($0, socklen_t($0.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+                }
+            }
+            return String(cString: host)
+        }
     }
 
     private func check(_ i: Int, note: (String) -> Bool = { _ in false }, _ body: () async throws -> String) async {
@@ -107,6 +204,8 @@ struct SbrDiagnoseError: LocalizedError {
 /// The diagnose block on the logs tab.
 struct DiagnoseSection: View {
     @StateObject private var model = Diagnose()
+    @EnvironmentObject private var tunnel: TunnelModel
+    @EnvironmentObject private var profiles: ProfileStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -114,8 +213,15 @@ struct DiagnoseSection: View {
                 if model.running {
                     Text("running").font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
                 } else {
-                    Button("run") { Task { await model.run() } }.sbrButton(.text)
+                    Button("run") {
+                        Task { await model.run(connected: tunnel.isConnected, config: profiles.activeText) }
+                    }
+                    .sbrButton(.text)
                 }
+            }
+            if !model.checks.isEmpty, !model.checks.contains(where: { $0.id == "webrtc" }) {
+                Text("connect to also test for address, dns and ipv6 leaks.")
+                    .font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
             }
             ForEach(model.checks) { c in
                 HStack(alignment: .firstTextBaseline, spacing: Theme.Space.m) {
@@ -124,7 +230,7 @@ struct DiagnoseSection: View {
                         .frame(width: 32, alignment: .leading)
                     Text(c.id).foregroundStyle(Color.sbrInk)
                     Spacer()
-                    Text(c.detail).foregroundStyle(Color.sbrMuted).lineLimit(2).multilineTextAlignment(.trailing)
+                    Text(c.detail).foregroundStyle(Color.sbrMuted).lineLimit(3).multilineTextAlignment(.trailing)
                 }
                 .font(.sbr(.fine))
                 .padding(.vertical, Theme.Space.s)

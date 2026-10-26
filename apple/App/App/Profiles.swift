@@ -103,6 +103,25 @@ final class ProfileStore: ObservableObject {
         return profile
     }
 
+    /// A pasted, scanned or typed link: `sing-box://`, `sbr://` or https.
+    @discardableResult
+    func add(link raw: String) async throws -> Profile {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), let link = ProfileLink(url) else {
+            throw SbrError("that isn't a profile link. it should start with https://, sing-box:// or sbr://")
+        }
+        return try await add(remote: link.url, name: link.name)
+    }
+
+    /// A profile file picked with the system file importer.
+    @discardableResult
+    func add(file url: URL) throws -> Profile {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let text = try String(contentsOf: url, encoding: .utf8)
+        return try add(text: text, name: url.deletingPathExtension().lastPathComponent)
+    }
+
     @discardableResult
     func add(text: String, name: String) throws -> Profile {
         let profile = Profile(name: name)
@@ -192,7 +211,7 @@ final class ProfileStore: ObservableObject {
 
     private func write(_ profile: Profile, text: String) throws {
         guard let dir, let url = file(profile.id) else { throw SbrError("no storage directory") }
-        if let problem = Sbr.check(config: text) { throw SbrError(problem) }
+        if let problem = Sbr.check(config: text) { throw SbrError("this profile can't be used: \(problem)") }
         try Self.prepare(dir)
         try Data(text.utf8).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         if let i = profiles.firstIndex(where: { $0.id == profile.id }) {

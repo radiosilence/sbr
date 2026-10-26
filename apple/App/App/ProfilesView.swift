@@ -9,6 +9,7 @@ struct ProfilesView: View {
     @State private var busy = false
     @State private var problem: String?
     @State private var showImporter = false
+    @State private var showScanner = false
 
     var body: some View {
         ScrollView {
@@ -31,7 +32,12 @@ struct ProfilesView: View {
         }
         #if !os(tvOS)
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.json, .plainText]) { result in
-            Task { await importFile(result) }
+            importFile(result)
+        }
+        #endif
+        #if os(iOS)
+        .sheet(isPresented: $showScanner) {
+            ScanSheet { link = $0; Task { await addLink() } }
         }
         #endif
     }
@@ -116,10 +122,11 @@ struct ProfilesView: View {
                     .disabled(busy || link.isEmpty)
                 #if os(iOS)
                 Button("paste") {
-                    link = UIPasteboard.general.string ?? ""
+                    link = Pasteboard.string ?? ""
                     Task { await addLink() }
                 }
                 .sbrButton(.bordered)
+                Button("scan qr") { showScanner = true }.sbrButton(.bordered)
                 #endif
                 #if !os(tvOS)
                 Button("file") { showImporter = true }.sbrButton(.bordered)
@@ -132,15 +139,10 @@ struct ProfilesView: View {
     }
 
     private func addLink() async {
-        let trimmed = link.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmed), let parsed = ProfileLink(url) else {
-            problem = "not a profile link"
-            return
-        }
         busy = true
         defer { busy = false }
         do {
-            try await profiles.add(remote: parsed.url, name: parsed.name)
+            try await profiles.add(link: link)
             link = ""
             problem = nil
         } catch {
@@ -164,13 +166,9 @@ struct ProfilesView: View {
         }
     }
 
-    private func importFile(_ result: Result<URL, Error>) async {
+    private func importFile(_ result: Result<URL, Error>) {
         do {
-            let url = try result.get()
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            let text = try String(contentsOf: url, encoding: .utf8)
-            try profiles.add(text: text, name: url.deletingPathExtension().lastPathComponent)
+            try profiles.add(file: result.get())
             problem = nil
         } catch {
             problem = error.localizedDescription

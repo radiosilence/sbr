@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>compare · sbr</title>
+<meta name="description" content="sbr, sing-box and Outline side by side: setup, protocols, blocking resistance, failover, privacy, iOS memory, platforms, licence and maturity.">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#1e1e1e" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<link rel="icon" href="/icon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="preload" href="/geist-mono.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top"><div class="wrap">
+<a class="mark" href="/"><img src="/icon-96.png" alt="" width="24" height="24">sbr</a>
+<nav><a href="/features/">features</a><a href="/benchmarks/">benchmarks</a><a href="/censorship/">censorship</a><a href="/compare/" aria-current="page">compare</a><a href="/privacy/">privacy</a><a href="https://github.com/radiosilence/sbr">github</a></nav>
+</div></header>
+
+<main class="wrap">
+<h1>compare</h1>
+<p class="lede">sbr runs sing-box configs, so sing-box is the closest comparison. Outline is included because it is what many people are given first. sbr is new and in beta; the other two have years of use behind them.</p>
+
+<div class="scroll"><table>
+<tr><th></th><th>sbr</th><th>sing-box</th><th>Outline</th></tr>
+<tr><td>setup</td><td>A sing-box profile: a link, a QR code or a JSON file. Profiles are validated when they are added.</td><td>A JSON config, or a remote-profile link in the graphical clients.</td><td>An access key (<code>ss://</code> or <code>ssconf://</code>) from an Outline server, which Outline Manager sets up.</td></tr>
+<tr><td>protocols</td><td>VLESS (Vision, REALITY), hysteria2, trojan, VMess, Shadowsocks, TUIC, WireGuard, AnyTLS, ShadowTLS, XHTTP; ws, httpupgrade, grpc and http transports.</td><td>All of sbr's except XHTTP, plus others such as Naive, Tor and SSH.</td><td>Shadowsocks, optionally over WebSocket.</td></tr>
+<tr><td>blocking resistance</td><td>REALITY and TLS-camouflaged protocols; ClientHello fragmented automatically when a handshake is reset; failover that detects post-handshake blocking.</td><td>REALITY and TLS-camouflaged protocols; fragmentation set by hand.</td><td>Shadowsocks with configurable prefixes to resemble other protocols; one server per key.</td></tr>
+<tr><td>tls fingerprints</td><td>Chrome 155, Safari and Firefox 148 ClientHellos, captured from the browsers; sent by default.</td><td>uTLS, opt-in; <code>chrome</code> is still Chrome 133.</td><td>Not applicable to plain Shadowsocks.</td></tr>
+<tr><td>failover</td><td><code>urltest</code> plus a data probe and passive detection of stalls and resets; blocked members are skipped with backoff.</td><td><code>urltest</code> on handshake latency.</td><td>None in the client.</td></tr>
+<tr><td>third-party calls</td><td>None; only what the profile names. The app's diagnose checks, started by hand, are the exception (<a href="/privacy/">privacy</a>).</td><td>Defaults to gstatic.com for latency tests and GitHub for the dashboard when the config leaves them unset.</td><td>No account; the client and server are covered by the privacy policy at <a href="https://getoutline.org/">getoutline.org</a>.</td></tr>
+<tr><td>ios memory</td><td>Rust, no garbage collector; about 32 KB per relayed connection, buffers capped at 8 MiB in total inside the ~50 MB extension limit.</td><td>Go runtime in the extension; large rule-sets need tuning to stay under the limit.</td><td>Go runtime in the extension; a small feature set keeps it under the limit.</td></tr>
+<tr><td>platforms</td><td>iPhone and iPad (TestFlight), Mac and Apple TV (from source), CLI on macOS and Linux.</td><td>Android, iOS, macOS, tvOS, Windows, Linux.</td><td>Android, iOS, macOS, Windows, Linux, ChromeOS.</td></tr>
+<tr><td>licence</td><td>MIT or Apache-2.0.</td><td>GPL-3.0-or-later.</td><td>Apache-2.0.</td></tr>
+<tr><td>maturity</td><td>New and in beta. Tested against sing-box, Xray and hysteria servers, but with few users so far.</td><td>Widely deployed since 2022.</td><td>Developed by Jigsaw since 2018; widely deployed.</td></tr>
+</table></div>
+
+<p>Corrections are welcome as an <a href="https://github.com/radiosilence/sbr/issues">issue on GitHub</a>.</p>
+</main>
+
+<footer><div class="wrap">
+<span>sbr</span>
+<span><a href="/privacy/">privacy</a> · <a href="https://github.com/radiosilence/sbr">github</a></span>
+</div></footer>
+</body>
+</html>

@@ -8,25 +8,11 @@ struct TunnelView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                header
-                if tunnel.isConnected {
-                    rates
-                    ForEach(shownGroups) { group in
-                        GroupSection(group: group, lookup: groupsByTag)
-                    }
+                if profiles.profiles.isEmpty {
+                    WelcomeView()
+                } else {
+                    main
                 }
-                #if !os(tvOS)
-                SectionHeader("protection")
-                Toggle(isOn: $tunnel.strict) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("block traffic outside the tunnel").font(.sbr(.control))
-                        Text("includes connections opened before connecting. takes effect on reconnect.")
-                            .font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
-                    }
-                }
-                .tint(.sbrAccent)
-                AutoConnectSection()
-                #endif
             }
             .padding(.horizontal, Theme.Space.xl)
             .padding(.bottom, Theme.Space.xxl)
@@ -34,6 +20,28 @@ struct TunnelView: View {
         // Groups, latency and traffic come from the tunnel, polled only while
         // this tab is on screen.
         .task { await tunnel.poll() }
+    }
+
+    @ViewBuilder private var main: some View {
+        header
+        if tunnel.isConnected {
+            rates
+            ForEach(shownGroups) { group in
+                GroupSection(group: group, lookup: groupsByTag)
+            }
+        }
+        #if !os(tvOS)
+        SectionHeader("protection")
+        Toggle(isOn: $tunnel.strict) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("block traffic outside the tunnel").font(.sbr(.control))
+                Text("includes connections opened before connecting. takes effect on reconnect.")
+                    .font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
+            }
+        }
+        .tint(.sbrAccent)
+        AutoConnectSection()
+        #endif
     }
 
     private var header: some View {

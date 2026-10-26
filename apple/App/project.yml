@@ -72,11 +72,14 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: cc.blit.sbr.profile
             CFBundleURLSchemes: [sing-box, sbr]
+        NSCameraUsageDescription: sbr uses the camera only to read a profile's QR code.
         SbrTunnelBundleIdentifier: $(SBR_BUNDLE_ID).tunnel
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID)
         PRODUCT_NAME: sbr
+        SWIFT_OBJC_BRIDGING_HEADER: App/Bridging.h
+        OTHER_LDFLAGS: $(inherited) -lresolv
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: App/App.entitlements
         # Adds Access WiFi Information, for trusting the current network.
@@ -174,6 +177,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID).mac
         CODE_SIGN_ENTITLEMENTS: App/App-macOS-SystemExtension.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: App/Bridging.h
+        OTHER_LDFLAGS: $(inherited) -lresolv
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) SBR_SYSTEM_EXTENSION
         ENABLE_HARDENED_RUNTIME: YES
 
