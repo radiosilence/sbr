@@ -4,15 +4,70 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use hickory_proto::op::Message;
 use sbr_core::{BoxFuture, Host, Outbound};
+use tokio::sync::Semaphore;
 
 use super::{Remote, Transport, Udp};
 use crate::msg::{self, TYPE_A, TYPE_AAAA};
 
 /// TTL for answers without one (sing-box `C.DefaultDNSTTL`).
 const TTL: u32 = sbr_config::DEFAULT_TTL;
+
+/// How long a getaddrinfo call may take, waiting for a slot included.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// getaddrinfo blocks a thread of the blocking pool, which the iOS extension
+/// caps at eight, and cannot be cancelled. Queries from clients and the
+/// lookups the engine dials with get separate slots, so a client resolving
+/// a flood of unique names neither occupies the whole pool nor delays
+/// dialing; the rest of the pool serves other blocking work.
+static CLIENT_SLOTS: Semaphore = Semaphore::const_new(3);
+static DIAL_SLOTS: Semaphore = Semaphore::const_new(3);
+
+tokio::task_local! {
+    static DIALING: ();
+}
+
+/// Runs `f` as a lookup for dialing: getaddrinfo calls it makes through
+/// `local` use the dial slots.
+pub(crate) async fn for_dial<F: Future>(f: F) -> F::Output {
+    DIALING.scope((), f).await
+}
+
+fn slots() -> &'static Semaphore {
+    if DIALING.try_with(|_| ()).is_ok() {
+        &DIAL_SLOTS
+    } else {
+        &CLIENT_SLOTS
+    }
+}
+
+/// getaddrinfo for `name` on one of `slots`. The slot is held until the call
+/// returns, even after the caller has given up on it.
+async fn getaddrinfo(name: String, slots: &'static Semaphore, timeout: Duration) -> io::Result<Vec<IpAddr>> {
+    let timed_out = || io::Error::new(io::ErrorKind::TimedOut, format!("getaddrinfo {name}: timed out"));
+    let deadline = tokio::time::Instant::now() + timeout;
+    let Ok(Ok(permit)) = tokio::time::timeout_at(deadline, slots.acquire()).await else {
+        return Err(timed_out());
+    };
+    let lookup = tokio::spawn({
+        let name = name.clone();
+        async move {
+            let _permit = permit;
+            tokio::net::lookup_host((name.as_str(), 0))
+                .await
+                .map(|addrs| addrs.map(|a: SocketAddr| a.ip().to_canonical()).collect())
+        }
+    });
+    match tokio::time::timeout_at(deadline, lookup).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => Err(io::Error::other(e)),
+        Err(_) => Err(timed_out()),
+    }
+}
 
 /// A/AAAA through getaddrinfo (on Apple platforms that is the only resolver
 /// a Network Extension may use); other types go to the first `nameserver`
@@ -62,12 +117,9 @@ impl Transport for Local {
                     None => Ok(msg::status(query, 0)),
                 };
             }
-            let name = msg::domain_of(q);
-            match tokio::net::lookup_host((name.as_str(), 0)).await {
-                Ok(addrs) => {
-                    let ips: Vec<IpAddr> = addrs.map(|a: SocketAddr| a.ip().to_canonical()).collect();
-                    Ok(msg::addresses(query, &ips, TTL))
-                }
+            match getaddrinfo(msg::domain_of(q), slots(), LOOKUP_TIMEOUT).await {
+                Ok(ips) => Ok(msg::addresses(query, &ips, TTL)),
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => Err(e),
                 // getaddrinfo doesn't say why reliably; NXDOMAIN without an
                 // SOA is not cached, so a transient failure isn't sticky.
                 Err(_) => Ok(msg::status(query, 3)),
@@ -136,6 +188,25 @@ impl Transport for Hosts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn getaddrinfo_waits_for_a_slot_and_times_out() {
+        static SLOTS: Semaphore = Semaphore::const_new(1);
+        let lookup = |t| getaddrinfo("localhost".into(), &SLOTS, t);
+        assert!(!lookup(LOOKUP_TIMEOUT).await.unwrap().is_empty());
+        let held = SLOTS.acquire().await.unwrap();
+        let err = lookup(Duration::from_millis(100)).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        drop(held);
+        assert!(!lookup(LOOKUP_TIMEOUT).await.unwrap().is_empty());
+        assert_eq!(SLOTS.available_permits(), 1, "the slot is returned");
+    }
+
+    #[tokio::test]
+    async fn dial_lookups_use_their_own_slots() {
+        assert!(std::ptr::eq(slots(), &CLIENT_SLOTS));
+        assert!(std::ptr::eq(for_dial(async { slots() }).await, &DIAL_SLOTS));
+    }
 
     #[test]
     fn hosts_file_and_predefined() {

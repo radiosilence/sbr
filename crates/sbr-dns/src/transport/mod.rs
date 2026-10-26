@@ -16,7 +16,7 @@ use hickory_proto::op::Message;
 use sbr_core::{BoxFuture, BoxPacketConn, Destination, Host, Outbound, Stream};
 
 pub(crate) use https::Https;
-pub(crate) use local::{Hosts, Local};
+pub(crate) use local::{Hosts, Local, for_dial};
 pub(crate) use stream::StreamTransport;
 pub(crate) use udp::Udp;
 
