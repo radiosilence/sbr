@@ -119,17 +119,30 @@ struct SbrButtonStyle: ButtonStyle {
     enum Kind { case prominent, standard, bordered, text }
     var kind: Kind = .standard
     @Environment(\.isEnabled) private var enabled
+    @Environment(\.isFocused) private var isFocused
+
+    /// tvOS draws no focus for a custom button style, so a focused button
+    /// fills with the accent, as the system's own buttons light up.
+    private var lit: Bool {
+        #if os(tvOS)
+        isFocused
+        #else
+        false
+        #endif
+    }
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.sbr(kind == .prominent ? .body : .control))
             .textCase(.lowercase)
             .lineLimit(1)
-            .foregroundStyle(foreground)
+            .foregroundStyle(lit ? Color.sbrBg : foreground)
             .padding(.vertical, kind == .prominent ? 12 : 6)
-            .padding(.horizontal, kind == .prominent ? 20 : (kind == .text ? 0 : 12))
+            .padding(.horizontal, kind == .prominent || lit ? 20 : (kind == .text ? 0 : 12))
             .frame(minHeight: 44)
-            .background(configuration.isPressed ? Color.sbrHover : .clear)
+            .background(lit ? Color.sbrAccent : configuration.isPressed ? Color.sbrHover : .clear)
+            .scaleEffect(lit ? 1.08 : 1)
+            .animation(Theme.fast, value: lit)
             .overlay {
                 if let outline { Rectangle().strokeBorder(outline, lineWidth: Theme.hairline) }
             }
