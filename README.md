@@ -271,3 +271,7 @@ Every push and pull request to `main` runs `cargo fmt`, clippy and the tests on 
 8. Linux `splice(2)` fast path for raw TCP↔TCP.
 
 What "drop-in compatible" means here: sing-box is about 174k lines of Go before counting its `sing-*` libraries, so sbr is not trying to clone everything. The target is the protocol and config subset that real iOS/macOS client configs use. Everything outside that subset fails loudly at `check`, never at 2 a.m.
+
+## Licence
+
+Mozilla Public License 2.0 ([LICENSE](LICENSE)). Changes to sbr's own files stay open source; the code can still be built into and distributed with other software, including through the App Store.
