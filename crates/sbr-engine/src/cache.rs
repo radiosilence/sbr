@@ -172,7 +172,11 @@ impl CacheFile {
         static OPEN: std::sync::Mutex<
             Option<std::collections::HashMap<std::path::PathBuf, std::sync::Weak<Database>>>,
         > = std::sync::Mutex::new(None);
-        let key = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+        // The file may not exist yet, but its directory does by now.
+        let key = match (path.parent().and_then(|d| d.canonicalize().ok()), path.file_name()) {
+            (Some(dir), Some(name)) => dir.join(name),
+            _ => path.to_owned(),
+        };
         let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
         let open = open.get_or_insert_with(Default::default);
         let db = match open.get(&key).and_then(std::sync::Weak::upgrade) {
