@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sbr</title>
+<meta name="description" content="A sing-box-compatible proxy core in Rust, and a native app for iOS, macOS and tvOS built on it.">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#1e1e1e" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<link rel="icon" href="/icon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="preload" href="/geist-mono.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top"><div class="wrap">
+<a class="mark" href="/"><img src="/icon-96.png" alt="" width="24" height="24">sbr</a>
+<nav><a href="/features/">features</a><a href="/benchmarks/">benchmarks</a><a href="/censorship/">censorship</a><a href="/privacy/">privacy</a><a href="https://github.com/radiosilence/sbr">github</a></nav>
+</div></header>
+
+<main class="wrap">
+<h1>a proxy core in rust that runs sing-box configs</h1>
+<p class="lede">sbr reads the same configuration files as <a href="https://github.com/SagerNet/sing-box">sing-box</a> and runs them on a core written in Rust. The app for iPhone, iPad, Mac and Apple TV is native SwiftUI around that core, which runs in the system's packet tunnel extension.</p>
+
+<h2>why</h2>
+<ul class="rows">
+<li><span class="name">faster</span><div><p>On most encrypted paths measured, sbr moves more data per second than sing-box with the same config file and spends less CPU per byte: trojan over TLS is 14–23% faster on Linux, and WireGuard on Apple silicon uploads at about a third of sing-box's CPU per GB. The <a href="/benchmarks/">benchmarks</a> include the paths where sbr is slower.</p></div></li>
+<li><span class="name">lighter</span><div><p>iOS stops a packet tunnel extension that uses more than about 50 MB of memory, and Go's garbage-collected heap is why sing-box needs constant tuning to stay under it. sbr has no garbage collector, and a relayed connection costs about 32 KB by default inside the extension.</p></div></li>
+<li><span class="name">harder to block</span><div><p>Every TLS connection over TCP sends a ClientHello captured from Chrome, Safari or Firefox. Failover notices servers that complete a handshake and then stop carrying data, and a handshake reset before the server answers is retried with its ClientHello fragmented. See <a href="/features/">features</a> and <a href="/censorship/">censorship</a>.</p></div></li>
+<li><span class="name">yours</span><div><p>sbr connects only to what your profile names. Where sing-box falls back to a third-party default, such as measuring latency against gstatic.com or downloading a dashboard from GitHub, sbr does neither. The app has no account, no server of its own and no analytics; see the <a href="/privacy/">privacy policy</a>.</p></div></li>
+<li><span class="name">compatible</span><div><p>Profiles written for sing-box run unchanged, including remote profiles and rule-sets. A field sbr has not implemented is rejected at import with its JSON path, so a profile never routes differently without saying so.</p></div></li>
+</ul>
+
+<h2 id="get">get it</h2>
+<ul class="rows">
+<li><span class="name">iphone and ipad</span><div><p>In beta on TestFlight. An App Store release is planned.</p></div></li>
+<li><span class="name">mac and apple tv</span><div><p>Built from source with Xcode; see <a href="https://github.com/radiosilence/sbr/blob/main/apple/App/README.md">apple/App/README.md</a>.</p></div></li>
+<li><span class="name">command line</span><div><p>The <code>sbr</code> binary takes sing-box's flags, on macOS and Linux.</p>
+<pre>cargo build --release -p sbr
+sbr check -c config.json
+sbr run -c config.json</pre></div></li>
+</ul>
+<p>Source, issues and documentation are on <a href="https://github.com/radiosilence/sbr">GitHub</a>.</p>
+</main>
+
+<footer><div class="wrap">
+<span>sbr</span>
+<span><a href="/privacy/">privacy</a> · <a href="https://github.com/radiosilence/sbr">github</a></span>
+</div></footer>
+</body>
+</html>

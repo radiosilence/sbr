@@ -252,6 +252,10 @@ Vision skips sing-box's 5 ms sleep before the first raw write; rustls is fed one
 
 Every push and pull request to `main` runs `cargo fmt`, clippy and the tests on Linux and macOS, with the interop tests running against sing-box, Xray and hysteria on macOS, and builds the xcframework and the Apple app. Each push to `main` that passes uploads an iOS build to TestFlight. See [`apple/README.md`](apple/README.md#ci).
 
+## Website
+
+`site/` is [sbr.blit.cc](https://sbr.blit.cc), including the app's privacy policy: plain HTML and one stylesheet, with the font served from the site itself, so a visit makes no third-party request. The benchmark charts are inline SVG rendered from `site/src/benchmarks.json` by `site/src/charts.py` (`mise run charts` in `site/`); update that file when `BENCHMARKS.md` changes, since CI fails when the committed page differs from what the data renders. `mise run preview` serves it on port 3000. Every push to `main` publishes `ghcr.io/radiosilence/sbr-site:sha-<commit>` (`.github/workflows/site.yml`), which jaritanet deploys.
+
 ## Roadmap (in order of what unblocks the iOS app)
 
 1. **TUN inbound.** Takes the utun fd from `NEPacketTunnelProvider` (`packetFlow`'s socket). Two stacks, like sing-box:

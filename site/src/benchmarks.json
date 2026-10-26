@@ -1,0 +1,89 @@
+{
+  "_source": "BENCHMARKS.md, runs of 2026-10-25. Each value is [min, max] over the rounds of that run.",
+  "charts": [
+    {
+      "id": "linux-throughput",
+      "title": "Throughput, sbr and sing-box as clients, Linux",
+      "unit": "Gbit/s",
+      "better": "higher",
+      "series": ["sbr", "sing-box"],
+      "rows": [
+        { "label": "socks → direct", "values": [[36.2, 37.3], [34.8, 39.8]] },
+        { "label": "socks → shadowsocks-2022", "values": [[19.4, 19.4], [16.7, 17.7]] },
+        { "label": "tun (system stack) → direct", "values": [[5.4, 5.9], [5.0, 5.5]] },
+        { "label": "vless + tls, up", "values": [[13.7, 16.9], [13.1, 14.5]] },
+        { "label": "vless + tls, down", "values": [[14.4, 16.3], [13.5, 14.6]] },
+        { "label": "trojan + tls, up", "values": [[15.5, 17.5], [13.0, 14.4]] },
+        { "label": "trojan + tls, down", "values": [[15.0, 16.8], [13.3, 13.7]] },
+        { "label": "vmess aes-128-gcm, up", "values": [[14.7, 15.8], [12.6, 13.3]] },
+        { "label": "vmess aes-128-gcm, down", "values": [[14.9, 15.7], [11.8, 13.1]] },
+        { "label": "hysteria2, up", "values": [[2.18, 2.35], [2.35, 2.38]] },
+        { "label": "wireguard, 4 streams, up", "values": [[1.97, 2.33], [2.46, 2.77]] },
+        { "label": "wireguard, 4 streams, down", "values": [[4.06, 4.6], [2.55, 2.68]] }
+      ]
+    },
+    {
+      "id": "vision-cpu",
+      "title": "Client CPU per GB, VLESS + TLS + Vision against Xray-core, macOS",
+      "unit": "CPU-s/GB",
+      "better": "lower",
+      "series": ["sbr", "sing-box"],
+      "rows": [
+        { "label": "plain inner, up", "values": [[0.45, 0.45], [0.72, 0.72]] },
+        { "label": "plain inner, down", "values": [[0.65, 0.65], [1.05, 1.05]] },
+        { "label": "tls inner, up", "values": [[0.27, 0.3], [0.28, 0.28]] },
+        { "label": "tls inner, down", "values": [[0.39, 0.54], [0.74, 1.96]] }
+      ]
+    },
+    {
+      "id": "hysteria2-cpu",
+      "title": "Client CPU per GB, hysteria2 (salamander) against apernet hysteria, macOS",
+      "unit": "CPU-s/GB",
+      "better": "lower",
+      "series": ["sbr", "sing-box"],
+      "rows": [
+        { "label": "up", "values": [[12.6, 12.8], [9.6, 10.3]] },
+        { "label": "down", "values": [[15.6, 16.3], [16.3, 16.9]] }
+      ]
+    },
+    {
+      "id": "wireguard-cpu",
+      "title": "Client CPU per GB, WireGuard, Apple silicon",
+      "unit": "CPU-s/GB",
+      "better": "lower",
+      "series": ["sbr", "sing-box"],
+      "rows": [
+        { "label": "1 stream, up", "values": [[3.2, 3.3], [11.4, 12.4]] },
+        { "label": "1 stream, down", "values": [[6.7, 8.4], [12.6, 20.0]] },
+        { "label": "4 streams, up", "values": [[3.5, 3.6], [11.4, 11.9]] },
+        { "label": "4 streams, down", "values": [[5.8, 7.7], [11.1, 20.5]] }
+      ]
+    },
+    {
+      "id": "tun-throughput",
+      "title": "Throughput through the TUN, kernel and userspace TCP stacks, Linux",
+      "unit": "Gbit/s",
+      "better": "higher",
+      "series": ["userspace", "kernel (system)"],
+      "rows": [
+        { "label": "mtu 9000, up", "values": [[22.4, 22.8], [16.0, 16.6]] },
+        { "label": "mtu 9000, down", "values": [[19.1, 19.5], [15.2, 15.7]] },
+        { "label": "mtu 1280, up", "values": [[11.9, 12.3], [6.8, 7.0]] },
+        { "label": "mtu 1280, down", "values": [[9.8, 10.2], [6.6, 6.7]] }
+      ]
+    },
+    {
+      "id": "tun-cpu",
+      "title": "Whole-machine CPU per GB through the TUN, kernel and userspace TCP stacks, Linux",
+      "unit": "CPU-s/GB",
+      "better": "lower",
+      "series": ["userspace", "kernel (system)"],
+      "rows": [
+        { "label": "mtu 9000, up", "values": [[0.47, 0.48], [0.65, 0.68]] },
+        { "label": "mtu 9000, down", "values": [[0.53, 0.55], [0.67, 0.7]] },
+        { "label": "mtu 1280, up", "values": [[0.75, 0.78], [1.35, 1.4]] },
+        { "label": "mtu 1280, down", "values": [[0.95, 1.01], [1.32, 1.34]] }
+      ]
+    }
+  ]
+}

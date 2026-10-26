@@ -1,0 +1,11 @@
+[tools]
+# nano-web is the server the image runs. The charts script needs only Python's standard library.
+"github:radiosilence/nano-web" = "1"
+
+[tasks.charts]
+description = "Render src/benchmarks.json into the charts in public/benchmarks/"
+run = "python3 -I src/charts.py"
+
+[tasks.preview]
+description = "Serve the site on http://localhost:3000 as the image does"
+run = "nano-web serve public --port 3000 --dev"

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>censorship · sbr</title>
+<meta name="description" content="The censorship techniques sbr is designed against, what it does about each, and where to read more.">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#1e1e1e" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<link rel="icon" href="/icon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="preload" href="/geist-mono.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top"><div class="wrap">
+<a class="mark" href="/"><img src="/icon-96.png" alt="" width="24" height="24">sbr</a>
+<nav><a href="/features/">features</a><a href="/benchmarks/">benchmarks</a><a href="/censorship/" aria-current="page">censorship</a><a href="/privacy/">privacy</a><a href="https://github.com/radiosilence/sbr">github</a></nav>
+</div></header>
+
+<main class="wrap">
+<h1>censorship</h1>
+<p class="lede">sbr is designed against censors that block by server name, by TLS fingerprint, and by cutting connections some time after they start.</p>
+<p>Which censors and surveillance programmes these are, what each one does, the published evidence for it, and what sbr still lacks are in two documents in the repository:</p>
+<ul>
+<li><a href="https://github.com/radiosilence/sbr/blob/main/docs/threat-model.md">threat model</a>: Russia, Belarus, China, Egypt, the Gulf states, Israel, the United Kingdom and commercial data fusion, with a capability matrix and the known gaps ranked by impact.</li>
+<li><a href="https://github.com/radiosilence/sbr/blob/main/docs/china.md">china</a>: the Great Firewall's techniques one by one, what sbr and its reference server deployment do about each, and what has not been verified.</li>
+</ul>
+
+<h2>what sbr does</h2>
+<ul class="rows">
+<li><span class="name">server-name filtering</span><div><p>A handshake reset before the server answers is retried with the ClientHello split across TLS records and then TCP segments, cutting inside every label of the name. For QUIC, the name's halves travel in separate Initial packets.</p></div></li>
+<li><span class="name">tls fingerprinting</span><div><p>TLS over TCP sends a ClientHello captured from Chrome, Safari or Firefox, including REALITY's, which carries the X25519MLKEM768 share current servers require.</p></div></li>
+<li><span class="name">blocking after the handshake</span><div><p>Servers that complete a handshake and then stop carrying data are detected by a data probe and in live traffic, and failover moves to another server without waiting for the next probe interval.</p></div></li>
+<li><span class="name">dns poisoning</span><div><p>DNS servers in a profile can be routed through the tunnel, and a query fails over to the next server when one stops answering.</p></div></li>
+<li><span class="name">probe patterns</span><div><p>Latency probes to members that share a server are spaced apart and their period varies, so the client does not open several handshakes to one address at once on a fixed clock.</p></div></li>
+</ul>
+<p>None of this has been measured from inside China; the china document says what has been tested and how.</p>
+</main>
+
+<footer><div class="wrap">
+<span>sbr</span>
+<span><a href="/privacy/">privacy</a> · <a href="https://github.com/radiosilence/sbr">github</a></span>
+</div></footer>
+</body>
+</html>

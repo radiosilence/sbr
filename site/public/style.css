@@ -1,0 +1,407 @@
+/*
+ * kōan's design language, as the app uses it (apple/App/App/Theme.swift): one mono face, lowercase headings, square
+ * corners, hairlines instead of shadows, a neutral ground and a single mint accent.
+ */
+@font-face {
+  font-family: "Geist Mono";
+  src: url("/geist-mono.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark light;
+  --bg: #1e1e1e;
+  --surface: #2a2a2a;
+  --rule: #383838;
+  --hover: #4d4d4d;
+  --ink: #cccccc;
+  --strong: #ffffff;
+  --muted: #919191;
+  --accent: #7dd3a7;
+  --bad: #ef6b73;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff;
+    --surface: #f2f2f2;
+    --rule: #e0e0e0;
+    --hover: #c4c4c4;
+    --ink: #333333;
+    --strong: #111111;
+    --muted: #666666;
+    --accent: #1f7a50;
+    --bad: #c43f3f;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 15px/1.65 "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-feature-settings: "liga" 0;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.wrap {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+@media (min-width: 640px) {
+  .wrap {
+    padding: 0 28px;
+  }
+}
+
+a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  color: var(--strong);
+}
+
+a:focus-visible,
+summary:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Header and navigation. */
+.top {
+  border-bottom: 1px solid var(--rule);
+}
+
+.top .wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 24px;
+  padding-top: 18px;
+  padding-bottom: 14px;
+}
+
+.mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--strong);
+  text-decoration: none;
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.mark img {
+  width: 24px;
+  height: 24px;
+  align-self: center;
+}
+
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  font-size: 13px;
+}
+
+nav a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+nav a:hover,
+nav a[aria-current="page"] {
+  color: var(--strong);
+}
+
+nav a[aria-current="page"] {
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-underline-offset: 6px;
+}
+
+/* Type. */
+h1,
+h2,
+h3 {
+  color: var(--strong);
+  text-transform: lowercase;
+  margin: 0;
+}
+
+h1 {
+  font-size: clamp(28px, 7vw, 40px);
+  font-weight: 200;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  margin: 56px 0 18px;
+}
+
+h2 {
+  font-size: 20px;
+  font-weight: 300;
+  line-height: 1.3;
+  margin: 56px 0 14px;
+  padding-top: 18px;
+  border-top: 1px solid var(--rule);
+}
+
+h3 {
+  font-size: 15px;
+  font-weight: 500;
+  margin: 28px 0 6px;
+}
+
+h2 + h3 {
+  margin-top: 8px;
+}
+
+p,
+ul,
+ol {
+  margin: 0 0 14px;
+}
+
+ul,
+ol {
+  padding-left: 20px;
+}
+
+li {
+  margin-bottom: 6px;
+}
+
+li::marker {
+  color: var(--muted);
+}
+
+.lede {
+  font-size: 17px;
+  font-weight: 300;
+  color: var(--strong);
+  max-width: 42em;
+}
+
+.muted,
+figcaption,
+.fine {
+  color: var(--muted);
+}
+
+.fine {
+  font-size: 13px;
+}
+
+strong {
+  color: var(--strong);
+  font-weight: 500;
+}
+
+code,
+pre {
+  font-family: inherit;
+  font-size: 13.5px;
+}
+
+code {
+  color: var(--strong);
+}
+
+pre {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  color: var(--strong);
+  line-height: 1.55;
+}
+
+/* Lists of short items with a lowercase name on the left: features, ways to get the app. */
+.rows {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 16px;
+  border-top: 1px solid var(--rule);
+}
+
+.rows > li {
+  margin: 0;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+@media (min-width: 640px) {
+  .rows > li {
+    display: grid;
+    grid-template-columns: 11em 1fr;
+    gap: 20px;
+  }
+}
+
+.rows .name {
+  display: block;
+  color: var(--strong);
+  font-weight: 500;
+  text-transform: lowercase;
+  margin-bottom: 4px;
+}
+
+.rows p:last-child {
+  margin-bottom: 0;
+}
+
+/* Tables. */
+.scroll {
+  overflow-x: auto;
+  margin: 0 0 16px;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 6px 12px 6px 0;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+
+th {
+  color: var(--muted);
+  font-weight: 400;
+  text-transform: lowercase;
+}
+
+td:not(:first-child),
+th:not(:first-child) {
+  white-space: nowrap;
+}
+
+/* Charts, rendered by site/src/charts.py. */
+figure {
+  margin: 28px 0 36px;
+}
+
+figcaption {
+  font-size: 13px;
+  margin-bottom: 12px;
+  text-transform: lowercase;
+}
+
+.chart {
+  display: block;
+  width: 100%;
+  max-width: 560px;
+  height: auto;
+  overflow: visible;
+}
+
+.chart text {
+  font-family: inherit;
+  fill: var(--ink);
+}
+
+.chart .lb {
+  font-size: 12.5px;
+}
+
+.chart .val,
+.chart .tick,
+.chart .lg {
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart .dim,
+.chart .tick {
+  fill: var(--muted);
+}
+
+.chart .s0 {
+  fill: var(--accent);
+}
+
+.chart .s1 {
+  fill: var(--muted);
+}
+
+.chart .range {
+  fill-opacity: 0.4;
+}
+
+.chart .grid {
+  stroke: var(--rule);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+details {
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+summary {
+  cursor: pointer;
+  color: var(--muted);
+  text-transform: lowercase;
+}
+
+summary:hover {
+  color: var(--strong);
+}
+
+details table {
+  margin-top: 8px;
+}
+
+/* Footer. */
+footer {
+  margin-top: 72px;
+  border-top: 1px solid var(--rule);
+  font-size: 13px;
+  color: var(--muted);
+}
+
+footer .wrap {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 24px;
+  padding-top: 18px;
+  padding-bottom: 32px;
+}
+
+footer a {
+  color: var(--muted);
+}
