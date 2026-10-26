@@ -26,7 +26,9 @@ impl Flavor {
     /// iOS/tvOS default to one thread; see the README for the measurements.
     pub fn platform_default() -> Self {
         if cfg!(any(target_os = "ios", target_os = "tvos", target_os = "visionos")) {
-            Flavor::CurrentThread
+            // Two workers: one core capped a phone near 500 Mbit/s, and an
+            // idle worker parks at no cost.
+            Flavor::MultiThread(2)
         } else {
             Flavor::MultiThread(std::thread::available_parallelism().map_or(4, |n| n.get().min(8)))
         }

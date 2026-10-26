@@ -20,7 +20,9 @@ final class Diagnose: ObservableObject {
     /// host on screen because nothing in the profile serves large files.
     private static let probe = URL(string: "https://www.gstatic.com/generate_204")!
     private static let page = URL(string: "https://www.google.com/")!
-    private static let bulk = URL(string: "https://speed.cloudflare.com/__down?bytes=10000000")!
+    private static let bulk = URL(string: "https://speed.cloudflare.com/__down?bytes=50000000")!
+    /// The tunnel's CPU time so far, for the bulk test's CPU share.
+    var cpuTime: () async -> UInt64? = { nil }
     /// Cloudflare's plain-text trace: the address and country a request
     /// arrived from. The bulk test already uses this host.
     private static let trace = URL(string: "https://speed.cloudflare.com/cdn-cgi/trace")!
@@ -33,7 +35,7 @@ final class Diagnose: ObservableObject {
     func run(connected: Bool, config: String?) async {
         running = true
         defer { running = false }
-        let names = ["dns", "tcp", "quic", "bulk 10 MB (speed.cloudflare.com)"]
+        let names = ["dns", "tcp", "quic", "bulk 50 MB (speed.cloudflare.com)"]
         let leaks = ["exit ip (speed.cloudflare.com)", "dns via tunnel", "ipv6 (1.1.1.1)", "webrtc"]
         checks = (names + (connected ? leaks : [])).map { Check(id: $0) }
         await check(0) { try await Self.dns("www.google.com") }
@@ -41,7 +43,13 @@ final class Diagnose: ObservableObject {
         // A Vision path refuses QUIC on purpose, and URLSession races TCP, so
         // TCP here is a note, not a failure.
         await check(2, note: { !$0.hasPrefix("h3") }) { try await Self.fetch(Self.page, http3: true) }
-        await check(3) { try await Self.fetch(Self.bulk, http3: false, timeout: 30) }
+        await check(3) {
+            let (cpu0, t0) = (await self.cpuTime(), Date())
+            let detail = try await Self.fetch(Self.bulk, http3: false, timeout: 60)
+            guard let c0 = cpu0, let c1 = await self.cpuTime() else { return detail }
+            let share = Double(c1 &- c0) / 1e6 / max(Date().timeIntervalSince(t0), 0.001)
+            return detail + String(format: " · tunnel cpu %.0f%%", share * 100)
+        }
         guard connected else { return }
 
         let plan = config.flatMap { try? Sbr.tunnelNetworkSettings(config: $0) }
@@ -214,6 +222,7 @@ struct DiagnoseSection: View {
                     Text("running").font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
                 } else {
                     Button("run") {
+                        model.cpuTime = { [tunnel] in await tunnel.cpuTime() }
                         Task { await model.run(connected: tunnel.isConnected, config: profiles.activeText) }
                     }
                     .sbrButton(.text)

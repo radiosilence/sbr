@@ -205,6 +205,11 @@ final class TunnelModel: ObservableObject {
     }
 
     /// Poll the extension's recent logs while the logs tab is visible.
+    /// The tunnel's CPU time so far, in microseconds.
+    func cpuTime() async -> UInt64? {
+        try? await session?.send(.stats).stats?.cpuTimeMicros
+    }
+
     func pollLogs() async {
         while !Task.isCancelled {
             if isConnected, let session, let l = try? await session.send(.logs).logs, l != logs {
