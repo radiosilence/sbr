@@ -113,6 +113,8 @@ targets:
       path: Support/Tunnel-Info.plist
       properties:
         CFBundleDisplayName: SbrTunnel
+        # App Store Connect requires it on tvOS for a 64-bit extension.
+        UIRequiredDeviceCapabilities: [arm64]
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
