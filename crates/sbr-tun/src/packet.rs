@@ -355,6 +355,53 @@ pub fn build_udp_unreachable(out: &mut Vec<u8>, remote: SocketAddr, client: Sock
     }
 }
 
+/// A reset answering the TCP segment `h` in `p`, as a host with no such
+/// connection would send it (RFC 9293 §3.10.7.1), so the app's connect
+/// fails at once.
+pub fn build_tcp_rst(out: &mut Vec<u8>, p: &[u8], h: &Parsed) {
+    let t = &p[h.l4..h.len];
+    let flags = t[13];
+    let data = t.len().saturating_sub((t[12] >> 4) as usize * 4);
+    let (seq, ack, flags) = if flags & ACK != 0 {
+        (u32::from_be_bytes(t[8..12].try_into().unwrap()), 0, RST)
+    } else {
+        let len = data as u32 + (flags & SYN != 0) as u32 + (flags & FIN != 0) as u32;
+        let seq = u32::from_be_bytes(t[4..8].try_into().unwrap());
+        (0, seq.wrapping_add(len), RST | ACK)
+    };
+    let (src, dst) = (h.dst, h.src);
+    out.clear();
+    let mut pseudo = 0u32;
+    match (src.ip(), dst.ip()) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => {
+            out.extend_from_slice(&[0x45, 0, 0, 40, 0, 0, 0x40, 0, 64, PROTO_TCP, 0, 0]);
+            out.extend_from_slice(&s.octets());
+            out.extend_from_slice(&d.octets());
+            let ipck = !fold(sum16(&out[..20], 0));
+            wr16(out, 10, ipck);
+            pseudo = sum16(&s.octets(), pseudo);
+            pseudo = sum16(&d.octets(), pseudo);
+        }
+        (IpAddr::V6(s), IpAddr::V6(d)) => {
+            out.extend_from_slice(&[0x60, 0, 0, 0, 0, 20, PROTO_TCP, 64]);
+            out.extend_from_slice(&s.octets());
+            out.extend_from_slice(&d.octets());
+            pseudo = sum16(&s.octets(), pseudo);
+            pseudo = sum16(&d.octets(), pseudo);
+        }
+        _ => unreachable!("address family mismatch"),
+    }
+    pseudo += PROTO_TCP as u32 + 20;
+    let l4 = out.len();
+    out.extend_from_slice(&src.port().to_be_bytes());
+    out.extend_from_slice(&dst.port().to_be_bytes());
+    out.extend_from_slice(&seq.to_be_bytes());
+    out.extend_from_slice(&ack.to_be_bytes());
+    out.extend_from_slice(&[5 << 4, flags, 0, 0, 0, 0, 0, 0]);
+    let ck = !fold(sum16(&out[l4..], pseudo));
+    wr16(out, l4 + 16, ck);
+}
+
 /// Split a whole packet into fragments of at most `mtu` bytes, acting as
 /// the source host (RFC 791 §3.2, RFC 8200 §4.5). Each fragment is written
 /// to `out[headroom..]` and handed to `each`. IPv4 options are copied into
@@ -495,6 +542,24 @@ mod tests {
         let ck = !fold(sum16(&p[l4..], pseudo));
         wr16(&mut p, l4 + 16, ck);
         p
+    }
+
+    #[test]
+    fn tcp_rst_answers_a_syn() {
+        for (s, d) in [
+            ("172.19.0.1:51000", "1.2.3.4:443"),
+            ("[fdfe::1]:51000", "[2001:db8::1]:443"),
+        ] {
+            let (s, d): (SocketAddr, SocketAddr) = (s.parse().unwrap(), d.parse().unwrap());
+            let syn = tcp_syn(s, d);
+            let mut out = Vec::new();
+            build_tcp_rst(&mut out, &syn, &parse(&syn).unwrap());
+            assert!(verify(&out));
+            let h = parse(&out).unwrap();
+            assert_eq!((h.src, h.dst, h.proto), (d, s, PROTO_TCP));
+            assert_eq!(tcp_flags(&out, &h), RST | ACK);
+            assert_eq!(&out[h.l4 + 4..h.l4 + 12], &[0, 0, 0, 0, 0, 0, 0, 2]);
+        }
     }
 
     #[test]

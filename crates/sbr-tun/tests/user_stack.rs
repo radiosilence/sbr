@@ -146,7 +146,12 @@ impl Apps {
     fn send_raw(&self, pkt: &[u8]) {
         let mut b = vec![0u8; AF];
         if cfg!(target_vendor = "apple") {
-            b[..4].copy_from_slice(&(libc::AF_INET as u32).to_be_bytes());
+            let af = if pkt[0] >> 4 == 6 {
+                libc::AF_INET6
+            } else {
+                libc::AF_INET
+            };
+            b[..4].copy_from_slice(&(af as u32).to_be_bytes());
         }
         b.extend_from_slice(pkt);
         // A full datagram socketpair reports EAGAIN on Linux (macOS blocks):
@@ -230,7 +235,10 @@ async fn start(tcp: TcpConfig) -> (Arc<Stack>, Apps, Arc<Mutex<Vec<UdpIn>>>) {
                 let _ = w.shutdown().await;
             });
         },
-        move |d| u.lock().unwrap().push(d),
+        move |d| {
+            assert!(&d.payload[..] != b"panic", "a bug in the engine's UDP path");
+            u.lock().unwrap().push(d)
+        },
     )
     .await
     .unwrap();
@@ -312,4 +320,61 @@ async fn udp_still_bypasses_tcp() {
     assert_eq!((h.src, h.dst), (dst, src));
     assert_eq!(&back[h.l4 + 8..h.len], b"answer");
     assert!(packet::verify(&back));
+}
+
+async fn wait_udp(udp: &Mutex<Vec<UdpIn>>) -> UdpIn {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(u) = udp.lock().unwrap().pop() {
+            return u;
+        }
+        assert!(Instant::now() < deadline, "no datagram delivered");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn packet_loop_survives_a_panic() {
+    let (_stack, apps, udp) = start(TcpConfig::default()).await;
+    let (src, dst): (SocketAddr, SocketAddr) = ("172.19.0.1:5353".parse().unwrap(), "1.1.1.1:53".parse().unwrap());
+    let mut p = Vec::new();
+    packet::build_udp(&mut p, src, dst, b"panic");
+    apps.send_raw(&p);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    packet::build_udp(&mut p, src, dst, b"after");
+    apps.send_raw(&p);
+    assert_eq!(&wait_udp(&udp).await.payload[..], b"after");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ipv6_is_refused_without_a_v6_address() {
+    let (_stack, apps, _) = start(TcpConfig::default()).await;
+    let (src, dst): (SocketAddr, SocketAddr) = (
+        "[fd00::1]:40000".parse().unwrap(),
+        "[2606:4700::1111]:443".parse().unwrap(),
+    );
+    // A SYN, from a UDP header padded out to a bare TCP header.
+    let mut p = Vec::new();
+    packet::build_udp(&mut p, src, dst, &[0u8; 12]);
+    p[6] = packet::PROTO_TCP;
+    p[44..60].copy_from_slice(&[0, 0, 0, 7, 0, 0, 0, 0, 5 << 4, packet::SYN, 0xff, 0xff, 0, 0, 0, 0]);
+    apps.send_raw(&p);
+    let back = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut b = vec![0u8; 65536];
+        loop {
+            let mut g = apps.fd.ready(Interest::READABLE).await.unwrap();
+            // SAFETY: reading into a valid, sized buffer.
+            let n = unsafe { libc::read(apps.fd.as_raw_fd(), b.as_mut_ptr().cast(), b.len()) };
+            if n > 0 {
+                return b[AF..n as usize].to_vec();
+            }
+            g.clear_ready();
+        }
+    })
+    .await
+    .expect("no reply");
+    let h = packet::parse(&back).unwrap();
+    assert!(packet::verify(&back));
+    assert_eq!((h.src, h.dst), (dst, src));
+    assert_eq!(packet::tcp_flags(&back, &h), packet::RST | packet::ACK);
 }

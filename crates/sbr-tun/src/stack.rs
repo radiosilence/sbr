@@ -7,20 +7,20 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
-use tracing::{debug, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 use crate::device::{Device, HEADROOM, RecvBatch};
 use crate::frag::Reassembler;
 use crate::nat::Nat;
-use crate::packet::{self, ACK, Ip, PROTO_TCP, PROTO_UDP, Parsed, SYN};
+use crate::packet::{self, ACK, Ip, PROTO_TCP, PROTO_UDP, Parsed, RST, SYN};
 use crate::tcp::tcb::Blocked;
 use crate::tcp::{self, Tcp, TcpConfig};
 
@@ -69,7 +69,8 @@ impl StackConfig {
 }
 
 /// A TCP connection from an app. With the system stack, dropping it
-/// releases the NAT entry (after a grace period for trailing segments).
+/// releases the NAT entry (after a grace period for trailing segments, or
+/// at once after a refusal).
 pub struct Accepted {
     pub stream: TcpConn,
     /// The app's address.
@@ -96,11 +97,21 @@ impl TcpConn {
     }
 
     /// The outbound refused the connection: reset it, or with `silent`
-    /// forget it without a word to the app. The kernel stack can only
-    /// close.
+    /// forget it without a word to the app. The kernel stack resets in
+    /// either case when the stream is dropped; the reset frees the NAT port
+    /// at once, where a close would hold it for the grace period.
     pub fn refuse(&self, silent: bool) {
-        if let Self::User(s) = self {
-            if silent { s.discard() } else { s.abort() }
+        match self {
+            Self::Kernel(s) => {
+                let _ = s.set_zero_linger();
+            }
+            Self::User(s) => {
+                if silent {
+                    s.discard()
+                } else {
+                    s.abort()
+                }
+            }
         }
     }
 }
@@ -138,12 +149,20 @@ impl AsyncWrite for TcpConn {
 struct NatGuard {
     nat: Arc<Mutex<Nat>>,
     port: u16,
+    generation: u32,
 }
 
 impl Drop for NatGuard {
     fn drop(&mut self) {
-        self.nat.lock().unwrap().close(self.port);
+        lock(&self.nat).close(self.port, self.generation);
     }
+}
+
+/// The NAT, poisoned or not: a panicked packet loop replaces a poisoned
+/// table when it restarts, and the accept loop and guards must not die
+/// with it.
+fn lock(nat: &Mutex<Nat>) -> MutexGuard<'_, Nat> {
+    nat.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// A datagram from an app.
@@ -220,11 +239,24 @@ impl Stack {
         let ids = Arc::new(AtomicU32::new(seed));
         match cfg.tcp {
             TcpStack::System => {
-                tasks.spawn(packet_loop(device.clone(), fams, cfg.mtu, ids.clone(), on_udp));
+                let (device, ids, on_udp) = (device.clone(), ids.clone(), Arc::new(on_udp));
+                tasks.spawn(supervise(move || {
+                    packet_loop(device.clone(), fams.clone(), cfg.mtu, ids.clone(), on_udp.clone())
+                }));
             }
             TcpStack::User(tcfg) => {
                 debug!(rx = tcfg.rx_buffer, tx = tcfg.tx_buffer, "userspace TCP stack");
-                tasks.spawn(user_loop(device.clone(), fams, cfg.mtu, on_udp, on_tcp, tcfg));
+                let (device, on_udp) = (device.clone(), Arc::new(on_udp));
+                tasks.spawn(supervise(move || {
+                    user_loop(
+                        device.clone(),
+                        fams.clone(),
+                        cfg.mtu,
+                        on_udp.clone(),
+                        on_tcp.clone(),
+                        tcfg.clone(),
+                    )
+                }));
             }
         }
         Ok(Self {
@@ -432,7 +464,7 @@ async fn accept_loop(listener: TcpListener, fam: Arc<Family>, on_tcp: Arc<dyn Fn
             warn!(%peer, expected = %fam.next, "tun: dropped a connection from an unexpected peer");
             continue;
         }
-        let Some((source, destination)) = fam.nat.lock().unwrap().accept(peer.port()) else {
+        let Some((source, destination, generation)) = lock(&fam.nat).accept(peer.port()) else {
             warn!(%peer, "tun: dropped a connection with no NAT entry");
             continue;
         };
@@ -445,6 +477,7 @@ async fn accept_loop(listener: TcpListener, fam: Arc<Family>, on_tcp: Arc<dyn Fn
             _guard: Some(NatGuard {
                 nat: fam.nat.clone(),
                 port: peer.port(),
+                generation,
             }),
         });
     }
@@ -467,13 +500,48 @@ const BATCH: (usize, usize) = (4, 32);
 #[cfg(not(any(target_os = "ios", target_os = "tvos", target_os = "watchos", target_os = "visionos")))]
 const BATCH: (usize, usize) = (8, 64);
 
+/// Run a packet loop, restarting it after a panic: a bug hit by one packet
+/// must not leave the tunnel blackholed with nothing reported. Restarts are
+/// spaced so a loop that panics at once cannot spin.
+async fn supervise<F: Future<Output = ()> + Send + 'static>(mut run: impl FnMut() -> F) {
+    loop {
+        let mut task = JoinSet::new();
+        task.spawn(run());
+        match task.join_next().await {
+            Some(Err(e)) if e.is_panic() => {
+                let p = e.into_panic();
+                let msg = p
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| p.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("non-string payload");
+                error!(panic = msg, "tun packet loop panicked; restarting it");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            _ => return,
+        }
+    }
+}
+
+/// A NAT table whose lock a panic poisoned may be half-updated: start it
+/// afresh. Connections it carried stall, as they would have with the loop.
+fn reset_poisoned(fams: &[Option<Arc<Family>>; 2]) {
+    for fam in fams.iter().flatten() {
+        if fam.nat.is_poisoned() {
+            *lock(&fam.nat) = Nat::default();
+            fam.nat.clear_poison();
+        }
+    }
+}
+
 async fn packet_loop(
     device: Arc<Device>,
     fams: [Option<Arc<Family>>; 2],
     mtu: usize,
     ids: Arc<AtomicU32>,
-    on_udp: impl Fn(UdpIn) + Send + Sync + 'static,
+    on_udp: Arc<impl Fn(UdpIn) + Send + Sync + 'static>,
 ) {
+    reset_poisoned(&fams);
     let mut batch = RecvBatch::new(BATCH.0, BATCH.1, mtu.max(1500) + 64);
     let mut reasm = Reassembler::new(HEADROOM);
     let mut frag = Vec::new();
@@ -490,7 +558,7 @@ async fn packet_loop(
             if len == 0 {
                 continue;
             }
-            let r = match process(&fams, &mut reasm, batch.buf(i), len, &on_udp, false) {
+            let r = match process(&fams, &mut reasm, batch.buf(i), len, &*on_udp, false) {
                 Out::None | Out::Tcp(_) | Out::TcpOwned(..) => continue,
                 Out::InPlace(len) => send_or_drop(&device, batch.buf(i), len).await,
                 Out::Owned(mut pkt) if pkt.len() - HEADROOM > mtu => {
@@ -548,7 +616,7 @@ fn process(
     match packet::classify(pkt) {
         Some(Ip::Whole(h)) => {
             let Some(fam) = fams[h.v6 as usize].as_ref() else {
-                return Out::None;
+                return refuse(pkt, &h);
             };
             match h.proto {
                 PROTO_TCP if user => {
@@ -608,13 +676,32 @@ fn process(
     }
 }
 
+/// Answer a packet for an address family the tunnel has no address in, so
+/// the app fails over at once (Happy Eyeballs moves on to the other
+/// family) instead of waiting out its timer: a reset for TCP, ICMP port
+/// unreachable for UDP.
+fn refuse(pkt: &[u8], h: &Parsed) -> Out {
+    if !global_unicast(h.dst.ip()) {
+        return Out::None;
+    }
+    let mut out = Vec::with_capacity(HEADROOM + 96);
+    match h.proto {
+        PROTO_TCP if packet::tcp_flags(pkt, h) & RST == 0 => packet::build_tcp_rst(&mut out, pkt, h),
+        PROTO_UDP => packet::build_udp_unreachable(&mut out, h.dst, h.src),
+        _ => return Out::None,
+    }
+    out.splice(0..0, [0u8; HEADROOM]);
+    trace!(src = %h.src, dst = %h.dst, "no address in this family; refused");
+    Out::Owned(out)
+}
+
 /// The packet loop with userspace TCP: also wakes for streams that have
 /// something to send and for TCP timers.
 async fn user_loop(
     device: Arc<Device>,
     fams: [Option<Arc<Family>>; 2],
     mtu: usize,
-    on_udp: impl Fn(UdpIn) + Send + Sync + 'static,
+    on_udp: Arc<impl Fn(UdpIn) + Send + Sync + 'static>,
     on_tcp: Arc<dyn Fn(Accepted) + Send + Sync>,
     cfg: TcpConfig,
 ) {
@@ -661,10 +748,13 @@ async fn user_loop(
                 if len == 0 {
                     continue;
                 }
-                match process(&fams, &mut reasm, batch.buf(i), len, &on_udp, true) {
+                match process(&fams, &mut reasm, batch.buf(i), len, &*on_udp, true) {
                     Out::Tcp(h) => tcp.input(&batch.buf(i)[HEADROOM..HEADROOM + len], &h, now, &mut link),
                     Out::TcpOwned(pkt, h) => tcp.input(&pkt[HEADROOM..], &h, now, &mut link),
-                    _ => {}
+                    Out::Owned(mut pkt) => {
+                        let _ = link(&mut pkt);
+                    }
+                    Out::None | Out::InPlace(_) => {}
                 }
             }
         }
@@ -693,14 +783,12 @@ fn nat_tcp(fam: &Family, pkt: &mut [u8], h: &Parsed) -> bool {
     let flags = packet::tcp_flags(pkt, h);
     let rewrite = if h.src.ip() == fam.addr && h.src.port() == fam.port {
         // Our listener replying: restore the original flow.
-        fam.nat
-            .lock()
-            .unwrap()
-            .inbound(h.dst.port())
+        lock(&fam.nat)
+            .inbound(h.dst.port(), flags & RST != 0)
             .map(|(src, dst)| (dst, src))
     } else if global_unicast(h.dst.ip()) {
         let syn_only = flags & SYN != 0 && flags & ACK == 0;
-        let port = fam.nat.lock().unwrap().outbound(h.src, h.dst, syn_only);
+        let port = lock(&fam.nat).outbound(h.src, h.dst, syn_only);
         port.map(|p| (SocketAddr::new(fam.next, p), SocketAddr::new(fam.addr, fam.port)))
     } else {
         None
@@ -793,6 +881,68 @@ mod tests {
         assert_eq!(h.src.ip(), "172.19.0.2".parse::<IpAddr>().unwrap());
         assert_eq!(&q[h.l4 + 20..], &p[40..]);
         let fam = fams[0].as_ref().unwrap();
-        assert_eq!(fam.nat.lock().unwrap().accept(h.src.port()), Some((s, d)));
+        let (src, dst, _) = fam.nat.lock().unwrap().accept(h.src.port()).unwrap();
+        assert_eq!((src, dst), (s, d));
+    }
+
+    /// An IPv6 segment from `s` to `d` with `flags` and sequence number 1000.
+    fn tcp6(s: SocketAddr, d: SocketAddr, flags: u8) -> Vec<u8> {
+        let mut p = Vec::new();
+        build_udp(&mut p, s, d, &[0u8; 12]);
+        p[6] = PROTO_TCP;
+        p[40 + 4..40 + 20].copy_from_slice(&[0, 0, 0x03, 0xe8, 0, 0, 0, 0, 5 << 4, flags, 0xff, 0xff, 0, 0, 0, 0]);
+        p
+    }
+
+    fn run(fams: &[Option<Arc<Family>>; 2], p: &[u8], on_udp: &impl Fn(UdpIn), user: bool) -> Out {
+        let mut buf = vec![0u8; HEADROOM];
+        buf.extend_from_slice(p);
+        process(fams, &mut Reassembler::new(HEADROOM), &mut buf, p.len(), on_udp, user)
+    }
+
+    #[test]
+    fn ipv6_without_a_v6_address_is_refused() {
+        let fams = fams();
+        let (s, d): (SocketAddr, SocketAddr) = (
+            "[fd00::1]:51000".parse().unwrap(),
+            "[2606:4700::1111]:443".parse().unwrap(),
+        );
+        for user in [false, true] {
+            let Out::Owned(pkt) = run(&fams, &tcp6(s, d, SYN), &|_| panic!("not UDP"), user) else {
+                panic!("expected a reset")
+            };
+            let q = &pkt[HEADROOM..];
+            assert!(verify(q), "valid checksums");
+            let h = parse(q).unwrap();
+            assert_eq!((h.src, h.dst), (d, s));
+            assert_eq!(packet::tcp_flags(q, &h), RST | ACK);
+            assert_eq!(
+                &q[h.l4 + 4..h.l4 + 12],
+                &[0, 0, 0, 0, 0, 0, 0x03, 0xe9],
+                "seq 0, acks the SYN"
+            );
+        }
+        let Out::Owned(pkt) = run(&fams, &tcp6(s, d, ACK), &|_| panic!("not UDP"), false) else {
+            panic!("expected a reset")
+        };
+        let q = &pkt[HEADROOM..];
+        let h = parse(q).unwrap();
+        assert_eq!(packet::tcp_flags(q, &h), RST);
+        assert!(
+            matches!(run(&fams, &tcp6(s, d, RST), &|_| panic!("not UDP"), false), Out::None),
+            "never answer a reset"
+        );
+
+        let mut u = Vec::new();
+        build_udp(&mut u, s, d, b"quic");
+        let Out::Owned(pkt) = run(&fams, &u, &|_| panic!("not delivered"), false) else {
+            panic!("expected ICMPv6 unreachable")
+        };
+        let q = &pkt[HEADROOM..];
+        assert_eq!((q[6], q[40], q[41]), (packet::PROTO_ICMPV6, 1, 4));
+        assert_eq!(&q[8..24], &"2606:4700::1111".parse::<Ipv6Addr>().unwrap().octets());
+
+        let link_local = tcp6(s, "[fe80::1]:443".parse().unwrap(), SYN);
+        assert!(matches!(run(&fams, &link_local, &|_| {}, false), Out::None));
     }
 }
