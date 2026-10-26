@@ -98,6 +98,7 @@ struct SendToTVSheet: View {
                         Spacer()
                     }
                     .padding(.vertical, Theme.Space.s)
+                    .fixedSize(horizontal: false, vertical: true)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)

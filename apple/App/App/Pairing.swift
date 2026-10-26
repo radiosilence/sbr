@@ -79,27 +79,38 @@ enum Pairing {
         return params
     }
 
-    /// Reads until the peer finishes sending, up to `maxPayload`.
-    static func receiveAll(_ conn: NWConnection) async throws -> Data {
+    /// One message: a 4-byte big-endian length, then that many bytes. Framed
+    /// rather than ended by closing the write side, which TLS turns into a
+    /// close of the whole connection before the answer can come back.
+    static func sendFrame(_ conn: NWConnection, _ data: Data) async throws {
+        var frame = withUnsafeBytes(of: UInt32(data.count).bigEndian) { Data($0) }
+        frame.append(data)
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            conn.send(content: frame, completion: .contentProcessed { error in
+                if let error { cont.resume(throwing: error) } else { cont.resume() }
+            })
+        }
+    }
+
+    static func receiveFrame(_ conn: NWConnection) async throws -> Data {
+        let head = try await receive(conn, count: 4)
+        let n = Int(head.reduce(0) { $0 << 8 | UInt32($1) })
+        guard n <= maxPayload else { throw SbrError("too much data") }
+        return try await receive(conn, count: n)
+    }
+
+    private static func receive(_ conn: NWConnection, count n: Int) async throws -> Data {
         var data = Data()
-        while true {
+        while data.count < n {
             let (chunk, done): (Data?, Bool) = try await withCheckedThrowingContinuation { cont in
-                conn.receive(minimumIncompleteLength: 1, maximumLength: 64 << 10) { chunk, _, done, error in
+                conn.receive(minimumIncompleteLength: 1, maximumLength: n - data.count) { chunk, _, done, error in
                     if let error { cont.resume(throwing: error) } else { cont.resume(returning: (chunk, done)) }
                 }
             }
             if let chunk { data.append(chunk) }
-            if data.count > maxPayload { throw SbrError("too much data") }
-            if done { return data }
+            if done && data.count < n { throw SbrError("the connection closed early") }
         }
-    }
-
-    static func sendAll(_ conn: NWConnection, _ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            conn.send(content: data, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { error in
-                if let error { cont.resume(throwing: error) } else { cont.resume() }
-            })
-        }
+        return data
     }
 
     /// Sends `payload` to the TV named in `invite` and returns its answer.
@@ -107,11 +118,19 @@ enum Pairing {
         let endpoint = NWEndpoint.service(name: invite.service, type: serviceType, domain: "local.", interface: nil)
         let conn = NWConnection(to: endpoint, using: parameters(invite.key))
         defer { conn.cancel() }
-        try await ready(conn)
-        try await sendAll(conn, JSONEncoder().encode(payload))
-        let answer = String(decoding: try await receiveAll(conn), as: UTF8.self)
-        guard answer.hasPrefix("ok") else { throw SbrError(answer.isEmpty ? "the TV closed the connection" : answer) }
-        return answer
+        // The TV downloads a remote profile before it answers.
+        let expired = Once()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 45) { expired.run { conn.cancel() } }
+        do {
+            try await ready(conn)
+            try await sendFrame(conn, JSONEncoder().encode(payload))
+            let answer = String(decoding: try await receiveFrame(conn), as: UTF8.self)
+            guard answer == "ok" else { throw SbrError(answer) }
+            return answer
+        } catch {
+            if !expired.run({}) { throw SbrError("the TV didn't answer in time") }
+            throw error
+        }
     }
 
     private static func ready(_ conn: NWConnection) async throws {
@@ -138,12 +157,15 @@ enum Pairing {
 private final class Once: @unchecked Sendable {
     private var done = false
     private let lock = NSLock()
-    func run(_ f: () -> Void) {
+    /// Runs `f` if nothing has run yet; true if this call ran it.
+    @discardableResult
+    func run(_ f: () -> Void) -> Bool {
         lock.lock()
         let first = !done
         done = true
         lock.unlock()
         if first { f() }
+        return first
     }
 }
 
@@ -192,7 +214,7 @@ final class PairReceiver: ObservableObject {
         defer { conn.cancel() }
         let answer: String
         do {
-            let data = try await Pairing.receiveAll(conn)
+            let data = try await Pairing.receiveFrame(conn)
             let payload = try JSONDecoder().decode(Pairing.Payload.self, from: data)
             try await onPayload(payload)
             status = "added \(payload.name)"
@@ -201,7 +223,9 @@ final class PairReceiver: ObservableObject {
             status = error.localizedDescription
             answer = error.localizedDescription
         }
-        try? await Pairing.sendAll(conn, Data(answer.utf8))
+        try? await Pairing.sendFrame(conn, Data(answer.utf8))
+        // Let the answer leave before the connection is torn down.
+        try? await Task.sleep(nanoseconds: 500_000_000)
     }
 }
 
