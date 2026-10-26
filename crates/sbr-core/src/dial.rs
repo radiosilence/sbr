@@ -94,6 +94,11 @@ pub async fn connect(dest: &Destination, opts: &DialOptions, dns: &dyn Dns) -> i
 /// An unconnected UDP socket for `family_of`'s address family, honouring
 /// `bind_interface`.
 pub fn bind_udp(family_of: IpAddr, opts: &DialOptions) -> io::Result<tokio::net::UdpSocket> {
+    bind_udp_port(family_of, 0, opts)
+}
+
+/// [`bind_udp`] on local `port` (0 for any).
+pub fn bind_udp_port(family_of: IpAddr, port: u16, opts: &DialOptions) -> io::Result<tokio::net::UdpSocket> {
     let domain = if family_of.is_ipv4() {
         socket2::Domain::IPV4
     } else {
@@ -105,9 +110,9 @@ pub fn bind_udp(family_of: IpAddr, opts: &DialOptions) -> io::Result<tokio::net:
         bind_device_sock(&sock, &iface, family_of)?;
     }
     let any: SocketAddr = if family_of.is_ipv4() {
-        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+        (std::net::Ipv4Addr::UNSPECIFIED, port).into()
     } else {
-        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+        (std::net::Ipv6Addr::UNSPECIFIED, port).into()
     };
     sock.bind(&any.into())?;
     tokio::net::UdpSocket::from_std(sock.into())

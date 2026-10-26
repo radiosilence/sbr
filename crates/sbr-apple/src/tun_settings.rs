@@ -5,7 +5,12 @@
 //! The rules follow sing-box's libbox platform interface:
 //!
 //! - `address` → interface addresses (IPv4 as address + mask, IPv6 as
-//!   address + prefix length). IPv6 settings only when an IPv6 address exists.
+//!   address + prefix length).
+//! - IPv6 with `auto_route` but no IPv6 address: the interface gets
+//!   [`UNROUTED_IPV6`] and the same routes, so IPv6 enters the tunnel instead
+//!   of leaving by the physical interface on a dual-stack network. The engine
+//!   has no IPv6 address to translate to and refuses those flows (TCP reset,
+//!   ICMPv6 unreachable), so clients fall back to IPv4 at once.
 //! - `auto_route` → included routes are `route_address` of that family, or
 //!   the default route when empty; `route_exclude_address` → excluded routes.
 //!   Without `auto_route` only the interface subnets reach the tunnel, routed
@@ -24,6 +29,10 @@ use serde_json::{Value, json};
 
 /// sing-box's default TUN MTU.
 const DEFAULT_MTU: u32 = 9000;
+/// The interface address for IPv6 that the engine does not carry, from a
+/// fixed ULA prefix (`fd73:6272::/48`, "sbr") that no config is likely to use.
+/// SbrKit's `Sbr.unroutedIPv6Address` repeats it.
+const UNROUTED_IPV6: &str = "fd73:6272::1/126";
 
 pub fn network_settings(options: &Options) -> Result<Value, String> {
     let tun = options
@@ -38,8 +47,12 @@ pub fn network_settings(options: &Options) -> Result<Value, String> {
 }
 
 fn build(t: &TunInbound) -> Value {
+    let unrouted: IpNet = UNROUTED_IPV6.parse().unwrap();
     let family = |v4: bool| -> Option<Value> {
-        let addrs: Vec<&IpNet> = t.address.iter().filter(|a| a.addr().is_ipv4() == v4).collect();
+        let mut addrs: Vec<&IpNet> = t.address.iter().filter(|a| a.addr().is_ipv4() == v4).collect();
+        if addrs.is_empty() && !v4 && t.auto_route {
+            addrs.push(&unrouted);
+        }
         if addrs.is_empty() {
             return None;
         }
@@ -141,7 +154,11 @@ mod tests {
     fn route_address_and_legacy_fields() {
         let s = settings(r#""inet4_address":"10.0.0.1/24","auto_route":true,"route_address":["1.2.3.4/8","8.8.8.8"]"#);
         assert_eq!(s["mtu"], 9000);
-        assert_eq!(s["ipv6"], Value::Null);
+        assert_eq!(s["ipv6"]["addresses"], json!(["fd73:6272::1"]));
+        assert_eq!(
+            s["ipv6"]["included_routes"],
+            json!([{"address":"::","prefix":0,"subnet_mask":"::"}])
+        );
         assert_eq!(
             s["ipv4"]["included_routes"],
             json!([
@@ -158,9 +175,20 @@ mod tests {
         assert_eq!(s["ipv4"]["included_routes"][0]["address"], "172.19.0.0");
         assert_eq!(s["ipv4"]["included_routes"].as_array().unwrap().len(), 1);
         assert_eq!(s["dns_servers"], json!([]));
+        assert_eq!(s["ipv6"], Value::Null, "nothing to leak without auto_route");
         // A /32 leaves no room for a DNS address; IPv6 takes over.
         let s = settings(r#""address":["172.19.0.1/32","fdfe::1/126"],"auto_route":true"#);
         assert_eq!(s["dns_servers"], json!(["fdfe::2"]));
+    }
+
+    #[test]
+    fn ipv4_only_auto_route_still_claims_ipv6() {
+        let s = settings(r#""address":["172.19.0.1/30"],"auto_route":true,"route_exclude_address":["fc00::/7"]"#);
+        assert_eq!(s["ipv6"]["addresses"], json!(["fd73:6272::1"]));
+        assert_eq!(s["ipv6"]["prefixes"], json!([126]));
+        assert_eq!(s["ipv6"]["included_routes"][0]["prefix"], 0);
+        assert_eq!(s["ipv6"]["excluded_routes"][0]["prefix"], 7);
+        assert_eq!(s["dns_servers"], json!(["172.19.0.2"]));
     }
 
     #[test]

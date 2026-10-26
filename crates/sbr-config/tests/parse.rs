@@ -176,6 +176,23 @@ fn rule_set_source() {
 }
 
 #[test]
+fn tun_without_dns_warns_of_the_system_resolver() {
+    let tun =
+        r#""inbounds":[{"type":"tun","address":["172.19.0.1/30"],"auto_route":true}],"outbounds":[{"type":"direct"}]"#;
+    let o = Options::parse(&format!("{{{tun}}}")).unwrap();
+    assert!(
+        o.warnings
+            .iter()
+            .any(|w| w.starts_with("dns: missing with a tun inbound"))
+    );
+    let o = Options::parse(&format!(
+        r#"{{{tun},"dns":{{"servers":[{{"type":"local","tag":"l"}}]}}}}"#
+    ))
+    .unwrap();
+    assert!(!o.warnings.iter().any(|w| w.starts_with("dns: missing")));
+}
+
+#[test]
 fn tun_inbound_and_actions() {
     let o = Options::parse(
         r#"{

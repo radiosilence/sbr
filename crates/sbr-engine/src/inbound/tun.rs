@@ -109,15 +109,16 @@ pub async fn start(engine: Arc<Engine>, tag: &str, t: &TunInbound, settings: &Se
         Some(TunTcp::Kernel) => false,
         None => t.stack == Some(TunStack::Gvisor),
     };
-    if t.strict_route {
-        warn!(inbound = tag, "strict_route is not enforced by sbr yet");
-    }
     let device = match settings.tun_fd {
         Some(fd) => {
-            // The platform (Network Extension) configured addresses and routes.
+            // The platform (Network Extension) configured addresses and routes,
+            // and enforces `strict_route` through its provider settings.
             Device::adopt(fd)?
         }
         None => {
+            if t.strict_route {
+                warn!(inbound = tag, "strict_route is not enforced by sbr yet");
+            }
             let routes = if t.auto_route { auto_routes(t) } else { Vec::new() };
             if t.auto_route {
                 // Pin our own sockets to the current default interface before

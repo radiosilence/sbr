@@ -208,7 +208,8 @@ int32_t sbr_set_crash_file(const char *path);
  *  "ipv4":{"addresses":["172.19.0.1"],"prefixes":[30],"subnet_masks":["255.255.255.252"],
  *          "included_routes":[{"address":"0.0.0.0","prefix":0,"subnet_mask":"0.0.0.0"}],
  *          "excluded_routes":[]},
- *  "ipv6":null or the same shape,
+ *  "ipv6":null or the same shape (with auto_route and no IPv6 address, the
+ *         unrouted ULA fd73:6272::1/126, whose flows the engine refuses),
  *  "dns_servers":["172.19.0.2"], "auto_route":true, "strict_route":false}
  * On error (bad config, no tun inbound) returns NULL and sets `error_out`. */
 char *sbr_tun_network_settings(const char *config_json, char **error_out);
