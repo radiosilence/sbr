@@ -81,6 +81,7 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: App/Bridging.h
         OTHER_LDFLAGS: $(inherited) -lresolv
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        "ASSETCATALOG_COMPILER_APPICON_NAME[sdk=appletv*]": "App Icon & Top Shelf Image"
         CODE_SIGN_ENTITLEMENTS: App/App.entitlements
         # Adds Access WiFi Information, for trusting the current network.
         "CODE_SIGN_ENTITLEMENTS[sdk=iphone*]": App/App-iOS.entitlements
