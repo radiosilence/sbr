@@ -29,7 +29,7 @@ use rustls::pki_types::{CertificateDer, EchConfigListBytes, PrivateKeyDer, Serve
 use rustls::{ClientConfig, RootCertStore};
 use sbr_config::TlsOutbound;
 use sbr_core::Stream;
-use tracing::info;
+use tracing::{info, warn};
 
 pub use conn::TlsConn;
 pub(crate) use io::rand_u32;
@@ -169,6 +169,49 @@ pub struct RealityClient {
 impl RealityClient {
     fn new(t: &TlsOutbound, server: &str) -> Result<Self, String> {
         let r = t.reality.as_ref().expect("reality options");
+        // sing-box refuses ECH and disable_sni with REALITY; a server cannot
+        // accept a ClientHello without SNI or below TLS 1.3 either.
+        let refused = [
+            (
+                t.disable_sni,
+                "tls.disable_sni: not supported with REALITY, which authenticates by SNI",
+            ),
+            (
+                t.ech.as_ref().is_some_and(|e| e.enabled),
+                "tls.ech: not supported with REALITY",
+            ),
+            (
+                t.max_version.as_deref().is_some_and(|v| v != "1.3"),
+                "tls.max_version: REALITY needs TLS 1.3",
+            ),
+        ];
+        if let Some((_, why)) = refused.iter().find(|(hit, _)| *hit) {
+            return Err(invalid(*why));
+        }
+        // sing-box accepts these and ignores them: the REALITY check replaces
+        // certificate verification, and a REALITY server never asks for a
+        // client certificate. Configs sing-box runs keep working here.
+        let ignored = [
+            ("insecure", t.insecure),
+            ("certificate", t.certificate.is_some() || t.certificate_path.is_some()),
+            ("certificate_sha256", !t.certificate_sha256.is_empty()),
+            (
+                "certificate_public_key_sha256",
+                !t.certificate_public_key_sha256.is_empty(),
+            ),
+            (
+                "client_certificate",
+                t.client_certificate.is_some() || t.client_certificate_path.is_some(),
+            ),
+            ("client_key", t.client_key.is_some() || t.client_key_path.is_some()),
+        ]
+        .iter()
+        .filter(|(_, set)| *set)
+        .map(|(name, _)| format!("tls.{name}"))
+        .collect::<Vec<_>>();
+        if !ignored.is_empty() {
+            warn!(server, fields = %ignored.join(", "), "ignored with REALITY");
+        }
         let name = t.server_name.clone().unwrap_or_else(|| server.to_owned());
         let mut config = sbr_reality::RealityConfig::new(name, &r.public_key, &r.short_id)
             .map_err(|e| format!("tls.reality: {e}"))?;
@@ -598,4 +641,65 @@ fn ech_config_list(pem: &[u8]) -> Result<Vec<u8>, String> {
     base64::engine::general_purpose::STANDARD
         .decode(b64)
         .map_err(|_| invalid("tls.ech.config: invalid ECH configs pem"))
+}
+
+#[cfg(test)]
+mod tests {
+    use sbr_config::{Ech, Reality};
+
+    use super::*;
+
+    fn reality() -> TlsOutbound {
+        TlsOutbound {
+            enabled: true,
+            server_name: Some("www.example.com".into()),
+            reality: Some(Reality {
+                enabled: true,
+                public_key: "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0".into(),
+                short_id: "0123456789abcdef".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reality_refuses_fields_it_cannot_honour() {
+        assert!(RealityClient::new(&reality(), "203.0.113.1").is_ok());
+        let cases = [
+            (
+                "tls.disable_sni",
+                TlsOutbound {
+                    disable_sni: true,
+                    ..reality()
+                },
+            ),
+            (
+                "tls.ech",
+                TlsOutbound {
+                    ech: Some(Ech {
+                        enabled: true,
+                        ..Default::default()
+                    }),
+                    ..reality()
+                },
+            ),
+            (
+                "tls.max_version",
+                TlsOutbound {
+                    max_version: Some("1.2".into()),
+                    ..reality()
+                },
+            ),
+        ];
+        for (field, t) in cases {
+            let err = RealityClient::new(&t, "203.0.113.1").err().expect(field);
+            assert!(err.starts_with(field), "{err}");
+        }
+        let mut t = reality();
+        t.max_version = Some("1.3".into());
+        t.min_version = Some("1.2".into());
+        t.insecure = true;
+        t.certificate_sha256 = vec!["AAAA".into()];
+        assert!(RealityClient::new(&t, "203.0.113.1").is_ok(), "ignored like sing-box");
+    }
 }

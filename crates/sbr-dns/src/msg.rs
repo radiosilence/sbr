@@ -112,13 +112,24 @@ pub fn answer_addrs(m: &Message) -> Vec<IpAddr> {
         .collect()
 }
 
+/// The longest TTL honoured, so that a poisoned or misconfigured answer
+/// cannot stay cached until LRU eviction. Unbound and BIND default to a day
+/// as well.
+pub const MAX_TTL: u32 = 86_400;
+
+/// A TTL from the wire: values with the top bit set are zero (RFC 2181 §8),
+/// and long ones are capped at [`MAX_TTL`].
+fn clamp_ttl(ttl: u32) -> u32 {
+    if ttl > i32::MAX as u32 { 0 } else { ttl.min(MAX_TTL) }
+}
+
 /// sing-box `computeTimeToLive`: the SOA negative TTL for an empty answer,
-/// else the smallest non-zero TTL of any record.
+/// else the smallest non-zero TTL of any record; clamped by [`clamp_ttl`].
 pub fn response_ttl(m: &Message) -> u32 {
     if m.answers.is_empty() {
         for r in &m.authorities {
             if let RData::SOA(soa) = &r.data {
-                return r.ttl.min(soa.minimum);
+                return clamp_ttl(r.ttl).min(clamp_ttl(soa.minimum));
             }
         }
     }
@@ -127,8 +138,9 @@ pub fn response_ttl(m: &Message) -> u32 {
         if r.record_type() == RecordType::OPT {
             continue;
         }
-        if ttl == 0 || (r.ttl > 0 && r.ttl < ttl) {
-            ttl = r.ttl;
+        let t = clamp_ttl(r.ttl);
+        if ttl == 0 || (t > 0 && t < ttl) {
+            ttl = t;
         }
     }
     ttl
@@ -187,25 +199,50 @@ pub fn is_simple(m: &Message) -> bool {
 }
 
 /// Shrink a response to fit `max` bytes on the wire, setting TC when
-/// answers had to go (the client retries over TCP).
+/// answers had to go (the client retries over TCP). Records go from the end
+/// of the additional, then authority, then answer sections.
 pub fn truncate_to(mut m: Message, max: usize) -> io::Result<Vec<u8>> {
-    let mut raw = encode(&m)?;
+    let raw = encode(&m)?;
     if raw.len() <= max {
         return Ok(raw);
     }
-    while raw.len() > max {
-        if m.additionals.pop().is_some() || m.authorities.pop().is_some() {
-        } else if m.answers.pop().is_some() {
-            m.metadata.truncation = true;
+    let (answers, authorities) = (m.answers.len(), m.authorities.len());
+    let records: Vec<Record> = std::mem::take(&mut m.answers)
+        .into_iter()
+        .chain(std::mem::take(&mut m.authorities))
+        .chain(std::mem::take(&mut m.additionals))
+        .collect();
+    // Keeps the first `k` records of answers ++ authorities ++ additionals.
+    let keep = |m: &mut Message, k: usize| {
+        let (an, rest) = records[..k].split_at(k.min(answers));
+        let (ns, ar) = rest.split_at(rest.len().min(authorities));
+        m.answers = an.to_vec();
+        m.authorities = ns.to_vec();
+        m.additionals = ar.to_vec();
+        encode(m)
+    };
+    // The encoded size grows with every record kept, so the largest count
+    // that fits is found by bisection: O(n log n) rather than one encoding
+    // per removed record. `lo` fits (or is 0), `hi` does not.
+    let (mut lo, mut hi) = (0, records.len());
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if keep(&mut m, mid)?.len() <= max {
+            lo = mid;
         } else {
-            m.metadata.truncation = true;
-            m.edns = None;
-            raw = encode(&m)?;
-            break;
+            hi = mid;
         }
-        raw = encode(&m)?;
     }
-    Ok(raw)
+    if lo < answers {
+        m.metadata.truncation = true;
+    }
+    let raw = keep(&mut m, lo)?;
+    if raw.len() <= max {
+        return Ok(raw);
+    }
+    m.metadata.truncation = true;
+    m.edns = None;
+    encode(&m)
 }
 
 /// The UDP payload size a client accepts (512 without EDNS).
@@ -289,6 +326,15 @@ mod tests {
         set_ttl(&mut m, 7);
         assert!(m.answers.iter().all(|r| r.ttl == 7));
         assert_eq!(answer_addrs(&m).len(), 2);
+
+        // RFC 2181 §8: a TTL with the top bit set counts as zero.
+        m.answers[0].ttl = 0x8000_0000;
+        m.answers[1].ttl = 30;
+        assert_eq!(response_ttl(&m), 30);
+        m.answers[1].ttl = u32::MAX;
+        assert_eq!(response_ttl(&m), 0);
+        m.answers[0].ttl = 0x7fff_ffff;
+        assert_eq!(response_ttl(&m), MAX_TTL);
     }
 
     #[test]
@@ -314,5 +360,34 @@ mod tests {
         let back = decode(&raw).unwrap();
         assert!(back.metadata.truncation);
         assert!(!back.answers.is_empty());
+        // As many answers as fit: one more would not.
+        let mut more = back.clone();
+        more.answers.push(Record::from_rdata(
+            more.answers[0].name.clone(),
+            60,
+            RData::A(A::new(10, 1, 1, 1)),
+        ));
+        assert!(encode(&more).unwrap().len() > 512);
+
+        // Additionals go before answers; nothing that fits is dropped.
+        let mut m = addresses(&q, &ips[..3], 60);
+        for i in 0..40u8 {
+            m.additionals.push(Record::from_rdata(
+                Name::from_ascii(format!("x{i}.a.test.")).unwrap(),
+                60,
+                RData::A(A::new(10, 2, 0, i)),
+            ));
+        }
+        let back = decode(&truncate_to(m, 512).unwrap()).unwrap();
+        assert!(!back.metadata.truncation);
+        assert_eq!(back.answers.len(), 3);
+        assert!(!back.additionals.is_empty() && back.additionals.len() < 40);
+
+        // A large answer still truncates quickly.
+        let ips: Vec<IpAddr> = (0..3_000u32)
+            .map(|i| IpAddr::from((0x0a00_0000 + i).to_be_bytes()))
+            .collect();
+        let raw = truncate_to(addresses(&q, &ips, 60), 512).unwrap();
+        assert!(raw.len() <= 512 && decode(&raw).unwrap().metadata.truncation);
     }
 }

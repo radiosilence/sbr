@@ -33,6 +33,7 @@
 //! # let _ = tls; Ok(()) }
 //! ```
 
+mod fallback;
 mod handshake;
 mod hello;
 mod keys;
@@ -188,7 +189,9 @@ pub fn parse_short_id(s: &str) -> io::Result<[u8; 8]> {
 ///
 /// Fails with `PermissionDenied` when the server answers with a real
 /// certificate: it did not accept our credentials and proxied its cover site.
-/// Nothing beyond the handshake is sent in that case.
+/// Before failing, the client requests the site's front page like the
+/// imitated browser and reads the response for up to three seconds; only the
+/// server name and fixed browser headers are sent.
 pub async fn connect<S>(stream: S, cfg: &RealityConfig) -> io::Result<RealityStream<S>>
 where
     S: AsyncRead + AsyncWrite + Unpin,

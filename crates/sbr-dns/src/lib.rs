@@ -842,7 +842,7 @@ impl Inner {
             }
         }
         let q = msg::query(domain, qtype)?;
-        let (resp, _) = self.query_server(idx, &q, opts, check).await?;
+        let (resp, _) = transport::for_dial(self.query_server(idx, &q, opts, check)).await?;
         let rcode = msg::rcode(&resp);
         if rcode != 0 {
             return Err(XErr::Io(rcode_error(rcode)));
