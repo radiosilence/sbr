@@ -162,6 +162,19 @@ impl Outbound for Socks {
                 Some(ip) if !ip.is_unspecified() => bound,
                 _ => Destination::new(self.server.host.clone(), bound.port),
             };
+            // Dialing directly, the relay's name is resolved once here so
+            // replies can be matched against the address datagrams go to.
+            let relay = match (&relay.host, &self.upstream) {
+                (Host::Domain(_), Upstream::System(opts, dns)) => {
+                    let addr = sbr_core::dial::resolve(&relay, opts.domain_strategy, dns.as_ref())
+                        .await?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no address for {relay}")))?;
+                    Destination::from(addr)
+                }
+                _ => relay,
+            };
             let conn = self.upstream.connect_udp(&relay).await?;
             Ok(Box::new(SocksPacket::new(conn, relay, ctrl)) as BoxPacketConn)
         })
@@ -224,10 +237,13 @@ impl PacketConn for SocksPacket {
         Box::pin(async move {
             let mut closed = self.closed.clone();
             loop {
-                let (n, _) = tokio::select! {
+                let (n, source) = tokio::select! {
                     r = self.conn.recv_from(buf) => r?,
                     _ = closed.wait_for(|c| *c) => return Err(io::ErrorKind::ConnectionAborted.into()),
                 };
+                if !from_relay(&source, &self.relay) {
+                    continue;
+                }
                 if n < 4 || buf[2] != 0 {
                     continue; // fragments are optional and unsupported (like sing-box)
                 }
@@ -240,5 +256,35 @@ impl PacketConn for SocksPacket {
                 return Ok((n - off, from));
             }
         })
+    }
+}
+
+/// Only the relay the server named may answer on the association.
+fn from_relay(source: &Destination, relay: &Destination) -> bool {
+    source.port == relay.port
+        && match (&source.host, &relay.host) {
+            (Host::Ip(a), Host::Ip(b)) => a.to_canonical() == b.to_canonical(),
+            (Host::Domain(a), Host::Domain(b)) => a.eq_ignore_ascii_case(b),
+            // Through a detour the relay's name is resolved remotely, so its
+            // address is not known here.
+            (Host::Ip(_), Host::Domain(_)) => true,
+            (Host::Domain(_), Host::Ip(_)) => false,
+        }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replies_only_from_relay() {
+        let relay = Destination::from_host_port("192.0.2.1", 1080);
+        assert!(from_relay(&relay, &relay));
+        assert!(from_relay(
+            &Destination::from_host_port("::ffff:192.0.2.1", 1080),
+            &relay
+        ));
+        assert!(!from_relay(&Destination::from_host_port("192.0.2.2", 1080), &relay));
+        assert!(!from_relay(&Destination::from_host_port("192.0.2.1", 1081), &relay));
     }
 }
