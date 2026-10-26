@@ -1,5 +1,6 @@
 //! DNS over TCP and over TLS (RFC 7766 / RFC 7858): one connection per
-//! server, queries pipelined on it and matched to answers by ID.
+//! server, queries pipelined on it and matched to answers by ID and
+//! question.
 //!
 //! The connection lives until the server closes it or it fails; the next
 //! query then dials a new one. Nothing is timed on our side while idle.
@@ -9,7 +10,7 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use hickory_proto::op::Message;
+use hickory_proto::op::{Message, Query};
 use sbr_core::BoxFuture;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -27,18 +28,21 @@ pub(crate) struct StreamTransport {
 /// Outstanding queries per upstream connection.
 const MAX_PENDING: usize = 4096;
 
+/// The question asked and where its answer goes.
+type Waiter = (Option<Query>, oneshot::Sender<Message>);
+
 /// State shared by a connection's task and its users.
 #[derive(Default)]
 pub(crate) struct Pending {
-    map: Mutex<HashMap<u16, oneshot::Sender<Message>>>,
+    map: Mutex<HashMap<u16, Waiter>>,
     dead: AtomicBool,
 }
 
 impl Pending {
-    /// Register a waiter under a fresh ID. Fails when too many queries are
-    /// outstanding on this connection; the ID search below would otherwise
-    /// spin forever once all 65536 IDs are taken.
-    pub fn register(self: &Arc<Self>) -> io::Result<(u16, oneshot::Receiver<Message>, Unregister)> {
+    /// Register a waiter for an answer to `query` under a fresh ID. Fails
+    /// when too many queries are outstanding on this connection; the ID
+    /// search below would otherwise spin forever once all 65536 IDs are taken.
+    pub fn register(self: &Arc<Self>, query: &Message) -> io::Result<(u16, oneshot::Receiver<Message>, Unregister)> {
         let mut map = self.map.lock().unwrap();
         if map.len() >= MAX_PENDING {
             return Err(io::Error::other("too many DNS queries in flight"));
@@ -48,12 +52,20 @@ impl Pending {
         while map.contains_key(&id) {
             id = id.wrapping_add(1);
         }
-        map.insert(id, tx);
+        map.insert(id, (query.queries.first().cloned(), tx));
         Ok((id, rx, Unregister(self.clone(), id)))
     }
 
+    /// Hands `m` to the waiter with its ID if it answers that waiter's
+    /// question; anything else is dropped and the waiter keeps waiting, so a
+    /// spoofer must guess the question as well as the ID.
     pub fn deliver(&self, m: Message) {
-        if let Some(tx) = self.map.lock().unwrap().remove(&m.metadata.id) {
+        let mut map = self.map.lock().unwrap();
+        let Some((q, _)) = map.get(&m.metadata.id) else { return };
+        if q.as_ref().map(question_key) != m.queries.first().map(question_key) {
+            return;
+        }
+        if let Some((_, tx)) = map.remove(&m.metadata.id) {
             let _ = tx.send(m);
         }
     }
@@ -67,6 +79,12 @@ impl Pending {
     pub fn is_dead(&self) -> bool {
         self.dead.load(Ordering::Acquire)
     }
+}
+
+/// Name (lowercase), type and class: servers may change the case of the
+/// question name (RFC 4343, DNS 0x20).
+fn question_key(q: &Query) -> (String, u16, u16) {
+    (msg::domain_of(q), u16::from(q.query_type()), u16::from(q.query_class()))
 }
 
 /// Drops a waiter whose caller gave up (timeout, cancellation).
@@ -153,7 +171,7 @@ impl StreamTransport {
             Ok(c) => c,
             Err(e) => return (Err(e), false),
         };
-        let (id, rx, _unregister) = match conn.pending.register() {
+        let (id, rx, _unregister) = match conn.pending.register(query) {
             Ok(r) => r,
             Err(e) => return (Err(e), false),
         };
@@ -190,5 +208,27 @@ impl Transport for StreamTransport {
                 (r, _) => r,
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn answers_must_match_the_question() {
+        let pending = Arc::new(Pending::default());
+        let query = msg::query("a.test", msg::TYPE_A).unwrap();
+        let (id, mut rx, _unregister) = pending.register(&query).unwrap();
+        let answer = |name: &str, qtype: u16| {
+            let mut m = msg::addresses(&msg::query(name, qtype).unwrap(), &["1.2.3.4".parse().unwrap()], 60);
+            m.metadata.id = id;
+            m
+        };
+        pending.deliver(answer("b.test", msg::TYPE_A));
+        pending.deliver(answer("a.test", msg::TYPE_AAAA));
+        assert!(rx.try_recv().is_err(), "a wrong question is dropped");
+        pending.deliver(answer("A.Test", msg::TYPE_A));
+        assert_eq!(msg::answer_addrs(&rx.try_recv().unwrap()).len(), 1);
     }
 }

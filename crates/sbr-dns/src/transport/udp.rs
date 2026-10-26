@@ -1,5 +1,5 @@
 //! DNS over UDP: one socket (or proxied UDP association) per server shared
-//! by all queries, answers matched by ID. A truncated answer is retried
+//! by all queries, answers matched by ID and question. A truncated answer is retried
 //! over TCP to the same server through the same dialer.
 
 use std::io;
@@ -92,7 +92,7 @@ impl Transport for Udp {
     fn exchange<'a>(&'a self, query: &'a Message) -> BoxFuture<'a, io::Result<Message>> {
         Box::pin(async move {
             let c = self.conn().await?;
-            let (id, mut rx, _unregister) = c.pending.register()?;
+            let (id, mut rx, _unregister) = c.pending.register(query)?;
             let raw = encode_with_id(query, id)?;
             c.pc.send_to(&raw, &c.dest).await?;
             let resp = match tokio::time::timeout(RETRANSMIT, &mut rx).await {
