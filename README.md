@@ -274,4 +274,4 @@ What "drop-in compatible" means here: sing-box is about 174k lines of Go before 
 
 ## Licence
 
-Mozilla Public License 2.0 ([LICENSE](LICENSE)). Changes to sbr's own files stay open source; the code can still be built into and distributed with other software, including through the App Store.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Use it for anything; keep the copyright notice.
