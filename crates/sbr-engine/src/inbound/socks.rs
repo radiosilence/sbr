@@ -8,8 +8,9 @@ use bytes::Bytes;
 use sbr_core::{BoxFuture, Destination, Metadata, Network};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpStream, UdpSocket};
+use tokio::time::Instant;
 
-use super::Context;
+use super::{Context, within};
 use crate::dispatch::{InboundStream, OpenError};
 use crate::socks5::*;
 use crate::udp::{UdpPacket, UdpWriteBack};
@@ -65,8 +66,28 @@ impl AsyncWrite for SocksClient {
     }
 }
 
-pub async fn handle(ctx: &Context, mut s: TcpStream) -> io::Result<()> {
+pub async fn handle(ctx: &Context, mut s: TcpStream, deadline: Instant) -> io::Result<()> {
     let source = s.peer_addr()?;
+    let Some((cmd, destination, user)) = within(deadline, handshake(ctx, &mut s)).await? else {
+        return Ok(());
+    };
+    match cmd {
+        CMD_CONNECT => {
+            let mut meta = Metadata::new(ctx.tag.clone(), ctx.type_name(), Network::Tcp, source, destination);
+            meta.user = user;
+            ctx.engine.route_tcp(meta, SocksClient { s, replied: false }).await
+        }
+        CMD_UDP_ASSOCIATE => udp_associate(ctx, s, source).await,
+        _ => {
+            write_reply(&mut s, REP_CMD_UNSUPPORTED).await?;
+            Ok(())
+        }
+    }
+}
+
+/// Greeting, authentication and request: the command, its address and the
+/// authenticated user. `None` when no offered method is acceptable.
+async fn handshake(ctx: &Context, s: &mut TcpStream) -> io::Result<Option<(u8, Destination, Option<Arc<str>>)>> {
     if s.read_u8().await? != VER {
         return Err(invalid("not SOCKS5"));
     }
@@ -79,13 +100,13 @@ pub async fn handle(ctx: &Context, mut s: TcpStream) -> io::Result<()> {
     if ctx.users.is_empty() {
         if !methods.contains(&NO_AUTH) {
             s.write_all(&[VER, NO_ACCEPTABLE]).await?;
-            return Ok(());
+            return Ok(None);
         }
         s.write_all(&[VER, NO_AUTH]).await?;
     } else {
         if !methods.contains(&USER_PASS) {
             s.write_all(&[VER, NO_ACCEPTABLE]).await?;
-            return Ok(());
+            return Ok(None);
         }
         s.write_all(&[VER, USER_PASS]).await?;
         let _ver = s.read_u8().await?;
@@ -109,19 +130,8 @@ pub async fn handle(ctx: &Context, mut s: TcpStream) -> io::Result<()> {
 
     let mut head = [0u8; 3];
     s.read_exact(&mut head).await?;
-    let destination = read_addr(&mut s).await?;
-    match head[1] {
-        CMD_CONNECT => {
-            let mut meta = Metadata::new(ctx.tag.clone(), ctx.type_name(), Network::Tcp, source, destination);
-            meta.user = user;
-            ctx.engine.handle_tcp(meta, SocksClient { s, replied: false }).await
-        }
-        CMD_UDP_ASSOCIATE => udp_associate(ctx, s, source).await,
-        _ => {
-            write_reply(&mut s, REP_CMD_UNSUPPORTED).await?;
-            Ok(())
-        }
-    }
+    let destination = read_addr(s).await?;
+    Ok(Some((head[1], destination, user)))
 }
 
 /// RFC 1928 §7. The association lives as long as the TCP control connection.
