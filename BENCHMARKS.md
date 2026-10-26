@@ -1,28 +1,43 @@
 # Benchmarks
 
-Run 2026-10-25 on an otherwise idle 4-vCPU Linux VM, three runs each, after all
-protocol work merged. sing-box is HEAD (a6952cc) built with
-`with_quic,with_utls,with_wireguard,with_gvisor`. Both cores get the **same
-config file**; servers are sing-box on loopback. Gbit/s, min–max over 3 runs.
+Run 2026-10-26 (b3bb52f and later) in an OrbStack Linux VM with 8 vCPUs on an
+Apple M1 Pro, three rounds each. sing-box is the 1.14.4 release build
+(linux-arm64). Both cores get the **same config file**; servers are sing-box on
+loopback. Gbit/s, min–max over 3 rounds.
 
 | path | sbr | sing-box | verdict |
 |---|---|---|---|
-| socks → direct | 36.2–37.3 | 34.8–39.8 | tie (sing-box uses `splice(2)` on Linux; Darwin has none) |
-| socks → shadowsocks-2022 | 19.4–19.4 | 16.7–17.7 | **sbr +10–16%** |
-| TUN (system stack) → direct | 5.4–5.9 | 5.0–5.5 | **sbr +6–9%** |
-| vless + tls, up / down | 13.7–16.9 / 14.4–16.3 | 13.1–14.5 / 13.5–14.6 | **sbr ahead** in 5 of 6 |
-| trojan + tls, up / down | 15.5–17.5 / 15.0–16.8 | 13.0–14.4 / 13.3–13.7 | **sbr +14–23%** |
-| vmess aes-128-gcm, up / down | 14.7–15.8 / 14.9–15.7 | 12.6–13.3 / 11.8–13.1 | **sbr +17–31%** |
-| hysteria2 upload | 2.18–2.35 | 2.35–2.38 | sing-box slightly faster; sbr uses **8–15% less CPU per GB** |
-| WireGuard 4 streams, up | 1.97–2.33 | 2.46–2.77 | **sing-box +15–40%** |
-| WireGuard 4 streams, down | 4.06–4.60 | 2.55–2.68 | **sbr +52–72%** |
+| socks → direct | 112.7–128.7 | 155.1–166.0 | **sing-box +20–47%** (`splice(2)` on Linux; Darwin has none) |
+| socks → shadowsocks-2022 | 44.8–49.5 | 31.6–45.1 | **sbr ahead** |
+| vless + tls, up / down | 38.6–45.2 / 41.5–48.0 | 38.2–42.5 / 39.4–42.3 | sbr ahead in 5 of 6 rounds |
+| trojan + tls, up / down | 43.6–45.5 / 42.4–48.4 | 38.6–41.8 / 38.8–41.7 | **sbr +2–25%** |
+| vmess aes-128-gcm, up / down | 39.8–43.0 / 39.3–40.1 | 36.8–38.6 / 35.4–36.9 | **sbr +3–17%** |
+| hysteria2 upload | 4.19–4.48, 1.47–1.59 CPU-s/GB | 3.08–3.26, 1.49–1.61 | **sbr +29–45%** at the same CPU per GB |
+| WireGuard 4 streams, up | 3.02–3.07, 1.53–1.56 CPU-s/GB | 2.05–2.14, 8.21–8.58 | **sbr +41–50%** at a fifth of the CPU |
+| WireGuard 4 streams, down | 2.22–2.38, 2.01–2.04 | 1.84–2.09, 6.22–6.44 | **sbr +6–29%** at a third of the CPU |
 
 Takeaways:
-- Encrypted proxy paths (SS-2022, TLS protocols) are where sbr wins clearly.
-- WireGuard upload loses here (Linux, before the Darwin work below).
-- hysteria2 throughput is at parity, with lower client CPU per byte.
-- TUN CPU numbers aren't comparable: sbr's figure includes the in-process load
-  generator and sink.
+- Every encrypted path is sbr's. hysteria2 upload turned from a loss on
+  2026-10-25 (2.18–2.35 against 2.35–2.38) once streams were spread over two
+  QUIC connections; WireGuard upload turned with the connected-socket send path.
+- Plain relay to `direct` is the one loss: sing-box moves bytes between two TCP
+  sockets with `splice(2)` without copying them through userspace.
+
+## Through a real server (macOS, home Wi-Fi)
+
+Run 2026-10-26: an M1 Pro on home Wi-Fi, each client a local SOCKS proxy to the
+same hysteria2 server (apernet hysteria with Salamander on a Hetzner VM),
+downloading `nbg1-speed.hetzner.com/10GB.bin` for 20 s, two rounds. Server CPU
+from `kubectl top` (15 s windows, approximate).
+
+| | throughput | client CPU | server CPU |
+|---|---|---|---|
+| tunnel off | 472–500 Mbit/s | — | — |
+| sbr | 566–574 Mbit/s | 51–60% of a core | ~0.56 core |
+| sing-box | 515–553 Mbit/s | 87–92% of a core | ~1.4 cores |
+
+Both tunnels beat the direct download because the server reaches the test host
+by a better route than the home connection does.
 
 Reproduce: `cargo build --release -p sbr-engine --examples`, then
 `throughput 4 5 <sb>`, `tun_bench 4 5 <sb>` (root; both TCP stacks, each direction), `proxy_bench <sb> 4 5`,

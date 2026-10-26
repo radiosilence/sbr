@@ -1,25 +1,53 @@
 {
-  "_source": "BENCHMARKS.md: Linux runs of 2026-10-25, macOS runs of 2026-10-26. Each value is [min, max] over the rounds of that run.",
+  "_source": "BENCHMARKS.md: runs of 2026-10-26 (Linux and macOS) and the TUN runs of 2026-10-25. Each value is [min, max] over the rounds of that run.",
   "charts": [
     {
       "id": "linux-throughput",
-      "title": "Throughput, sbr and sing-box as clients, Linux",
+      "title": "Throughput over TCP, sbr and sing-box as clients, Linux",
       "unit": "Gbit/s",
       "better": "higher",
       "series": ["sbr", "sing-box"],
       "rows": [
-        { "label": "socks → direct", "values": [[36.2, 37.3], [34.8, 39.8]] },
-        { "label": "socks → shadowsocks-2022", "values": [[19.4, 19.4], [16.7, 17.7]] },
-        { "label": "tun (system stack) → direct", "values": [[5.4, 5.9], [5.0, 5.5]] },
-        { "label": "vless + tls, up", "values": [[13.7, 16.9], [13.1, 14.5]] },
-        { "label": "vless + tls, down", "values": [[14.4, 16.3], [13.5, 14.6]] },
-        { "label": "trojan + tls, up", "values": [[15.5, 17.5], [13.0, 14.4]] },
-        { "label": "trojan + tls, down", "values": [[15.0, 16.8], [13.3, 13.7]] },
-        { "label": "vmess aes-128-gcm, up", "values": [[14.7, 15.8], [12.6, 13.3]] },
-        { "label": "vmess aes-128-gcm, down", "values": [[14.9, 15.7], [11.8, 13.1]] },
-        { "label": "hysteria2, up", "values": [[2.18, 2.35], [2.35, 2.38]] },
-        { "label": "wireguard, 4 streams, up", "values": [[1.97, 2.33], [2.46, 2.77]] },
-        { "label": "wireguard, 4 streams, down", "values": [[4.06, 4.6], [2.55, 2.68]] }
+        { "label": "socks → direct", "values": [[112.7, 128.7], [155.1, 166.0]] },
+        { "label": "socks → shadowsocks-2022", "values": [[44.8, 49.5], [31.6, 45.1]] },
+        { "label": "vless + tls, up", "values": [[38.6, 45.2], [38.2, 42.5]] },
+        { "label": "vless + tls, down", "values": [[41.5, 48.0], [39.4, 42.3]] },
+        { "label": "trojan + tls, up", "values": [[43.6, 45.5], [38.6, 41.8]] },
+        { "label": "trojan + tls, down", "values": [[42.4, 48.4], [38.8, 41.7]] },
+        { "label": "vmess aes-128-gcm, up", "values": [[39.8, 43.0], [36.8, 38.6]] },
+        { "label": "vmess aes-128-gcm, down", "values": [[39.3, 40.1], [35.4, 36.9]] }
+      ]
+    },
+    {
+      "id": "linux-udp",
+      "title": "Throughput over UDP (QUIC and WireGuard), Linux",
+      "unit": "Gbit/s",
+      "better": "higher",
+      "series": ["sbr", "sing-box"],
+      "rows": [
+        { "label": "hysteria2, up", "values": [[4.19, 4.48], [3.08, 3.26]] },
+        { "label": "wireguard, 4 streams, up", "values": [[3.02, 3.07], [2.05, 2.14]] },
+        { "label": "wireguard, 4 streams, down", "values": [[2.22, 2.38], [1.84, 2.09]] }
+      ]
+    },
+    {
+      "id": "live-throughput",
+      "title": "hysteria2 download through a real server, macOS on Wi-Fi",
+      "unit": "Mbit/s",
+      "better": "higher",
+      "series": ["sbr", "sing-box"],
+      "rows": [
+        { "label": "download", "values": [[566, 574], [515, 553]] }
+      ]
+    },
+    {
+      "id": "live-cpu",
+      "title": "Client CPU during that download",
+      "unit": "% of one core",
+      "better": "lower",
+      "series": ["sbr", "sing-box"],
+      "rows": [
+        { "label": "download", "values": [[51, 60], [87, 92]] }
       ]
     },
     {
