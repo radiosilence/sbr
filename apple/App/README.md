@@ -82,6 +82,17 @@ longer has is skipped with a warning in the logs tab. When rules change, the
 tunnel closes open connections to the affected domains so they reconnect on the
 new route. The profiles tab lists the rules for deleting.
 
+## Blocking traffic outside the tunnel
+
+**Block traffic outside the tunnel** is SbrKit's leak protection (see
+`apple/README.md`, "Leak protection"). It follows the active profile's
+`strict_route` until the user changes it, and is off for profiles without it,
+because it stops AirDrop, CarPlay, AirPlay and LAN servers and can leave the
+device offline during an app update. On iOS and macOS, **allow local network**
+under it lets local traffic bypass the tunnel again. tvOS gets only the route
+enforcement, so a LAN server stays reachable there only through a
+`route_exclude_address` entry in the profile. Changes apply on reconnect.
+
 ## Auto-connect
 
 With auto-connect on, the VPN configuration carries on-demand rules: disconnect

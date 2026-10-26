@@ -28,15 +28,18 @@ That is the whole extension. The base class:
 2. Builds `NEPacketTunnelNetworkSettings` from the config's `tun` inbound with
    `sbr_tun_network_settings`. That function is Rust, so it shares the strict parser and its
    tests:
-   - `address` sets the interface addresses (IPv6 settings only when there is an IPv6
-     address) and `mtu` sets the MTU (default 9000).
+   - `address` sets the interface addresses and `mtu` sets the MTU (default 9000).
    - `auto_route` adds the default routes, or `route_address` when that is set.
-     `route_exclude_address` becomes excluded routes.
+     `route_exclude_address` becomes excluded routes. With `auto_route` and no IPv6
+     address, the interface still gets IPv6 routes on the ULA `fd73:6272::1/126`; the
+     engine has no IPv6 address to carry them on and answers each flow with a TCP reset
+     or ICMPv6 unreachable. On a dual-stack network IPv6 would otherwise leave by the
+     physical interface; this way clients fall back to IPv4 through the tunnel at once.
    - DNS, with `auto_route`: the address after the first IPv4 interface address
      (`172.19.0.1/30` gives `172.19.0.2`), matching all domains. System DNS then enters the
      tunnel, where a `hijack-dns` rule answers it. These are sing-box libbox semantics.
-   - `strict_route` has no per-route equivalent. Set
-     `NETunnelProviderProtocol.includeAllNetworks` in the app instead.
+   - `strict_route` has no per-route equivalent; it is a property of the VPN
+     configuration, which the app saves. See [Leak protection](#leak-protection).
 3. Calls `setTunnelNetworkSettings`. Then it finds the utun fd that NetworkExtension
    opened (`sbr_find_tun_fd`: scan the fd table and match the
    `UTUN_OPT_IFNAME` name against "utun", like WireGuard-apple and sing-box) and
@@ -78,6 +81,73 @@ never logged.
 
 Override `loadConfiguration()`, `coreOptions` (threads, buffer, connection cap)
 or `handle(_:)` to customise.
+
+### Leak protection
+
+`Sbr.applyLeakProtection(to:enabled:allowLocalNetwork:)` is the Network Extension form
+of `strict_route`. It is a property of the saved VPN configuration rather than of the
+tunnel settings, so the app applies it when it saves the configuration. The sbr app
+turns it on when the profile's `tun` inbound sets `strict_route`
+(`Sbr.strictRoute(config:)`) unless the user has set "block traffic outside the tunnel"
+either way. It stays off otherwise because it breaks local traffic.
+
+| property | strict | why |
+|---|---|---|
+| `includeAllNetworks` | on | Everything enters the tunnel, connections opened before it came up included, and nothing leaves while the tunnel is down. |
+| `excludeLocalNetworks` | off; on with "allow local network" | It exempts whatever the current network calls local. TunnelCrack's LocalNet attack declares public ranges local to take them out of the tunnel. |
+| `enforceRoutes` | on | The tunnel's routes win over more specific ones the network pushes (DHCP option 121, TunnelVision; LocalNet). |
+
+The tvOS SDK has only `enforceRoutes`, so on tvOS strict mode is that alone. Apple
+still exempts DHCP, captive-portal probes, carrier cellular services and, by default,
+APNs (`excludeAPNs`, `excludeCellularServices`, left at their defaults), and Proton and
+IVPN report Apple-service traffic leaving regardless.
+
+Strict mode stops AirDrop, CarPlay, AirPlay and LAN servers on iOS and macOS. "Allow
+local network" restores them at the cost of the LocalNet protection. A narrower
+alternative is `route_exclude_address` with the LAN's own prefix in the profile, which
+exempts only that range; whether excluded routes are honoured under
+`includeAllNetworks` is unverified (see the matrix below).
+
+**The extension's own sockets.** With `includeAllNetworks` the system does not reliably
+exempt the extension's sockets from its own tunnel; Mullvad saw them stall. The
+provider therefore calls `sbr_set_default_interface` with the first physical interface
+`NWPathMonitor` reports, and every outbound socket sbr opens (TCP dials, direct UDP, the
+QUIC socket, WireGuard's socket, DNS transports) is bound to it with `IP_BOUND_IF` /
+`IPV6_BOUND_IF`. These are BSD sockets; `NWConnection` with `requiredInterface` is not
+used. `sendmsg_x` is never used on the utun (see HANDOVER.md).
+
+**Server names.** An outbound's server name is resolved by its `domain_resolver`, else
+`route.default_domain_resolver`, else the DNS rules and `dns.final`. A config with no
+`dns` section, or whose resolver is `local`, resolves through `getaddrinfo` in the
+extension: the physical network's resolver, in cleartext, which a hostile network can
+answer with its own address (TunnelCrack ServerIP). `sbr check` warns when a config has
+a `tun` inbound and no `dns` section. Give servers IP addresses, or resolve them with an
+encrypted resolver addressed by IP.
+
+**App updates.** Mullvad reports that updating the app while a tunnel with
+`includeAllNetworks` is up can leave the device with no connectivity: the update stops
+the extension, the system keeps blocking, and nothing starts it again. The app's
+toggle text tells users to turn strict mode off before updating. To recover, turn the
+VPN off in Settings › VPN (or System Settings › VPN on macOS), or remove the sbr
+configuration there, or restart the device; then reconnect from the updated app.
+
+**Device test matrix.** None of this has run on a device. Each row needs iOS, and macOS
+(app extension and system extension) where marked; tvOS where it applies.
+
+| case | setup | expected |
+|---|---|---|
+| Dual-stack, IPv4-only profile | Wi-Fi with IPv6, `tun` with only an IPv4 address, `auto_route` | Diagnose's IPv6 check passes; an IPv6-only site fails at once, others load over IPv4 |
+| IPv4-only network | Same profile | Normal browsing; no stall from the IPv6 routes |
+| Strict: own sockets | Strict on; REALITY, hysteria2 and WireGuard profiles; iOS and macOS | Each connects and carries traffic; the extension log shows outbound sockets bound to `en0` / `pdp_ip0` |
+| Strict: earlier connections | Start a long download or SSH session, then connect | It stops or moves into the tunnel; the exit IP of new connections is the proxy's |
+| Strict: roaming | Wi-Fi to cellular and back while streaming | Sockets re-pin to the new interface and traffic resumes |
+| Tunnel restart | Stop the extension (memory kill, crash, or reconnect) | Strict: nothing leaves while it is down; off: auto-connect brings it back |
+| App update | TestFlight update with strict on | Record whether connectivity returns; check the recovery steps above |
+| DHCP option 121 | Test AP pushing a classless route for a public /24 via the AP | Strict: that range still goes through the tunnel; off: record |
+| LocalNet | Test AP whose LAN subnet is a public range | Strict: the range stays in the tunnel; "allow local network" on: record the leak |
+| LAN access | Apple TV streaming from a LAN server; iPhone AirPlay | Strict breaks it; "allow local network" (iOS/macOS) or `route_exclude_address` with the LAN prefix restores it; tvOS: only `route_exclude_address` |
+| No `dns` section | Capture port 53 on the router | Confirm the extension's lookups reach the router's resolver in cleartext, and that `sbr check` warns |
+| ServerIP | LAN resolver answers the server's name with another address | With `domain_resolver` over DoH by IP, the tunnel still reaches the real server |
 
 ## C ABI
 
