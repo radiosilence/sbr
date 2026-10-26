@@ -34,9 +34,10 @@ impl HttpConnect {
         }
         let tls = match c.tls.as_ref().filter(|t| t.enabled) {
             // We speak HTTP/1.1 only, so offer only that unless told otherwise.
-            Some(t) => {
-                Some(TlsClient::new(t, &c.server.server, ctx.base_dir.as_deref())?.with_default_alpn(&["http/1.1"]))
-            }
+            Some(t) => Some(
+                TlsClient::new(t, &c.server.server, ctx.base_dir.as_deref(), &ctx.dns)?
+                    .with_default_alpn(&["http/1.1"]),
+            ),
             None => None,
         };
         let server = Destination::from_host_port(&c.server.server, c.server.server_port);

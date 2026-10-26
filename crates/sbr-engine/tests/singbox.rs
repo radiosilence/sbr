@@ -841,3 +841,87 @@ async fn tls_options_interop() {
     })
     .await;
 }
+
+/// ECH with no static config: sbr looks the HTTPS record of
+/// `query_server_name` up through its own DNS router (here a UDP server on
+/// loopback publishing sing-box's ECH config) and handshakes with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ech_config_from_dns_interop() {
+    use hickory_proto::rr::rdata::HTTPS;
+    use hickory_proto::rr::rdata::svcb::{EchConfigList, SVCB, SvcParamKey, SvcParamValue};
+    use hickory_proto::rr::{Name, RData, Record};
+    use sbr_dns::msg;
+
+    let Some(bin) = singbox() else { return };
+    let out = Command::new(&bin)
+        .args(["generate", "ech-keypair", "example.com"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    let split = text.find("-----BEGIN ECH KEYS-----").unwrap();
+    let (config, keys) = text.split_at(split);
+    let b64: String = config.lines().filter(|l| !l.starts_with("-----")).collect();
+    let list = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+
+    let dns = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dns_port = dns.local_addr().unwrap().port();
+    let queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let q2 = queries.clone();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 4096];
+        while let Ok((n, from)) = dns.recv_from(&mut buf).await {
+            let Ok(q) = msg::decode(&buf[..n]) else { continue };
+            let mut m = msg::status(&q, 0);
+            let name = msg::domain_of(&q.queries[0]);
+            if u16::from(q.queries[0].query_type()) == msg::TYPE_HTTPS && name == "ech.test" {
+                q2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let ech = (
+                    SvcParamKey::EchConfigList,
+                    SvcParamValue::EchConfigList(EchConfigList(list.clone())),
+                );
+                m.answers.push(Record::from_rdata(
+                    q.queries[0].name().clone(),
+                    300,
+                    RData::HTTPS(HTTPS(SVCB::new(1, Name::root(), vec![ech]))),
+                ));
+            }
+            let _ = dns.send_to(&msg::encode(&m).unwrap(), from).await;
+        }
+    });
+
+    let pki = pki("ech-dns");
+    let mut sb = None;
+    let mut port = 0;
+    for _ in 0..3 {
+        port = free_port();
+        let mut tls = pki.server_tls();
+        tls["ech"] = json!({"enabled": true, "key": keys.lines().collect::<Vec<_>>()});
+        let inbound = json!({
+            "type": "trojan", "listen": "127.0.0.1", "listen_port": port,
+            "users": [{"password": PASSWORD}], "tls": tls,
+        });
+        sb = try_start_singbox(&bin, &pki.dir, vec![inbound]).await;
+        if sb.is_some() {
+            break;
+        }
+    }
+    let _sb = sb.expect("sing-box failed to start");
+
+    let mut tls = pki.client_tls();
+    tls["ech"] = json!({"enabled": true, "query_server_name": "ech.test"});
+    let opts = Options::from_value(json!({
+        "dns": {"servers": [{"type": "udp", "tag": "loopback", "server": "127.0.0.1", "server_port": dns_port}]},
+        "outbounds": [{
+            "type": "trojan", "tag": "ech", "server": "127.0.0.1", "server_port": port,
+            "password": PASSWORD, "tls": tls,
+        }],
+    }))
+    .unwrap();
+    let engine = Engine::new(&opts, &Settings::default()).unwrap();
+    let out = engine.outbound("ech").unwrap().clone();
+    let echo = tcp_echo().await;
+    tcp_roundtrip(&out, echo, MIB).await.unwrap();
+    tcp_roundtrip(&out, echo, 64 * 1024).await.unwrap();
+    assert_eq!(queries.load(std::sync::atomic::Ordering::Relaxed), 1);
+    let _ = std::fs::remove_dir_all(&pki.dir);
+}

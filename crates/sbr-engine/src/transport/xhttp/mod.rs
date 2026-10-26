@@ -490,7 +490,7 @@ impl XhttpClient {
         base: ServerDialer,
         tls: Option<&TlsOutbound>,
         upstream: Upstream,
-        base_dir: Option<&std::path::Path>,
+        ctx: &crate::outbound::BuildContext,
     ) -> Result<Self, String> {
         let up = Endpoint::new(cfg, base, tls, "tls")?;
         let down = match &cfg.download {
@@ -499,7 +499,7 @@ impl XhttpClient {
                 let dtls = d.tls.as_ref().filter(|t| t.enabled);
                 let client = match dtls {
                     Some(t) => Some(
-                        TlsClient::new(t, &d.server.server, base_dir)
+                        TlsClient::new(t, &d.server.server, ctx.base_dir.as_deref(), &ctx.dns)
                             .map_err(|e| format!("transport.downloadSettings.{e}"))?,
                     ),
                     None => None,

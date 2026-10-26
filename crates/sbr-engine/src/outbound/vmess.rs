@@ -58,7 +58,7 @@ pub struct Vmess {
 
 impl Vmess {
     pub fn new(tag: String, c: &VmessOutbound, upstream: Upstream, ctx: &BuildContext) -> Result<Self, String> {
-        let dialer = ProxyDialer::new(&c.common, upstream, ctx.base_dir.as_deref())?;
+        let dialer = ProxyDialer::new(&c.common, upstream, ctx)?;
         let security = match c.security.as_str() {
             // sing-box: `auto` over TLS is `zero`; otherwise AES-GCM where
             // the CPU has it (all of sbr's targets).

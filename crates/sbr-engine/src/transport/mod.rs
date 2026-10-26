@@ -13,8 +13,8 @@ use std::io;
 use sbr_config::{Transport, V2rayCommon};
 use sbr_core::{Destination, Host, Stream};
 
-use crate::outbound::Upstream;
-use crate::tls::{Retry, TlsClient, TlsConn};
+use crate::outbound::{BuildContext, Upstream};
+use crate::tls::{EchRetry, Retry, TlsClient, TlsConn};
 
 pub use prefixed::Prefixed;
 
@@ -70,16 +70,19 @@ impl ServerDialer {
 
     /// TCP + TLS, keeping the concrete TLS type (XTLS Vision needs it). A
     /// handshake cut before the server answered is retried on a fresh
-    /// connection once per automatic fragmentation level it raised.
+    /// connection once per automatic fragmentation level it raised, and an
+    /// ECH rejection carrying `retry_configs` once.
     pub async fn tls(&self) -> io::Result<TlsConn> {
         let tls = self
             .tls
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "TLS required"))?;
+        let mut ech_retried = false;
         loop {
             let (s, fd) = self.tcp().await?;
             match tls.connect(s, fd).await {
                 Err(e) if Retry::is(&e) => continue,
+                Err(e) if EchRetry::is(&e) && !ech_retried => ech_retried = true,
                 r => return r,
             }
         }
@@ -110,10 +113,10 @@ pub struct ProxyDialer {
 
 impl ProxyDialer {
     /// Errors name the offending config field.
-    pub fn new(c: &V2rayCommon, upstream: Upstream, base_dir: Option<&std::path::Path>) -> Result<Self, String> {
+    pub fn new(c: &V2rayCommon, upstream: Upstream, ctx: &BuildContext) -> Result<Self, String> {
         let server = Destination::from_host_port(&c.server.server, c.server.server_port);
         let tls = match c.tls() {
-            Some(t) => Some(TlsClient::new(t, &c.server.server, base_dir)?),
+            Some(t) => Some(TlsClient::new(t, &c.server.server, ctx.base_dir.as_deref(), &ctx.dns)?),
             None => None,
         };
         let base = ServerDialer::new(upstream.clone(), server, tls);
@@ -161,9 +164,7 @@ impl ProxyDialer {
                 method.as_deref(),
                 headers,
             )),
-            Some(Transport::Xhttp(x)) => {
-                Kind::Xhttp(xhttp::XhttpClient::new(x, base.clone(), c.tls(), upstream, base_dir)?)
-            }
+            Some(Transport::Xhttp(x)) => Kind::Xhttp(xhttp::XhttpClient::new(x, base.clone(), c.tls(), upstream, ctx)?),
             Some(Transport::Quic) => return Err("transport.type: quic transport not supported by sbr yet".into()),
         };
         Ok(Self { base, kind })

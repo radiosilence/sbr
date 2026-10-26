@@ -54,7 +54,7 @@ pub fn parse_uuid(s: &str) -> [u8; 16] {
 
 impl Vless {
     pub fn new(tag: String, c: &VlessOutbound, upstream: Upstream, ctx: &BuildContext) -> Result<Self, String> {
-        let dialer = ProxyDialer::new(&c.common, upstream, ctx.base_dir.as_deref())?;
+        let dialer = ProxyDialer::new(&c.common, upstream, ctx)?;
         let xudp = match c.packet_encoding {
             PacketEncoding::Xudp => true,
             PacketEncoding::None => false,

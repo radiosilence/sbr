@@ -2320,6 +2320,7 @@ dependencies = [
  "h2",
  "h3",
  "h3-quinn",
+ "hickory-proto",
  "http",
  "http-body-util",
  "httparse",

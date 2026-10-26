@@ -25,7 +25,7 @@ impl Trojan {
         Ok(Self {
             tag,
             key: key(&c.password),
-            dialer: ProxyDialer::new(&c.common, upstream, ctx.base_dir.as_deref())?,
+            dialer: ProxyDialer::new(&c.common, upstream, ctx)?,
             tcp: c.common.tcp(),
             udp: c.common.udp(),
         })
