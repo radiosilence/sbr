@@ -91,6 +91,9 @@ targets:
           "CODE_SIGN_STYLE[sdk=iphoneos*]": Manual
           "CODE_SIGN_IDENTITY[sdk=iphoneos*]": Apple Distribution
           "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": sbr App Store
+          "CODE_SIGN_STYLE[sdk=appletvos*]": Manual
+          "CODE_SIGN_IDENTITY[sdk=appletvos*]": Apple Distribution
+          "PROVISIONING_PROFILE_SPECIFIER[sdk=appletvos*]": sbr tvOS App Store
 
   SbrTunnel:
     type: app-extension
@@ -124,6 +127,9 @@ targets:
           "CODE_SIGN_STYLE[sdk=iphoneos*]": Manual
           "CODE_SIGN_IDENTITY[sdk=iphoneos*]": Apple Distribution
           "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": sbr tunnel App Store
+          "CODE_SIGN_STYLE[sdk=appletvos*]": Manual
+          "CODE_SIGN_IDENTITY[sdk=appletvos*]": Apple Distribution
+          "PROVISIONING_PROFILE_SPECIFIER[sdk=appletvos*]": sbr tunnel tvOS App Store
 
   SbrWidgets:
     type: app-extension
