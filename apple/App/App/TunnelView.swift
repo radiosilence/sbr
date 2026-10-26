@@ -55,7 +55,12 @@ struct TunnelView: View {
                     .fill(tunnel.isConnected ? Color.sbrAccent : Color.sbrRule)
                     .frame(width: 8, height: 8)
                 Text(tunnel.status.label).font(.sbr(.title)).foregroundStyle(Color.sbrStrong)
+                #if os(tvOS)
+                // Beside the status, where focus finds it from the tab row.
+                Spacer().frame(width: Theme.Space.xxl)
+                #else
                 Spacer()
+                #endif
                 Button(tunnel.isOn ? "disconnect" : "connect") {
                     Task { await tunnel.setOn(!tunnel.isOn) }
                 }

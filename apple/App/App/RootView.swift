@@ -22,7 +22,15 @@ struct RootView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            #if os(tvOS)
+            // Without sections, tvOS only moves focus up from a tab to a
+            // control roughly above it, which a lone button often isn't.
+            .focusSection()
+            #endif
             tabBar
+            #if os(tvOS)
+            .focusSection()
+            #endif
         }
         .background(Color.sbrBg.ignoresSafeArea())
         .foregroundStyle(Color.sbrInk)
