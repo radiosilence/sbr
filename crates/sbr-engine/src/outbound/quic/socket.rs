@@ -399,7 +399,8 @@ impl AsyncUdpSocket for Salamander {
         // Each GSO segment gets its own salt; segments stay equal-sized
         // (+8 each), so the batch remains valid for GSO.
         for chunk in t.contents.chunks(seg) {
-            let salt: [u8; SALT] = fastrand::u64(..).to_ne_bytes();
+            let mut salt = [0u8; SALT];
+            aws_lc_rs::rand::fill(&mut salt).expect("system RNG");
             let key = self.key(&salt);
             out.extend_from_slice(&salt);
             let start = out.len();

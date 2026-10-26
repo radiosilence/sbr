@@ -31,7 +31,6 @@ h3-quinn = "0.0.10"
 http = "1"
 blake2 = "0.10"
 rustls-pki-types = { version = "1", features = ["std"] }
-rustls-platform-verifier = "0.6"
 fastrand = "2"
 socket2 = "0.6"
 sha3 = "0.11"
