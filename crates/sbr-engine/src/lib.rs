@@ -387,8 +387,9 @@ impl Instance {
             .tun_fd
             .map(|fd| unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) });
         let engine = Arc::new(Engine::new(options, &settings)?);
+        // A cache is an optimisation; never let it stop the tunnel.
         if options.experimental.cache_file.is_some() && engine.cache.is_none() {
-            return Err(Error::Service("cache file could not be opened".into()));
+            warn!("cache file could not be opened; running without it");
         }
         let mut tasks = JoinSet::new();
         if let Some(sets) = &engine.remote_sets {

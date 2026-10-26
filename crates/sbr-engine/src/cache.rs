@@ -23,7 +23,7 @@ use tracing::warn;
 const CACHE_BYTES: usize = 512 * 1024;
 
 pub struct CacheFile {
-    db: Database,
+    db: Arc<Database>,
     /// `cache_id` namespaces every table, like sing-box's per-ID buckets.
     prefix: String,
     pub store_fakeip: bool,
@@ -166,10 +166,28 @@ impl CacheFile {
         {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        let db = Database::builder()
-            .set_cache_size(CACHE_BYTES)
-            .create(path)
-            .map_err(|e| format!("open cache file {}: {e}", path.display()))?;
+        // One handle per file per process: a hot reload opens the cache while
+        // the previous engine may still hold it, and the database's file lock
+        // would refuse a second open from the same process.
+        static OPEN: std::sync::Mutex<
+            Option<std::collections::HashMap<std::path::PathBuf, std::sync::Weak<Database>>>,
+        > = std::sync::Mutex::new(None);
+        let key = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+        let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+        let open = open.get_or_insert_with(Default::default);
+        let db = match open.get(&key).and_then(std::sync::Weak::upgrade) {
+            Some(db) => db,
+            None => {
+                let db = Arc::new(
+                    Database::builder()
+                        .set_cache_size(CACHE_BYTES)
+                        .create(path)
+                        .map_err(|e| format!("open cache file {}: {e}", path.display()))?,
+                );
+                open.insert(key, Arc::downgrade(&db));
+                db
+            }
+        };
         Ok(Arc::new(Self {
             db,
             prefix: options
@@ -230,6 +248,18 @@ impl CacheFile {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_reload_can_reopen_the_file_the_running_engine_holds() {
+        let dir = std::env::temp_dir().join(format!("sbr-cache-reopen-{}", std::process::id()));
+        let path = dir.join("cache.db");
+        let opts = sbr_config::CacheFileOptions::default();
+        let a = CacheFile::open(&path, &opts).unwrap();
+        let b = CacheFile::open(&path, &opts).expect("second open while the first is alive");
+        drop((a, b));
+        CacheFile::open(&path, &opts).expect("open after both closed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]
