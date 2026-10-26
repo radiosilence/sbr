@@ -31,20 +31,27 @@ fn listen_addr(i: *mut SbrInstance) -> SocketAddr {
     unsafe { &*i }.lock().running.as_ref().unwrap().listening[0].1
 }
 
-/// SOCKS5 no-auth CONNECT; returns the stream and the reply code.
+/// A refusal by closing: an inbound over its connection cap closes before
+/// the SOCKS greeting.
+const CLOSED: u8 = 0xff;
+
+/// SOCKS5 no-auth CONNECT; returns the stream and the reply code, or
+/// `CLOSED` when the proxy closed the connection instead of replying.
 fn socks(proxy: SocketAddr, to: SocketAddr) -> (TcpStream, u8) {
     let mut s = TcpStream::connect(proxy).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    s.write_all(&[5, 1, 0]).unwrap();
     let mut b = [0u8; 2];
-    s.read_exact(&mut b).unwrap();
+    if s.write_all(&[5, 1, 0]).is_err() || s.read_exact(&mut b).is_err() {
+        return (s, CLOSED);
+    }
     let SocketAddr::V4(v4) = to else { unreachable!() };
     let mut req = vec![5, 1, 0, 1];
     req.extend_from_slice(&v4.ip().octets());
     req.extend_from_slice(&v4.port().to_be_bytes());
-    s.write_all(&req).unwrap();
     let mut rep = [0u8; 10];
-    s.read_exact(&mut rep).unwrap();
+    if s.write_all(&req).is_err() || s.read_exact(&mut rep).is_err() {
+        return (s, CLOSED);
+    }
     (s, rep[1])
 }
 
