@@ -147,19 +147,115 @@ async fn rustls_interop_suites_and_groups() {
     }
 }
 
-#[tokio::test]
-async fn ordinary_tls_server_is_rejected() {
+/// A cover site that accepts one HTTP/2 connection through `h2` (an
+/// independent implementation, so a malformed preface, frame or header block
+/// fails the handshake there), answers the first request with 200 and
+/// reports it once the client has closed the connection.
+async fn h2_cover_site() -> (std::net::SocketAddr, tokio::sync::oneshot::Receiver<http::Request<()>>) {
     let cfg = server_config(
         provider::cipher_suite::TLS13_AES_128_GCM_SHA256,
         provider::kx_group::X25519,
     );
-    let addr = rustls_echo(cfg, None).await;
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (tcp, _) = l.accept().await.unwrap();
+        let tls = tokio_rustls::TlsAcceptor::from(cfg).accept(tcp).await.unwrap();
+        let mut conn = h2::server::handshake(tls).await.expect("HTTP/2 preface and SETTINGS");
+        let (req, mut respond) = conn.accept().await.expect("a request").expect("well-formed request");
+        let res = http::Response::builder().status(200).body(()).unwrap();
+        respond.send_response(res, true).unwrap();
+        // The client closes once the response has ended.
+        while let Some(r) = conn.accept().await {
+            assert!(r.is_err(), "second request");
+        }
+        tx.send(req.map(|_| ())).unwrap();
+    });
+    (addr, rx)
+}
+
+#[tokio::test]
+async fn unauthenticated_client_browses_the_cover_site_over_h2() {
+    for (fp, ua) in [
+        (Fingerprint::Chrome, "Chrome/155"),
+        (Fingerprint::Firefox, "Firefox/148"),
+        (Fingerprint::Safari, "Version/27.0 Safari"),
+        (Fingerprint::Ios, "iPhone"),
+    ] {
+        let (addr, req) = h2_cover_site().await;
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let started = std::time::Instant::now();
+        let err = connect(tcp, &test_config(fp, true)).await.err().expect("must fail");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+        // The end of the response, not the time limit, ended the exchange.
+        assert!(started.elapsed() < crate::fallback::TIME_LIMIT, "{fp:?}");
+        let req = tokio::time::timeout(std::time::Duration::from_secs(2), req)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.method(), http::Method::GET);
+        assert_eq!(req.uri().to_string(), format!("https://{SNI}/"));
+        let agent = req.headers()["user-agent"].to_str().unwrap();
+        assert!(agent.contains(ua), "{fp:?}: {agent}");
+        assert!(req.headers().contains_key("accept-language"), "{fp:?}");
+    }
+}
+
+#[tokio::test]
+async fn unauthenticated_client_browses_the_cover_site_over_http1() {
+    let ck = rcgen::generate_simple_self_signed(vec![SNI.into()]).unwrap();
+    let mut cfg = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(ck.cert.der().to_vec())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(ck.signing_key.serialize_der())),
+        )
+        .unwrap();
+    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = l.accept().await.unwrap();
+        let mut tls = tokio_rustls::TlsAcceptor::from(Arc::new(cfg))
+            .accept(tcp)
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = tls.read(&mut buf).await.unwrap();
+            assert!(n > 0, "EOF before the request ended");
+            got.extend_from_slice(&buf[..n]);
+        }
+        tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .await
+            .unwrap();
+        let mut rest = Vec::new();
+        tls.read_to_end(&mut rest).await.unwrap();
+        got
+    });
     let tcp = TcpStream::connect(addr).await.unwrap();
+    let started = std::time::Instant::now();
     let err = connect(tcp, &test_config(Fingerprint::Chrome, true))
         .await
         .err()
         .expect("must fail");
     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+    assert!(started.elapsed() < crate::fallback::TIME_LIMIT);
+    let got = server.await.unwrap();
+    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut req = httparse::Request::new(&mut headers);
+    assert!(req.parse(&got).unwrap().is_complete());
+    assert_eq!((req.method, req.path, req.version), (Some("GET"), Some("/"), Some(1)));
+    let header = |name: &str| {
+        req.headers
+            .iter()
+            .find(|h| h.name == name)
+            .map(|h| std::str::from_utf8(h.value).unwrap().to_owned())
+    };
+    assert_eq!(header("Host").as_deref(), Some(SNI));
+    assert!(header("User-Agent").unwrap().contains("Chrome/155"));
 }
 
 #[tokio::test]

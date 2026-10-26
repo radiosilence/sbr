@@ -14,6 +14,7 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::RealityConfig;
+use crate::fallback;
 use crate::hello::{
     CERT_COMPRESSION_BROTLI, CERT_COMPRESSION_ZLIB, CERT_COMPRESSION_ZSTD, GROUP_X25519, GROUP_X25519_MLKEM768, Hello,
     HelloParams, KeyShares, MLKEM768_CIPHERTEXT_LEN, SESSION_ID_OFFSET, ecdh_alg,
@@ -644,23 +645,11 @@ where
     io.flush().await?;
     out.clear();
 
-    if let Auth::Reality { skip_verify, .. } = auth
-        && reality_key.is_none()
-        && !skip_verify
-    {
-        // Like sing-box: a real certificate means the server did not accept
-        // us (wrong key, short_id, time or SNI) and proxied a real site. The
-        // handshake above completed like a browser's; send nothing else.
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "REALITY verification failed: server presented a non-REALITY certificate",
-        ));
-    }
     // RFC 8449: the limit counts the inner content type byte.
     let max_fragment = negotiated
         .record_size_limit
         .map_or(MAX_PLAINTEXT, |l| (l as usize - 1).min(MAX_PLAINTEXT));
-    Ok(TlsStream::new(
+    let mut tls = TlsStream::new(
         io,
         rb,
         RecordKey::new(suite, s_ap),
@@ -669,7 +658,25 @@ where
         negotiated.alpn,
         group,
         max_fragment,
-    ))
+    );
+    if let Auth::Reality { cfg, skip_verify } = auth
+        && reality_key.is_none()
+        && !skip_verify
+    {
+        // Like sing-box: a real certificate means the server did not accept
+        // us (wrong key, short_id, time or SNI) and proxied a real site.
+        // Behave like the browser the handshake imitated before giving up.
+        let _ = tokio::time::timeout(fallback::TIME_LIMIT, async {
+            fallback::browse(&mut tls, cfg.fingerprint, &cfg.server_name).await;
+            let _ = tls.shutdown().await;
+        })
+        .await;
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "REALITY verification failed: server presented a non-REALITY certificate",
+        ));
+    }
+    Ok(tls)
 }
 
 #[cfg(test)]
