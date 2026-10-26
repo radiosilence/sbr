@@ -35,7 +35,7 @@ struct TunnelView: View {
         Toggle(isOn: $tunnel.strict) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("block traffic outside the tunnel").font(.sbr(.control))
-                Text("includes connections opened before connecting. takes effect on reconnect.")
+                Text("includes connections opened before connecting. while the tunnel is down nothing gets through, including app updates: turn this off before updating sbr. auto-connect below is the gentler option. takes effect on reconnect.")
                     .font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
             }
         }
