@@ -6,8 +6,9 @@ import os
 /// A complete packet tunnel: subclass it (an empty subclass is enough) and
 /// name the subclass as the extension's principal / provider class.
 ///
-/// Start-up: read the sing-box config (`providerConfiguration["config"]`, or
-/// `config.json` in the App Group named by `providerConfiguration["appGroup"]`),
+/// Start-up: read the sing-box config (from the Keychain item named by
+/// `providerConfiguration["stored"]`, else `providerConfiguration["config"]`,
+/// or `config.json` in the App Group named by `providerConfiguration["appGroup"]`),
 /// derive `NEPacketTunnelNetworkSettings` from its `tun` inbound, apply them,
 /// find the utun fd NetworkExtension created and start sbr on it. Path
 /// changes and wake-ups reset path-bound state; app messages
@@ -17,8 +18,9 @@ import os
 /// profile itself on its interval: downloaded through its own outbounds
 /// (`Sbr.fetchProfile`), validated, then hot-reloaded. A profile that fails
 /// validation leaves the running config untouched. The last good download is
-/// kept in the extension's container, survives restarts, and is what
-/// `SbrRequest.profile` returns for the app to store.
+/// kept (in the Keychain beside a stored profile, else in the extension's
+/// container), survives restarts, and is what `SbrRequest.profile` returns for
+/// the app to store.
 open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     private static let subsystem = Bundle.main.bundleIdentifier ?? "sbr"
     public let logger = Logger(subsystem: SbrPacketTunnelProvider.subsystem, category: "tunnel")
@@ -63,27 +65,47 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     /// paths in the config (cache_file, local rule-sets) live when no App
     /// Group is configured. tvOS has no persistent files, so there it is the
     /// caches directory, which the system may purge; both are rebuilt.
-    static var privateDirectory: URL? {
+    /// The cache and logs name servers and destinations: the directory is
+    /// kept out of backups, and files created in it inherit its protection
+    /// (readable after first unlock, for on-demand starts).
+    static let privateDirectory: URL? = {
         #if os(tvOS)
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
         #else
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
         #endif
         guard let dir = base else { return nil }
-        let sbr = dir.appendingPathComponent("sbr", isDirectory: true)
+        var sbr = dir.appendingPathComponent("sbr", isDirectory: true)
         try? FileManager.default.createDirectory(at: sbr, withIntermediateDirectories: true)
+        #if !os(macOS)
+        try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                                               ofItemAtPath: sbr.path)
+        #endif
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? sbr.setResourceValues(values)
         return sbr
+    }()
+
+    private var stored: SbrStoredProfile? { Self.stored(providerConfiguration) }
+
+    private static func stored(_ pc: [String: Any]) -> SbrStoredProfile? {
+        (pc[SbrProviderKey.stored] as? Data).flatMap { try? JSONDecoder().decode(SbrStoredProfile.self, from: $0) }
     }
 
     /// Override to load the config from somewhere else (Keychain, a server).
     open func loadConfiguration() throws -> String {
+        if let stored {
+            guard let config = try stored.secret().config else { throw SbrError("the profile has not been downloaded") }
+            return config
+        }
         if let inline = providerConfiguration[SbrProviderKey.config] as? String {
             return inline
         }
         if let group = providerConfiguration[SbrProviderKey.appGroup] as? String {
             return try SbrConfigStore(appGroup: group).load()
         }
-        throw SbrError("no config: set providerConfiguration[\"config\"] or [\"appGroup\"]")
+        throw SbrError("no config: set providerConfiguration[\"stored\"], [\"config\"] or [\"appGroup\"]")
     }
 
     /// Override to tune the core (threads, buffers, connection cap). The TUN
@@ -99,7 +121,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         reportPreviousSession()
         do {
             let saved = Self.savedState(providerConfiguration)
-            let (text, remote) = Self.newest(try loadConfiguration(), remote: saved.remote)
+            let (text, remote) = newest(try loadConfiguration(), remote: saved.remote)
             setState(remote: remote, logLevel: saved.logLevel, rules: saved.rules)
             let config = prepared(text, logLevel: saved.logLevel, rules: saved.rules)
             try await setTunnelNetworkSettings(try Sbr.tunnelNetworkSettings(config: config))
@@ -159,7 +181,11 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         if case .logs = request { return SbrResponse(logs: SbrRecentLogs.shared.snapshot()) }
         if case .profile = request {
             let current = state.remote
-            return SbrResponse(profile: Self.loadSnapshot().flatMap { $0.url == current?.url ? $0 : nil })
+            return SbrResponse(profile: loadSnapshot().flatMap { $0.url == current?.url ? $0 : nil })
+        }
+        if case .erase = request {
+            erase()
+            return SbrResponse()
         }
         guard let core else { throw SbrError("sbr is not running") }
         switch request {
@@ -182,7 +208,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             return SbrResponse(connections: core.connections())
         case .logs:
             return SbrResponse(logs: SbrRecentLogs.shared.snapshot())
-        case .profile:
+        case .profile, .erase:
             return SbrResponse()
         case let .reload(config, remote, logLevel, rules):
             var saved = config == nil
@@ -192,9 +218,9 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             let before = state.rules
             // A copy the tunnel downloaded after the app's wins: the app may
             // not have picked it up yet.
-            let (text, newest) = Self.newest(try config ?? loadConfiguration(), remote: saved.remote)
+            let (text, latest) = newest(try config ?? loadConfiguration(), remote: saved.remote)
             try await run(text, logLevel: saved.logLevel, rules: saved.rules)
-            setState(remote: newest, logLevel: saved.logLevel, rules: saved.rules)
+            setState(remote: latest, logLevel: saved.logLevel, rules: saved.rules)
             for d in SbrPersonalRules.changedDomains(from: before, to: saved.rules) {
                 core.closeConnections(domain: d.domain, subdomains: d.subdomains)
             }
@@ -268,7 +294,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         let now = Date()
-        Self.saveSnapshot(SbrProfileSnapshot(url: remote.url, text: text, updated: now))
+        saveSnapshot(SbrProfileSnapshot(url: remote.url, text: text, updated: now))
         lock.lock()
         if self.remote?.url == remote.url { self.remote?.updated = now }
         lock.unlock()
@@ -280,8 +306,13 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     private static func savedState(_ pc: [String: Any])
         -> (remote: SbrRemoteProfile?, logLevel: String?, rules: [SbrPersonalRule])
     {
-        let remote = (pc[SbrProviderKey.remote] as? Data).flatMap {
+        var remote = (pc[SbrProviderKey.remote] as? Data).flatMap {
             try? JSONDecoder().decode(SbrRemoteProfile.self, from: $0)
+        }
+        if let stored = stored(pc) {
+            remote = (try? stored.secret().url).flatMap {
+                SbrRemoteProfile(url: $0, refreshMinutes: stored.refreshMinutes, updated: stored.updated)
+            }
         }
         return (remote, pc[SbrProviderKey.logLevel] as? String,
                 SbrPersonalRules.decode(pc[SbrProviderKey.personalRules] as? Data))
@@ -306,7 +337,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// `config` for `remote`, or the tunnel's own later download of it.
-    private static func newest(_ config: String, remote: SbrRemoteProfile?) -> (String, SbrRemoteProfile?) {
+    private func newest(_ config: String, remote: SbrRemoteProfile?) -> (String, SbrRemoteProfile?) {
         guard var remote, let snap = loadSnapshot(), snap.url == remote.url,
               snap.updated > (remote.updated ?? .distantPast)
         else { return (config, remote) }
@@ -336,19 +367,39 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private static var snapshotURL: URL? { privateDirectory?.appendingPathComponent("remote-profile.json") }
+    private static let snapshotAccount = "tunnel.snapshot"
 
-    private static func loadSnapshot() -> SbrProfileSnapshot? {
-        guard let url = snapshotURL, let data = try? Data(contentsOf: url) else { return nil }
+    private func loadSnapshot() -> SbrProfileSnapshot? {
+        if let stored { return try? stored.keychain.value(SbrProfileSnapshot.self, Self.snapshotAccount) }
+        guard let url = Self.snapshotURL, let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(SbrProfileSnapshot.self, from: data)
     }
 
-    /// Holds server credentials: protected until first unlock, out of backups.
-    private static func saveSnapshot(_ snapshot: SbrProfileSnapshot) {
-        guard var url = snapshotURL, let data = try? JSONEncoder().encode(snapshot) else { return }
+    /// Holds server credentials: in the Keychain with a stored profile, so
+    /// erasing the app's items removes it too; otherwise protected until
+    /// first unlock and out of backups.
+    private func saveSnapshot(_ snapshot: SbrProfileSnapshot) {
+        if let stored {
+            try? stored.keychain.set(value: snapshot, for: Self.snapshotAccount)
+            return
+        }
+        guard var url = Self.snapshotURL, let data = try? JSONEncoder().encode(snapshot) else { return }
         try? data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         try? url.setResourceValues(values)
+    }
+
+    /// Delete everything the extension keeps on disk: the cache file,
+    /// rule-sets, the downloaded profile and the session logs. The app stops
+    /// the tunnel next.
+    private func erase() {
+        heartbeat?.cancel()
+        heartbeat = nil
+        let fm = FileManager.default
+        guard let dir = Self.privateDirectory,
+              let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
+        for item in items { try? fm.removeItem(at: item) }
     }
 
     /// The device is going to sleep. An idle sbr arms no timers, so there's

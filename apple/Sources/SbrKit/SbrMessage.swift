@@ -23,6 +23,9 @@ public enum SbrRequest: Codable, Sendable {
                 rules: [SbrPersonalRule]? = nil)
     /// The remote profile the tunnel last downloaded itself, if any.
     case profile
+    /// Delete the extension's files (cache, rule-sets, logs, downloaded
+    /// profile) before the app stops the tunnel and removes its configuration.
+    case erase
 }
 
 /// A remote profile the tunnel keeps fresh by itself. The URL usually
