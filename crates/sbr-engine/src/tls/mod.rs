@@ -10,11 +10,14 @@
 //! - **Rustls**: when `utls.enabled` is explicitly false, or when the config
 //!   needs what the browser client lacks (TLS 1.2 via `max_version`, client
 //!   certificates, ECH). Those are refused instead when `utls` is enabled.
+//!   ECH configs come from the config or from DNS ([`ech`]); a server's
+//!   `retry_configs` get one fresh connection ([`EchRetry`]).
 //! - **REALITY**: `sbr-reality` with the REALITY handshake.
 //!
 //! All three can fragment the ClientHello ([`Fragment`]).
 
 mod conn;
+pub(crate) mod ech;
 mod io;
 pub(crate) mod verify;
 
@@ -23,12 +26,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use rustls::client::{EchConfig, EchMode};
+use rustls::client::EchMode;
+use rustls::client::danger::ServerCertVerifier;
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, EchConfigListBytes, PrivateKeyDer, ServerName};
-use rustls::{ClientConfig, RootCertStore};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::{ClientConfig, RootCertStore, SupportedProtocolVersion};
 use sbr_config::TlsOutbound;
 use sbr_core::Stream;
+use sbr_core::dns::Dns;
 use tracing::{info, warn};
 
 pub use conn::TlsConn;
@@ -362,8 +367,16 @@ impl Fragment {
     }
 }
 
+/// A rustls config and the ECHConfigList it offers.
+type EchConfigFor = (Arc<[u8]>, Arc<ClientConfig>);
+
 pub struct RustlsClient {
+    base: Arc<RustlsBase>,
+    alpn: Vec<Vec<u8>>,
+    /// The config without ECH; with ECH, one per ECHConfigList.
     config: Arc<ClientConfig>,
+    ech: Option<Arc<ech::EchSource>>,
+    ech_config: std::sync::Mutex<Option<EchConfigFor>>,
     server_name: ServerName<'static>,
     /// `alpn` as configured (transports may substitute a default).
     alpn_configured: bool,
@@ -398,15 +411,21 @@ fn inline_or_file(
 
 impl TlsClient {
     /// Build from options. `server` is the outbound's `server`, used when
-    /// `server_name` is unset. Errors name the offending `tls.*` field.
-    pub fn new(t: &TlsOutbound, server: &str, base: Option<&std::path::Path>) -> Result<Self, String> {
+    /// `server_name` is unset; `dns` looks up ECH configs that the options
+    /// leave to DNS. Errors name the offending `tls.*` field.
+    pub fn new(
+        t: &TlsOutbound,
+        server: &str,
+        base: Option<&std::path::Path>,
+        dns: &Arc<dyn Dns>,
+    ) -> Result<Self, String> {
         if t.reality.as_ref().is_some_and(|r| r.enabled) {
             return Ok(Self::Reality(Arc::new(RealityClient::new(t, server)?)));
         }
         if let Some(fp) = browser_fingerprint(t)? {
             return Ok(Self::Browser(Arc::new(BrowserClient::new(t, server, base, fp)?)));
         }
-        Ok(Self::Rustls(Arc::new(RustlsClient::new(t, server, base)?)))
+        Ok(Self::Rustls(Arc::new(RustlsClient::new(t, server, base, dns)?)))
     }
 
     /// The same client with `alpn` as default ALPN when the config set none
@@ -418,7 +437,11 @@ impl TlsClient {
                 let mut config = (*c.config).clone();
                 config.alpn_protocols = alpn.iter().map(|a| a.as_bytes().to_vec()).collect();
                 Self::Rustls(Arc::new(RustlsClient {
+                    base: c.base.clone(),
+                    alpn: config.alpn_protocols.clone(),
                     config: Arc::new(config),
+                    ech: c.ech.clone(),
+                    ech_config: Default::default(),
                     server_name: c.server_name.clone(),
                     alpn_configured: true,
                     handshake_timeout: c.handshake_timeout,
@@ -505,82 +528,152 @@ impl TlsClient {
     }
 }
 
-impl RustlsClient {
-    fn new(t: &TlsOutbound, server: &str, base: Option<&std::path::Path>) -> Result<Self, String> {
-        let server_name = parse_server_name(t, server)?;
+/// What every rustls config of one outbound shares.
+struct RustlsBase {
+    versions: Vec<&'static SupportedProtocolVersion>,
+    verifier: Arc<dyn ServerCertVerifier>,
+    client_auth: Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
+    enable_sni: bool,
+}
 
+impl RustlsBase {
+    fn build(&self, alpn: &[Vec<u8>], ech: Option<&[u8]>) -> Result<ClientConfig, String> {
         // `utls` never reaches rustls: it selects the browser client.
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-
-        let versions = versions(t)?;
-        let builder = ClientConfig::builder_with_provider(provider.clone());
-        let builder = match &t.ech {
-            Some(e) if e.enabled => {
-                let pem = inline_or_file(&e.config, &e.config_path, base)?.ok_or_else(|| {
-                    invalid("tls.ech.config: fetching ECH configs from DNS is not supported by sbr yet; set config")
-                })?;
-                let list = ech_config_list(&pem)?;
-                let cfg = EchConfig::new(
-                    EchConfigListBytes::from(list),
-                    rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES,
-                )
-                .map_err(|e| invalid(format!("tls.ech.config: {e}")))?;
-                if !versions.contains(&&rustls::version::TLS13) {
-                    return Err(invalid("tls.ech: requires TLS 1.3"));
-                }
+        let builder = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+        let builder = match ech {
+            Some(list) => {
+                let cfg = ech::parse(list).map_err(|e| invalid(format!("tls.ech.config: {e}")))?;
                 builder
                     .with_ech(EchMode::from(cfg))
                     .map_err(|e| invalid(format!("tls.ech: {e}")))?
             }
-            _ => builder
-                .with_protocol_versions(&versions)
+            None => builder
+                .with_protocol_versions(&self.versions)
                 .map_err(|e| invalid(format!("tls: {e}")))?,
         };
-
         let builder = builder
             .dangerous()
-            .with_custom_certificate_verifier(server_verifier(t, base)?);
+            .with_custom_certificate_verifier(self.verifier.clone());
+        let mut config = match &self.client_auth {
+            Some((chain, key)) => builder
+                .with_client_auth_cert(chain.clone(), key.clone_key())
+                .map_err(|e| invalid(format!("tls.client_certificate: {e}")))?,
+            None => builder.with_no_client_auth(),
+        };
+        config.enable_sni = self.enable_sni;
+        config.alpn_protocols = alpn.to_vec();
+        Ok(config)
+    }
+}
 
+impl RustlsClient {
+    fn new(t: &TlsOutbound, server: &str, base: Option<&std::path::Path>, dns: &Arc<dyn Dns>) -> Result<Self, String> {
+        let server_name = parse_server_name(t, server)?;
+        let versions = versions(t)?;
         let cert = inline_or_file(&t.client_certificate, &t.client_certificate_path, base)?;
         let key = inline_or_file(&t.client_key, &t.client_key_path, base)?;
-        let mut config = match (cert, key) {
+        let client_auth = match (cert, key) {
             (Some(cert), Some(key)) => {
                 let chain = CertificateDer::pem_slice_iter(&cert)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| invalid(format!("tls.client_certificate: {e}")))?;
                 let key = PrivateKeyDer::from_pem_slice(&key).map_err(|e| invalid(format!("tls.client_key: {e}")))?;
-                builder
-                    .with_client_auth_cert(chain, key)
-                    .map_err(|e| invalid(format!("tls.client_certificate: {e}")))?
+                Some((chain, key))
             }
-            (None, None) => builder.with_no_client_auth(),
+            (None, None) => None,
             _ => {
                 return Err(invalid(
                     "tls.client_certificate: client certificate and client key must be provided together",
                 ));
             }
         };
-        config.enable_sni = !t.disable_sni;
-        config.alpn_protocols = t.alpn.iter().map(|a| a.as_bytes().to_vec()).collect();
-        let fragment = Arc::new(Fragment::new(t));
+        let ech = match &t.ech {
+            Some(e) if e.enabled => {
+                if !versions.contains(&&rustls::version::TLS13) {
+                    return Err(invalid("tls.ech: requires TLS 1.3"));
+                }
+                let name = match &server_name {
+                    ServerName::DnsName(d) => d.as_ref().to_owned(),
+                    _ => String::new(),
+                };
+                Some(Arc::new(ech::EchSource::new(e, &name, base, dns)?))
+            }
+            _ => None,
+        };
+        let rb = RustlsBase {
+            versions,
+            verifier: server_verifier(t, base)?,
+            client_auth,
+            enable_sni: !t.disable_sni,
+        };
+        let alpn: Vec<Vec<u8>> = t.alpn.iter().map(|a| a.as_bytes().to_vec()).collect();
+        let config = Arc::new(rb.build(&alpn, None)?);
         Ok(Self {
-            config: Arc::new(config),
+            base: Arc::new(rb),
+            alpn,
+            config,
+            ech,
+            ech_config: Default::default(),
             server_name,
             alpn_configured: !t.alpn.is_empty(),
             handshake_timeout: t
                 .handshake_timeout
                 .filter(|d| !d.is_zero())
                 .unwrap_or(HANDSHAKE_TIMEOUT),
-            fragment,
+            fragment: Arc::new(Fragment::new(t)),
         })
     }
 
+    /// The config offering ECH with `src`'s current list.
+    async fn ech_config(&self, src: &ech::EchSource) -> stdio::Result<Arc<ClientConfig>> {
+        let list = src.list().await?;
+        let mut cached = self.ech_config.lock().unwrap();
+        if let Some((l, c)) = &*cached
+            && Arc::ptr_eq(l, &list)
+        {
+            return Ok(c.clone());
+        }
+        let config = Arc::new(self.base.build(&self.alpn, Some(&list)).map_err(stdio::Error::other)?);
+        *cached = Some((list, config.clone()));
+        Ok(config)
+    }
+
     async fn connect(&self, io: TlsIo) -> stdio::Result<TlsStream> {
-        let connector = tokio_rustls::TlsConnector::from(self.config.clone());
+        let config = match &self.ech {
+            Some(src) => self.ech_config(src).await?,
+            None => self.config.clone(),
+        };
+        let connector = tokio_rustls::TlsConnector::from(config);
         match tokio::time::timeout(self.handshake_timeout, connector.connect(self.server_name.clone(), io)).await {
+            Ok(Err(e)) => match (&self.ech, ech::retry_configs(&e)) {
+                (Some(src), Some(list)) => {
+                    src.retry_with(list);
+                    Err(stdio::Error::new(e.kind(), EchRetry(e)))
+                }
+                _ => Err(e),
+            },
             Ok(r) => r,
             Err(_) => Err(stdio::Error::new(stdio::ErrorKind::TimedOut, "TLS handshake timed out")),
         }
+    }
+}
+
+/// The server rejected ECH and sent `retry_configs`, which the client now
+/// offers: one fresh connection is worth trying (RFC 9849 §6.1.6).
+#[derive(Debug)]
+pub struct EchRetry(pub stdio::Error);
+
+impl std::fmt::Display for EchRetry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "server rejected ECH and sent retry_configs")
+    }
+}
+
+impl std::error::Error for EchRetry {}
+
+impl EchRetry {
+    pub fn is(e: &stdio::Error) -> bool {
+        e.get_ref().is_some_and(|r| r.is::<EchRetry>())
     }
 }
 
@@ -626,21 +719,6 @@ fn versions(t: &TlsOutbound) -> Result<Vec<&'static rustls::SupportedProtocolVer
         v.push(&rustls::version::TLS12);
     }
     Ok(v)
-}
-
-/// The `ECH CONFIGS` PEM block sing-box uses (`sing-box generate ech-keypair`).
-fn ech_config_list(pem: &[u8]) -> Result<Vec<u8>, String> {
-    use base64::Engine as _;
-    let text = std::str::from_utf8(pem).map_err(|_| invalid("tls.ech.config: invalid ECH configs pem"))?;
-    let body = text
-        .split("-----BEGIN ECH CONFIGS-----")
-        .nth(1)
-        .and_then(|r| r.split("-----END ECH CONFIGS-----").next())
-        .ok_or_else(|| invalid("tls.ech.config: invalid ECH configs pem"))?;
-    let b64: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-    base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .map_err(|_| invalid("tls.ech.config: invalid ECH configs pem"))
 }
 
 #[cfg(test)]

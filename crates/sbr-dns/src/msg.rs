@@ -146,6 +146,20 @@ pub fn response_ttl(m: &Message) -> u32 {
     ttl
 }
 
+/// The ECHConfigList of the first HTTPS answer carrying an `ech` SvcParam
+/// (RFC 9848), with that record's TTL. The list keeps its length prefix,
+/// as in the `ECH CONFIGS` PEM block.
+pub fn https_ech(m: &Message) -> Option<(Vec<u8>, u32)> {
+    use hickory_proto::rr::rdata::svcb::SvcParamValue;
+    m.answers.iter().find_map(|r| match &r.data {
+        RData::HTTPS(h) => h.0.svc_params.iter().find_map(|(_, v)| match v {
+            SvcParamValue::EchConfigList(l) => Some((l.0.clone(), clamp_ttl(r.ttl))),
+            _ => None,
+        }),
+        _ => None,
+    })
+}
+
 pub fn set_ttl(m: &mut Message, ttl: u32) {
     for r in m.answers.iter_mut().chain(&mut m.authorities).chain(&mut m.additionals) {
         if r.record_type() != RecordType::OPT {
@@ -315,6 +329,38 @@ mod tests {
         let RData::HTTPS(h) = &m.answers[0].data else { panic!() };
         let keys: Vec<_> = h.0.svc_params.iter().map(|(k, _)| *k).collect();
         assert_eq!(keys, [SvcParamKey::Alpn, SvcParamKey::Ipv4Hint]);
+    }
+
+    #[test]
+    fn https_ech_config_list() {
+        use hickory_proto::rr::rdata::HTTPS;
+        use hickory_proto::rr::rdata::svcb::{Alpn, EchConfigList, SVCB, SvcParamKey, SvcParamValue};
+        let q = query("a.test", TYPE_HTTPS).unwrap();
+        let https = |params| RData::HTTPS(HTTPS(SVCB::new(1, Name::root(), params)));
+        let alpn = (SvcParamKey::Alpn, SvcParamValue::Alpn(Alpn(vec!["h2".into()])));
+        let ech = |b: &[u8]| {
+            (
+                SvcParamKey::EchConfigList,
+                SvcParamValue::EchConfigList(EchConfigList(b.to_vec())),
+            )
+        };
+        let name = Name::from_ascii("a.test.").unwrap();
+
+        let mut m = status(&q, 0);
+        m.answers
+            .push(Record::from_rdata(name.clone(), 60, https(vec![alpn.clone()])));
+        assert_eq!(https_ech(&m), None);
+        m.answers.push(Record::from_rdata(
+            name.clone(),
+            120,
+            https(vec![alpn, ech(&[0, 2, 0xfe, 0x0d])]),
+        ));
+        m.answers
+            .push(Record::from_rdata(name, 30, https(vec![ech(&[0, 1, 9])])));
+
+        let back = decode(&encode(&m).unwrap()).unwrap();
+        assert_eq!(https_ech(&back), Some((vec![0, 2, 0xfe, 0x0d], 120)));
+        assert_eq!(https_ech(&status(&q, 0)), None);
     }
 
     #[test]
