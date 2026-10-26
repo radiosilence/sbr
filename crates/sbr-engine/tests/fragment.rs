@@ -1,11 +1,14 @@
 //! ClientHello fragmentation against a model SNI filter
 //! (`common/sni_censor.rs`): the automatic mode, configured fragmentation,
-//! and the `route-options` form for connections routed `direct`.
+//! and the `route-options` form for connections routed `direct`; and the
+//! ClientHello as it leaves the client, segment by segment, for
+//! `fragment_split`.
 
 mod common;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::sni_censor::{self, Records};
@@ -209,11 +212,19 @@ async fn route_options_fragment_direct_connections() {
             .with_no_client_auth();
         tokio_rustls::TlsConnector::from(Arc::new(cfg))
     };
-    for (fragment, ok) in [(false, false), (true, true)] {
-        let rules = if fragment {
-            json!([{"inbound": ["in"], "action": "route-options", "tls_record_fragment": true}])
-        } else {
-            json!([])
+    let split = json!({"mode": "record", "pieces": "3-4"});
+    for (rule, ok) in [
+        (None, false),
+        (Some(json!({"tls_record_fragment": true})), true),
+        (Some(json!({"tls_fragment_split": split})), true),
+    ] {
+        let rules = match rule {
+            Some(mut r) => {
+                r["inbound"] = json!(["in"]);
+                r["action"] = json!("route-options");
+                json!([r])
+            }
+            None => json!([]),
         };
         let cfg = json!({
             "inbounds": [{"type": "mixed", "tag": "in", "listen": "127.0.0.1", "listen_port": 0}],
@@ -234,7 +245,168 @@ async fn route_options_fragment_direct_connections() {
             Err(e) => assert!(!ok, "fragmented handshake failed: {e}"),
         }
     }
-    assert_eq!((c.resets(), c.passed()), (1, 1));
+    assert_eq!((c.resets(), c.passed()), (1, 2));
+}
+
+/// What clients sent before the server's first byte, per connection, one
+/// entry per read. Pieces sent 30 ms or more apart arrive as separate reads.
+type Seen = Arc<Mutex<Vec<Vec<Vec<u8>>>>>;
+
+/// Relays to `upstream`, recording into the returned [`Seen`].
+async fn capture(upstream: SocketAddr) -> (u16, Seen) {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let seen = Seen::default();
+    let s2 = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let (c, _) = l.accept().await.unwrap();
+            c.set_nodelay(true).unwrap();
+            let seen = s2.clone();
+            let i = {
+                let mut s = seen.lock().unwrap();
+                s.push(Vec::new());
+                s.len() - 1
+            };
+            tokio::spawn(async move {
+                let up = TcpStream::connect(upstream).await.unwrap();
+                up.set_nodelay(true).unwrap();
+                let (mut cr, mut cw) = c.into_split();
+                let (mut ur, mut uw) = up.into_split();
+                let answered = Arc::new(AtomicBool::new(false));
+                let a = answered.clone();
+                let down = tokio::spawn(async move {
+                    let mut b = vec![0u8; 16 * 1024];
+                    while let Ok(n @ 1..) = ur.read(&mut b).await {
+                        a.store(true, Ordering::SeqCst);
+                        if cw.write_all(&b[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                let mut b = vec![0u8; 16 * 1024];
+                while let Ok(n @ 1..) = cr.read(&mut b).await {
+                    if !answered.load(Ordering::SeqCst) {
+                        seen.lock().unwrap()[i].push(b[..n].to_vec());
+                    }
+                    if uw.write_all(&b[..n]).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = uw.shutdown().await;
+                let _ = down.await;
+            });
+        }
+    });
+    (port, seen)
+}
+
+/// Each connection's reads before the server answered, after a full
+/// handshake and echo through the `http` outbound over TLS with `tls`.
+async fn wire(tls: Value, conns: usize) -> Vec<Vec<Vec<u8>>> {
+    let (port, seen) = capture(https_proxy().await).await;
+    let e = engine(port, tls);
+    let target = echo().await;
+    for _ in 0..conns {
+        echo_through(&e, target).await.unwrap();
+    }
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), conns);
+    seen
+}
+
+/// The ClientHello's handshake message and where each record carrying it
+/// ends, in offsets into that message. Nothing else was sent.
+fn hello(reads: &[Vec<u8>]) -> (Vec<u8>, Vec<usize>) {
+    let wire = reads.concat();
+    let (mut hs, mut ends) = (Vec::new(), Vec::new());
+    let mut d = &wire[..];
+    while hs.len() < 4 || hs.len() < 4 + (usize::from(hs[1]) << 16 | usize::from(hs[2]) << 8 | usize::from(hs[3])) {
+        assert_eq!(d[0], 22, "not a handshake record");
+        let n = u16::from_be_bytes([d[3], d[4]]) as usize;
+        hs.extend_from_slice(&d[5..5 + n]);
+        ends.push(hs.len());
+        d = &d[5 + n..];
+    }
+    assert!(d.is_empty(), "{} bytes after the ClientHello", d.len());
+    assert_eq!(hs[0], 1, "not a ClientHello");
+    (hs, ends)
+}
+
+/// Whether any of `cuts` (offsets into the handshake message) falls
+/// strictly inside the server name.
+fn cuts_name(hs: &[u8], cuts: &[usize]) -> bool {
+    let at = hs.windows(NAME.len()).position(|w| w == NAME.as_bytes()).unwrap();
+    cuts.iter().any(|&c| c > at && c < at + NAME.len())
+}
+
+#[tokio::test]
+async fn split_pieces_are_records_and_segments() {
+    let _serial = SERIAL.lock().await;
+    let tls = json!({"fragment_split": {"pieces": "4-6", "delay": "30-40"}});
+    for reads in wire(tls, 4).await {
+        assert!((4..=6).contains(&reads.len()), "{} segments", reads.len());
+        for r in &reads {
+            assert_eq!(
+                u16::from_be_bytes([r[3], r[4]]) as usize + 5,
+                r.len(),
+                "one record per segment"
+            );
+        }
+        let (hs, ends) = hello(&reads);
+        assert_eq!(ends.len(), reads.len());
+        assert!(cuts_name(&hs, &ends), "no cut inside the name");
+    }
+}
+
+#[tokio::test]
+async fn split_lengths_in_records_only() {
+    let _serial = SERIAL.lock().await;
+    let tls = json!({"fragment_split": {"mode": "record", "length": "20-40"}});
+    for reads in wire(tls, 3).await {
+        let (hs, ends) = hello(&reads);
+        let mut prev = 0;
+        for &e in &ends {
+            assert!(e - prev <= 40, "record of {} bytes", e - prev);
+            prev = e;
+        }
+        assert!(ends.len() >= hs.len().div_ceil(40));
+        assert!(cuts_name(&hs, &ends), "no cut inside the name");
+    }
+}
+
+#[tokio::test]
+async fn split_segments_only() {
+    let _serial = SERIAL.lock().await;
+    let tls = json!({"fragment_split": {"mode": "segment", "pieces": 3, "delay": 30}});
+    for reads in wire(tls, 3).await {
+        assert_eq!(reads.len(), 3);
+        let (hs, ends) = hello(&reads);
+        assert_eq!(ends, vec![hs.len()], "one record");
+        let mut cuts = Vec::new();
+        let mut at = 0;
+        for r in &reads[..reads.len() - 1] {
+            at += r.len();
+            cuts.push(at - 5);
+        }
+        assert!(cuts_name(&hs, &cuts), "no segment boundary inside the name");
+    }
+}
+
+/// With only sing-box's keys, its shape: two records cut inside the first
+/// label, sent as two segments at that cut.
+#[tokio::test]
+async fn sing_box_keys_keep_their_shape() {
+    let _serial = SERIAL.lock().await;
+    let tls = json!({"fragment": true, "record_fragment": true});
+    for reads in wire(tls, 2).await {
+        assert_eq!(reads.len(), 2);
+        let (hs, ends) = hello(&reads);
+        assert_eq!(ends.len(), 2);
+        assert_eq!(reads[0].len(), 5 + ends[0]);
+        let at = hs.windows(NAME.len()).position(|w| w == NAME.as_bytes()).unwrap();
+        assert!(ends[0] > at && ends[0] < at + "blocked".len());
+    }
 }
 
 #[derive(Debug)]

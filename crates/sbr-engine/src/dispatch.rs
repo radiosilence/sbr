@@ -178,15 +178,12 @@ impl Engine {
                     Ok(mut remote) => {
                         // sing-box `route-options` `tls_fragment`: split the
                         // client's own ClientHello on its way out.
-                        if options.tls_fragment || options.tls_record_fragment {
-                            let opts = crate::tls::FragmentOptions {
-                                split_packet: options.tls_fragment,
-                                split_record: options.tls_record_fragment,
-                                fallback_delay: options
-                                    .tls_fragment_fallback_delay
-                                    .filter(|d| !d.is_zero())
-                                    .unwrap_or(crate::tls::FRAGMENT_FALLBACK_DELAY),
-                            };
+                        if let Some(opts) = crate::tls::FragmentOptions::configured(
+                            options.tls_fragment,
+                            options.tls_record_fragment,
+                            options.tls_fragment_split,
+                            options.tls_fragment_fallback_delay,
+                        ) {
                             remote = Box::new(crate::tls::TlsIo::new(remote, None, Some(opts)));
                         }
                         client.inner.ready().await?;

@@ -56,6 +56,10 @@ pub struct ShadowTls {
 impl ShadowTls {
     pub fn new(tag: String, c: &ShadowTlsOutbound, upstream: Upstream) -> Result<Self, String> {
         let tls = TlsClient::new(&c.tls, &c.server.server)?;
+        // The server reads the ClientHello as one record and checks its HMAC.
+        if tls.fragment.is_some() {
+            return Err("tls.fragment: not supported by sbr's shadowtls".into());
+        }
         if c.version == 3 && !tls.supports_tls13() {
             return Err("shadowtls v3 needs TLS 1.3 enabled".into());
         }

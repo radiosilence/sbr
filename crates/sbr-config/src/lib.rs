@@ -33,7 +33,7 @@ pub use proxy::{PacketEncoding, TrojanOutbound, V2rayCommon, VlessOutbound, Vmes
 pub use quic::{Hysteria2Outbound, QuicOptions, TuicCongestion, TuicOutbound, TuicUdpRelay};
 pub use route::*;
 pub use srs::parse_rule_set;
-pub use tls::{Ech, Multiplex, Reality, TlsOutbound, Transport, Utls};
+pub use tls::{Ech, FragmentSplit, Multiplex, Reality, TlsOutbound, Transport, Utls};
 pub use wireguard::{WIREGUARD_DEFAULT_MTU, WireGuardEndpoint, WireGuardPeer};
 pub use xhttp::{PaddingMethod, Placement, Range, Xhttp, XhttpDownload, XhttpMode, Xmux, predefined_table};
 

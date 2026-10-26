@@ -3,7 +3,8 @@
 //! - ClientHello fragmentation (`fragment` / `record_fragment`), the
 //!   anti-censorship feature of sing-box `common/tlsfragment`: the first TLS
 //!   record is split inside the SNI host name, across TCP segments, TLS
-//!   records, or both.
+//!   records, or both; `fragment_split` (an sbr extension) varies the number,
+//!   size and spacing of the pieces per connection.
 //! - Noticing a connection cut before the server sent a byte (a reset or
 //!   close in answer to the ClientHello), which is what SNI filtering looks
 //!   like from the client, so the automatic mode can turn fragmentation on.
@@ -21,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
+use sbr_config::{FragmentSplit, Range};
 use sbr_core::Stream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::Sleep;
@@ -33,6 +35,37 @@ pub struct FragmentOptions {
     pub split_packet: bool,
     pub split_record: bool,
     pub fallback_delay: Duration,
+    /// Randomised pieces; `None` is the sing-box shape.
+    pub split: Option<FragmentSplit>,
+}
+
+impl FragmentOptions {
+    /// The options `fragment`, `record_fragment` and `fragment_split` (or
+    /// their `route-options` forms) configure, if any.
+    pub fn configured(
+        fragment: bool,
+        record_fragment: bool,
+        split: Option<FragmentSplit>,
+        fallback_delay: Option<Duration>,
+    ) -> Option<Self> {
+        let fallback_delay = fallback_delay
+            .filter(|d| !d.is_zero())
+            .unwrap_or(FRAGMENT_FALLBACK_DELAY);
+        match split {
+            Some(s) => Some(Self {
+                split_packet: s.segments,
+                split_record: s.records,
+                fallback_delay,
+                split: Some(s),
+            }),
+            None => (fragment || record_fragment).then_some(Self {
+                split_packet: fragment,
+                split_record: record_fragment,
+                fallback_delay,
+                split: None,
+            }),
+        }
+    }
 }
 
 pub struct TlsIo {
@@ -339,11 +372,12 @@ impl Fragmenter {
             p.piece += 1;
             p.written = 0;
             if p.piece < p.ends.len() {
-                let polling_ack = fd.is_some() && cfg!(target_os = "linux");
-                let first = if polling_ack {
-                    Duration::from_millis(1)
-                } else {
-                    self.opts.fallback_delay
+                let delay = self.opts.split.and_then(|s| s.delay);
+                let polling_ack = delay.is_none() && fd.is_some() && cfg!(target_os = "linux");
+                let first = match delay {
+                    Some(d) => Duration::from_millis(rand_in(d) as u64),
+                    None if polling_ack => Duration::from_millis(1),
+                    None => self.opts.fallback_delay,
                 };
                 p.wait = Some(Wait {
                     sleep: Box::pin(tokio::time::sleep(first)),
@@ -450,14 +484,59 @@ fn cuts(idx: usize, name: &[u8]) -> Vec<usize> {
     out
 }
 
-/// Records are cut at every point from [`cuts`]; TCP segments at the first
-/// only, since each segment boundary costs a wait for the ACK.
+/// `fragment_split`'s cut points in the record `b` (of length `len`): random,
+/// but always one strictly inside the host name when it has two or more
+/// characters.
+fn split_cuts(len: usize, idx: usize, name: &[u8], s: FragmentSplit) -> Vec<usize> {
+    let mut labels = cuts(idx, name);
+    if labels == [idx] && name.len() >= 2 {
+        labels = vec![idx + 1 + rand_below(name.len() - 1)];
+    }
+    if s.pieces.is_none() && s.length.is_none() {
+        return labels;
+    }
+    let in_name = labels[rand_below(labels.len())];
+    // Cuts lie strictly inside the handshake message: 6..len.
+    let room = len.saturating_sub(6);
+    let mut out = std::collections::BTreeSet::new();
+    if let Some(p) = s.pieces {
+        out.insert(in_name);
+        let want = (rand_in(p) as usize - 1).min(room);
+        while out.len() < want {
+            out.insert(6 + rand_below(room));
+        }
+    } else if let Some(l) = s.length {
+        let mut at = 5;
+        loop {
+            at += rand_in(l) as usize;
+            if at >= len {
+                break;
+            }
+            out.insert(at);
+        }
+        if !out.iter().any(|&c| c > idx && c < idx + name.len()) {
+            out.insert(in_name);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// sing-box shape: records are cut at every point from [`cuts`]; TCP
+/// segments at the first only, since each segment boundary costs a wait for
+/// the ACK. `fragment_split` sends every piece as its own segment.
 fn plan(b: &[u8], opts: FragmentOptions) -> Option<Plan> {
     let (idx, name) = index_server_name(b)?;
-    let mut cuts = cuts(idx, name);
-    if !opts.split_record {
-        cuts.truncate(1);
-    }
+    let cuts = match opts.split {
+        Some(s) => split_cuts(b.len(), idx, name, s),
+        None => {
+            let mut cuts = cuts(idx, name);
+            if !opts.split_record {
+                cuts.truncate(1);
+            }
+            cuts
+        }
+    };
+    let every_segment = opts.split.is_some();
     let mut data = Vec::with_capacity(b.len() + 5 * (cuts.len() + 1));
     let mut ends = Vec::new();
     let mut prev = 5;
@@ -474,7 +553,7 @@ fn plan(b: &[u8], opts: FragmentOptions) -> Option<Plan> {
             }
             data.extend_from_slice(piece);
         }
-        if opts.split_packet && i == 0 {
+        if opts.split_packet && i < cuts.len() && (every_segment || i == 0) {
             ends.push(data.len());
         }
     }
@@ -493,6 +572,14 @@ pub(crate) fn rand_u32() -> u32 {
     let mut b = [0u8; 4];
     aws_lc_rs::rand::fill(&mut b).expect("system RNG");
     u32::from_ne_bytes(b)
+}
+
+fn rand_below(n: usize) -> usize {
+    rand_u32() as usize % n
+}
+
+fn rand_in(r: Range) -> i32 {
+    r.from + rand_below((r.to - r.from) as usize + 1) as i32
 }
 
 #[cfg(test)]
@@ -539,6 +626,7 @@ mod tests {
             split_packet: false,
             split_record: true,
             fallback_delay: Duration::ZERO,
+            split: None,
         };
         for _ in 0..50 {
             let p = plan(&ch, opts).unwrap();
@@ -575,6 +663,7 @@ mod tests {
                 split_packet: true,
                 split_record: false,
                 fallback_delay: Duration::ZERO,
+                split: None,
             },
         )
         .unwrap();
@@ -588,6 +677,7 @@ mod tests {
                 split_packet: true,
                 split_record: true,
                 fallback_delay: Duration::ZERO,
+                split: None,
             },
         )
         .unwrap();
@@ -595,5 +685,94 @@ mod tests {
         assert_eq!(p.ends.len(), 2);
         let first = u16::from_be_bytes([p.data[3], p.data[4]]) as usize;
         assert_eq!(p.ends[0], 5 + first);
+    }
+
+    fn split(mode: &str, pieces: Option<(i32, i32)>, length: Option<(i32, i32)>) -> FragmentOptions {
+        let r = |r: Option<(i32, i32)>| r.map(|(a, b)| Range::new(a, b));
+        FragmentOptions::configured(
+            false,
+            false,
+            Some(FragmentSplit {
+                segments: mode != "record",
+                records: mode != "segment",
+                pieces: r(pieces),
+                length: r(length),
+                delay: None,
+            }),
+            None,
+        )
+        .unwrap()
+    }
+
+    /// Record bodies and where each ends in the original record.
+    fn records(mut d: &[u8]) -> (Vec<usize>, Vec<u8>) {
+        let (mut ends, mut body) = (Vec::new(), Vec::new());
+        while !d.is_empty() {
+            let n = u16::from_be_bytes([d[3], d[4]]) as usize;
+            body.extend_from_slice(&d[5..5 + n]);
+            ends.push(5 + body.len());
+            d = &d[5 + n..];
+        }
+        (ends, body)
+    }
+
+    #[test]
+    fn split_varies_pieces_and_keeps_a_cut_in_the_name() {
+        let ch = client_hello("www.example.com");
+        let (idx, name) = index_server_name(&ch).unwrap();
+        let in_name = |c: &usize| *c > idx && *c < idx + name.len();
+        let mut counts = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let p = plan(&ch, split("both", Some((3, 6)), None)).unwrap();
+            let (ends, body) = records(&p.data);
+            assert_eq!(body, &ch[5..]);
+            assert!((3..=6).contains(&ends.len()), "{} pieces", ends.len());
+            counts.insert(ends.len());
+            assert!(ends[..ends.len() - 1].iter().any(in_name));
+            // Every record is its own segment.
+            assert_eq!(p.ends.len(), ends.len());
+            let mut at = 0;
+            for (e, seg_end) in ends.iter().zip(&p.ends) {
+                let n = u16::from_be_bytes([p.data[at + 3], p.data[at + 4]]) as usize;
+                at += 5 + n;
+                assert_eq!(*seg_end, at, "segment ends at record {e}");
+            }
+
+            let p = plan(&ch, split("record", None, Some((5, 9)))).unwrap();
+            assert_eq!(p.ends, vec![p.data.len()]);
+            let (ends, body) = records(&p.data);
+            assert_eq!(body, &ch[5..]);
+            assert!(
+                std::iter::once(5)
+                    .chain(ends.iter().copied())
+                    .collect::<Vec<_>>()
+                    .windows(2)
+                    .all(|w| w[1] - w[0] <= 9)
+            );
+            assert!(ends.len() >= (ch.len() - 5).div_ceil(9));
+            assert!(ends.iter().any(in_name));
+
+            let p = plan(&ch, split("segment", Some((4, 4)), None)).unwrap();
+            assert_eq!(p.data, ch);
+            assert_eq!(p.ends.len(), 4);
+            assert!(p.ends.iter().any(in_name));
+        }
+        assert!(counts.len() > 1, "piece count never varied");
+
+        // With neither pieces nor length: the record_fragment cuts, one per
+        // label but the last, each its own segment.
+        let p = plan(&ch, split("both", None, None)).unwrap();
+        assert_eq!(records(&p.data).0.len(), 3);
+        assert_eq!(p.ends.len(), 3);
+
+        // One-character labels: the cut still lands inside the name.
+        let ch = client_hello("a.b");
+        let (idx, _) = index_server_name(&ch).unwrap();
+        for _ in 0..20 {
+            let p = plan(&ch, split("record", Some((2, 2)), None)).unwrap();
+            let (ends, _) = records(&p.data);
+            assert_eq!(ends.len(), 2);
+            assert!(ends[0] > idx && ends[0] < idx + 3);
+        }
     }
 }

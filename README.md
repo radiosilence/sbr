@@ -194,7 +194,19 @@ SNI filters in China, Iran's lighter deployments and most commercial DPI read th
 
 **Automatic mode (sbr extension).** With neither key set, a TLS, REALITY or v2ray-transport outbound starts unfragmented and steps up when a handshake is reset or closed before the server sent a single byte, which is what SNI filtering looks like from the client: first to `record_fragment`, then to both. The failed handshake is retried on a fresh connection at once, so the app sees one slower connection rather than an error. The level is per outbound and lasts until the network changes (`sbr_network_changed`). A server that answers anything at all, even an alert, never triggers it, and a level is never raised past both. `"disable_auto_fragment": true` in `tls` turns it off (sing-box rejects the key); with `fragment` or `record_fragment` configured it is off already. ShadowTLS, AnyTLS and DNS-over-TLS/HTTPS clients do not have it.
 
-Tested against a model filter (`crates/sbr-engine/tests/common/sni_censor.rs`) that resets a connection whose first segment reveals the name, either in the first record only or in all records joined (`tests/fragment.rs`), and against Xray-core REALITY behind that filter (`upstream_servers.rs`, `xray_reality_fragmented_client_hello`).
+**Varied splits (sbr extension).** A censor that sees the same split on every connection can learn it: Iran's DPI reassembles fragments, and China's education network has been reported to block one combination of record and segment splitting ([net4people #550](https://github.com/net4people/bbs/issues/550)). `fragment_split` in `tls`, or `tls_fragment_split` in a `route-options` rule, replaces `fragment` / `record_fragment` (setting both is an error, and sing-box rejects the key) with Xray-like controls, drawn afresh for every connection from the system CSPRNG:
+
+```json
+"tls": {"enabled": true, "fragment_split": {"mode": "both", "pieces": "3-6", "delay": "10-30"}}
+```
+
+- `mode`: `"record"` (TLS records, one write), `"segment"` (TCP segments of the one record) or `"both"` (each record its own segment; the default).
+- `pieces`: how many pieces, 2 to 64; or `length`: bytes of the handshake message per piece, 1 to 16384. Not both. With neither, the cuts are `record_fragment`'s, one inside every label but the last. One cut always falls strictly inside the host name, wherever the others land.
+- `delay`: milliseconds between segments, 0 to 10000. Unset, each segment waits for its ACK on Linux and `fragment_fallback_delay` elsewhere, as `fragment` does; every gap pays that wait, so many segments make a slow handshake.
+
+Ranges take Xray's form: `3`, `"3"` or `"3-6"`. It disables the automatic mode for that outbound like the sing-box keys do. AnyTLS honours `fragment`, `record_fragment` and `fragment_split` too; ShadowTLS refuses them, since its server reads the ClientHello from one record.
+
+Tested against a model filter (`crates/sbr-engine/tests/common/sni_censor.rs`) that resets a connection whose first segment reveals the name, either in the first record only or in all records joined (`tests/fragment.rs`), and against Xray-core REALITY behind that filter (`upstream_servers.rs`, `xray_reality_fragmented_client_hello`). `tests/fragment.rs` also records the ClientHello as it arrives, one read per segment, and checks the segment and record boundaries `fragment_split` produced against a rustls server.
 
 Transports: `ws` (incl. early data in the path or a header), `httpupgrade`, `grpc` (the "gun" framing over one pooled HTTP/2 connection per outbound, h2c without TLS), `http` (HTTP/2 over TLS, HTTP/1.1 without) and `xhttp` (below). gRPC/HTTP `idle_timeout`/`ping_timeout` are parsed but no health pings are sent (no idle timers).
 
