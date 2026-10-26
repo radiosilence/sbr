@@ -8,7 +8,8 @@
 //!   address + prefix length). IPv6 settings only when an IPv6 address exists.
 //! - `auto_route` → included routes are `route_address` of that family, or
 //!   the default route when empty; `route_exclude_address` → excluded routes.
-//!   Without `auto_route` only the interface subnets reach the tunnel.
+//!   Without `auto_route` only the interface subnets reach the tunnel, routed
+//!   explicitly because NetworkExtension adds no route on its own.
 //! - DNS (only with `auto_route`): the address right after the first IPv4
 //!   interface address (172.19.0.1/30 → 172.19.0.2), matching all domains,
 //!   so system DNS enters the TUN where `hijack-dns` answers it. sing-box
@@ -50,7 +51,9 @@ fn build(t: &TunInbound) -> Value {
             }
             (inc, of(&t.route_exclude_address))
         } else {
-            (Vec::new(), Vec::new())
+            // Without auto_route only the interface's own subnets reach the
+            // tunnel; NetworkExtension routes nothing it isn't told to.
+            (addrs.iter().map(|a| a.trunc()).collect(), Vec::new())
         };
         Some(json!({
             "addresses": addrs.iter().map(|a| a.addr().to_string()).collect::<Vec<_>>(),
@@ -150,9 +153,10 @@ mod tests {
     }
 
     #[test]
-    fn no_auto_route_means_no_routes_or_dns() {
+    fn no_auto_route_routes_only_the_interface_subnet() {
         let s = settings(r#""address":["172.19.0.1/30"]"#);
-        assert_eq!(s["ipv4"]["included_routes"], json!([]));
+        assert_eq!(s["ipv4"]["included_routes"][0]["address"], "172.19.0.0");
+        assert_eq!(s["ipv4"]["included_routes"].as_array().unwrap().len(), 1);
         assert_eq!(s["dns_servers"], json!([]));
         // A /32 leaves no room for a DNS address; IPv6 takes over.
         let s = settings(r#""address":["172.19.0.1/32","fdfe::1/126"],"auto_route":true"#);
