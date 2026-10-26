@@ -21,7 +21,7 @@
 
 <main class="wrap">
 <h1>benchmarks</h1>
-<p class="lede">Measured on 2026-10-25. Both cores were given the same config file and run as clients of servers on loopback, so these figures are the cost of the client itself rather than of a network.</p>
+<p class="lede">Measured on 2026-10-25 (Linux) and 2026-10-26 (macOS). Both cores were given the same config file and run as clients of servers on loopback, so these figures are the cost of the client itself rather than of a network.</p>
 <p>Each figure is the lowest and highest of three rounds. The solid part of a bar reaches the lowest, the faint part the highest. The machines were loopback-only and some were shared with other builds, as noted under each chart, so a difference of a few percent is a tie. The raw tables and method are in <a href="https://github.com/radiosilence/sbr/blob/main/BENCHMARKS.md">BENCHMARKS.md</a>.</p>
 
 <h2>proxy throughput, linux</h2>
@@ -136,7 +136,61 @@
 <p>sbr is ahead on the encrypted paths. Plain TCP relay is level because sing-box uses <code>splice(2)</code> on Linux; Darwin has no splice, so on Apple platforms both cores copy. hysteria2 is level in throughput, with 8–15% less client CPU per GB for sbr. WireGuard upload is behind in this run, which predates the Darwin send-path change measured below.</p>
 
 <h2>vless + vision against xray, macos</h2>
-<p class="fine">Apple M1 Pro, Xray-core 26.10.21 with the reference deployment's configuration, Homebrew sing-box 1.14.4. Four streams for 5 s, three rounds back to back.</p>
+<p class="fine">Apple M1 Pro, Xray-core 26.10.21 with the reference deployment's configuration, Homebrew sing-box 1.14.4. Four streams for 5 s, three rounds back to back. The machine was in use during these runs, so compare the two clients within a row rather than with other charts.</p>
+<!-- chart vision-throughput -->
+<figure id="vision-throughput">
+<figcaption>Throughput, VLESS + TLS + Vision against Xray-core, macOS</figcaption>
+<svg class="chart" viewBox="0 0 440 244" role="img" aria-labelledby="vision-throughput-t">
+<title id="vision-throughput-t">Throughput, VLESS + TLS + Vision against Xray-core, macOS, Gbit/s, higher is better</title>
+<rect class="s0" x="0" y="4" width="10" height="10"/>
+<text class="lg" x="16" y="13">sbr</text>
+<rect class="s1" x="60.2" y="4" width="10" height="10"/>
+<text class="lg" x="76.2" y="13">sing-box</text>
+<text class="lg dim" x="440" y="13" text-anchor="end">Gbit/s, higher is better</text>
+<line class="grid" x1="0.0" y1="26" x2="0.0" y2="218"/>
+<text class="tick" x="0.0" y="234" text-anchor="start">0</text>
+<line class="grid" x1="69.6" y1="26" x2="69.6" y2="218"/>
+<text class="tick" x="69.6" y="234" text-anchor="middle">2.5</text>
+<line class="grid" x1="139.2" y1="26" x2="139.2" y2="218"/>
+<text class="tick" x="139.2" y="234" text-anchor="middle">5</text>
+<line class="grid" x1="208.8" y1="26" x2="208.8" y2="218"/>
+<text class="tick" x="208.8" y="234" text-anchor="middle">7.5</text>
+<line class="grid" x1="278.4" y1="26" x2="278.4" y2="218"/>
+<text class="tick" x="278.4" y="234" text-anchor="middle">10</text>
+<line class="grid" x1="348.0" y1="26" x2="348.0" y2="218"/>
+<text class="tick" x="348.0" y="234" text-anchor="middle">12.5</text>
+<text class="lb" x="0" y="41">plain inner, up</text>
+<rect class="s0" x="0" y="47" width="251.1" height="10"/>
+<rect class="s0 range" x="251.1" y="47" width="4.7" height="10"/>
+<text class="val" x="260.8" y="56">9.02–9.19</text>
+<rect class="s1" x="0" y="60" width="213.8" height="10"/>
+<rect class="s1 range" x="213.8" y="60" width="5.8" height="10"/>
+<text class="val dim" x="224.7" y="69">7.68–7.89</text>
+<text class="lb" x="0" y="89">plain inner, down</text>
+<rect class="s0" x="0" y="95" width="228.6" height="10"/>
+<rect class="s0 range" x="228.6" y="95" width="3.6" height="10"/>
+<text class="val" x="237.2" y="104">8.21–8.34</text>
+<rect class="s1" x="0" y="108" width="209.9" height="10"/>
+<rect class="s1 range" x="209.9" y="108" width="8.1" height="10"/>
+<text class="val dim" x="223.0" y="117">7.54–7.83</text>
+<text class="lb" x="0" y="137">tls inner, up</text>
+<rect class="s0" x="0" y="143" width="327.1" height="10"/>
+<rect class="s0 range" x="327.1" y="143" width="6.4" height="10"/>
+<text class="val" x="338.5" y="152">11.75–11.98</text>
+<rect class="s1" x="0" y="156" width="324.6" height="10"/>
+<rect class="s1 range" x="324.6" y="156" width="5.6" height="10"/>
+<text class="val dim" x="335.2" y="165">11.66–11.86</text>
+<text class="lb" x="0" y="185">tls inner, down</text>
+<rect class="s0" x="0" y="191" width="199.1" height="10"/>
+<rect class="s0 range" x="199.1" y="191" width="58.7" height="10"/>
+<text class="val" x="262.8" y="200">7.15–9.26</text>
+<rect class="s1" x="0" y="204" width="193.5" height="10"/>
+<rect class="s1 range" x="193.5" y="204" width="71.5" height="10"/>
+<text class="val dim" x="270.0" y="213">6.95–9.52</text>
+</svg>
+<details><summary>numbers</summary><table><tr><th>path</th><th>sbr</th><th>sing-box</th></tr><tr><td>plain inner, up</td><td>9.02–9.19</td><td>7.68–7.89</td></tr><tr><td>plain inner, down</td><td>8.21–8.34</td><td>7.54–7.83</td></tr><tr><td>tls inner, up</td><td>11.75–11.98</td><td>11.66–11.86</td></tr><tr><td>tls inner, down</td><td>7.15–9.26</td><td>6.95–9.52</td></tr></table></details>
+</figure>
+<!-- /chart -->
 <!-- chart vision-cpu -->
 <figure id="vision-cpu">
 <figcaption>Client CPU per GB, VLESS + TLS + Vision against Xray-core, macOS</figcaption>
@@ -158,37 +212,78 @@
 <line class="grid" x1="348.0" y1="26" x2="348.0" y2="218"/>
 <text class="tick" x="348.0" y="234" text-anchor="middle">2</text>
 <text class="lb" x="0" y="41">plain inner, up</text>
-<rect class="s0" x="0" y="47" width="78.3" height="10"/>
-<text class="val" x="83.3" y="56">0.45</text>
-<rect class="s1" x="0" y="60" width="125.3" height="10"/>
-<text class="val dim" x="130.3" y="69">0.72</text>
+<rect class="s0" x="0" y="47" width="114.8" height="10"/>
+<rect class="s0 range" x="114.8" y="47" width="1.7" height="10"/>
+<text class="val" x="121.6" y="56">0.66–0.67</text>
+<rect class="s1" x="0" y="60" width="222.7" height="10"/>
+<rect class="s1 range" x="222.7" y="60" width="1.7" height="10"/>
+<text class="val dim" x="229.5" y="69">1.28–1.29</text>
 <text class="lb" x="0" y="89">plain inner, down</text>
-<rect class="s0" x="0" y="95" width="113.1" height="10"/>
-<text class="val" x="118.1" y="104">0.65</text>
-<rect class="s1" x="0" y="108" width="182.7" height="10"/>
-<text class="val dim" x="187.7" y="117">1.05</text>
+<rect class="s0" x="0" y="95" width="191.4" height="10"/>
+<rect class="s0 range" x="191.4" y="95" width="13.9" height="10"/>
+<text class="val" x="210.3" y="104">1.10–1.18</text>
+<rect class="s1" x="0" y="108" width="241.9" height="10"/>
+<rect class="s1 range" x="241.9" y="108" width="10.4" height="10"/>
+<text class="val dim" x="257.3" y="117">1.39–1.45</text>
 <text class="lb" x="0" y="137">tls inner, up</text>
-<rect class="s0" x="0" y="143" width="47.0" height="10"/>
-<rect class="s0 range" x="47.0" y="143" width="5.2" height="10"/>
-<text class="val" x="57.2" y="152">0.27–0.30</text>
-<rect class="s1" x="0" y="156" width="48.7" height="10"/>
-<text class="val dim" x="53.7" y="165">0.28</text>
+<rect class="s0" x="0" y="143" width="102.7" height="10"/>
+<rect class="s0 range" x="102.7" y="143" width="5.2" height="10"/>
+<text class="val" x="112.9" y="152">0.59–0.62</text>
+<rect class="s1" x="0" y="156" width="120.1" height="10"/>
+<rect class="s1 range" x="120.1" y="156" width="1.7" height="10"/>
+<text class="val dim" x="126.8" y="165">0.69–0.70</text>
 <text class="lb" x="0" y="185">tls inner, down</text>
-<rect class="s0" x="0" y="191" width="67.9" height="10"/>
-<rect class="s0 range" x="67.9" y="191" width="26.1" height="10"/>
-<text class="val" x="99.0" y="200">0.39–0.54</text>
-<rect class="s1" x="0" y="204" width="128.8" height="10"/>
-<rect class="s1 range" x="128.8" y="204" width="212.3" height="10"/>
-<text class="val dim" x="346.0" y="213">0.74–1.96</text>
+<rect class="s0" x="0" y="191" width="181.0" height="10"/>
+<rect class="s0 range" x="181.0" y="191" width="94.0" height="10"/>
+<text class="val" x="279.9" y="200">1.04–1.58</text>
+<rect class="s1" x="0" y="204" width="189.7" height="10"/>
+<rect class="s1 range" x="189.7" y="204" width="120.1" height="10"/>
+<text class="val dim" x="314.7" y="213">1.09–1.78</text>
 </svg>
-<details><summary>numbers</summary><table><tr><th>path</th><th>sbr</th><th>sing-box</th></tr><tr><td>plain inner, up</td><td>0.45</td><td>0.72</td></tr><tr><td>plain inner, down</td><td>0.65</td><td>1.05</td></tr><tr><td>tls inner, up</td><td>0.27–0.30</td><td>0.28</td></tr><tr><td>tls inner, down</td><td>0.39–0.54</td><td>0.74–1.96</td></tr></table></details>
+<details><summary>numbers</summary><table><tr><th>path</th><th>sbr</th><th>sing-box</th></tr><tr><td>plain inner, up</td><td>0.66–0.67</td><td>1.28–1.29</td></tr><tr><td>plain inner, down</td><td>1.10–1.18</td><td>1.39–1.45</td></tr><tr><td>tls inner, up</td><td>0.59–0.62</td><td>0.69–0.70</td></tr><tr><td>tls inner, down</td><td>1.04–1.58</td><td>1.09–1.78</td></tr></table></details>
 </figure>
 <!-- /chart -->
-<p>sbr uses 35–40% less CPU per GB on the padded path and is ahead or level in throughput on every row. The rows with TLS inside the tunnel vary widely between rounds for both clients.</p>
-<p>The comparison uses Xray's TLS + Vision inbound because sing-box cannot connect to its REALITY inbound: sing-box removes X25519MLKEM768 from its REALITY ClientHello, which XTLS REALITY servers have refused since 2026-09-08. Over REALITY + Vision, sbr reached 20.0–20.6 Gbit/s up and 17.5–18.4 Gbit/s down.</p>
+<p>On the padded path sbr is 5–20% faster and uses 15–49% less CPU per GB. With TLS inside the tunnel, where Vision copies directly, the two are level. The rows with TLS inside the tunnel vary widely between rounds for both clients.</p>
+<p>The comparison uses Xray's TLS + Vision inbound because sing-box cannot connect to its REALITY inbound: sing-box removes X25519MLKEM768 from its REALITY ClientHello, which XTLS REALITY servers have refused since 2026-09-08. Over REALITY + Vision, sbr reached 8.9–9.3 Gbit/s up and 8.4–8.5 Gbit/s down in the same run.</p>
 
 <h2>hysteria2 against apernet hysteria, macos</h2>
 <p class="fine">Same machine and rounds, apernet hysteria 2.13.0 with Salamander.</p>
+<!-- chart hysteria2-throughput -->
+<figure id="hysteria2-throughput">
+<figcaption>Throughput, hysteria2 (salamander) against apernet hysteria, macOS</figcaption>
+<svg class="chart" viewBox="0 0 440 148" role="img" aria-labelledby="hysteria2-throughput-t">
+<title id="hysteria2-throughput-t">Throughput, hysteria2 (salamander) against apernet hysteria, macOS, Gbit/s, higher is better</title>
+<rect class="s0" x="0" y="4" width="10" height="10"/>
+<text class="lg" x="16" y="13">sbr</text>
+<rect class="s1" x="60.2" y="4" width="10" height="10"/>
+<text class="lg" x="76.2" y="13">sing-box</text>
+<text class="lg dim" x="440" y="13" text-anchor="end">Gbit/s, higher is better</text>
+<line class="grid" x1="0.0" y1="26" x2="0.0" y2="122"/>
+<text class="tick" x="0.0" y="138" text-anchor="start">0</text>
+<line class="grid" x1="116.0" y1="26" x2="116.0" y2="122"/>
+<text class="tick" x="116.0" y="138" text-anchor="middle">0.5</text>
+<line class="grid" x1="232.0" y1="26" x2="232.0" y2="122"/>
+<text class="tick" x="232.0" y="138" text-anchor="middle">1</text>
+<line class="grid" x1="348.0" y1="26" x2="348.0" y2="122"/>
+<text class="tick" x="348.0" y="138" text-anchor="middle">1.5</text>
+<text class="lb" x="0" y="41">up</text>
+<rect class="s0" x="0" y="47" width="303.9" height="10"/>
+<rect class="s0 range" x="303.9" y="47" width="16.2" height="10"/>
+<text class="val" x="325.2" y="56">1.31–1.38</text>
+<rect class="s1" x="0" y="60" width="250.6" height="10"/>
+<rect class="s1 range" x="250.6" y="60" width="7.0" height="10"/>
+<text class="val dim" x="262.5" y="69">1.08–1.11</text>
+<text class="lb" x="0" y="89">down</text>
+<rect class="s0" x="0" y="95" width="194.9" height="10"/>
+<rect class="s0 range" x="194.9" y="95" width="2.3" height="10"/>
+<text class="val" x="202.2" y="104">0.84–0.85</text>
+<rect class="s1" x="0" y="108" width="201.8" height="10"/>
+<rect class="s1 range" x="201.8" y="108" width="4.6" height="10"/>
+<text class="val dim" x="211.5" y="117">0.87–0.89</text>
+</svg>
+<details><summary>numbers</summary><table><tr><th>path</th><th>sbr</th><th>sing-box</th></tr><tr><td>up</td><td>1.31–1.38</td><td>1.08–1.11</td></tr><tr><td>down</td><td>0.84–0.85</td><td>0.87–0.89</td></tr></table></details>
+</figure>
+<!-- /chart -->
 <!-- chart hysteria2-cpu -->
 <figure id="hysteria2-cpu">
 <figcaption>Client CPU per GB, hysteria2 (salamander) against apernet hysteria, macOS</figcaption>
@@ -201,36 +296,90 @@
 <text class="lg dim" x="440" y="13" text-anchor="end">CPU-s/GB, lower is better</text>
 <line class="grid" x1="0.0" y1="26" x2="0.0" y2="122"/>
 <text class="tick" x="0.0" y="138" text-anchor="start">0</text>
-<line class="grid" x1="87.0" y1="26" x2="87.0" y2="122"/>
-<text class="tick" x="87.0" y="138" text-anchor="middle">5</text>
-<line class="grid" x1="174.0" y1="26" x2="174.0" y2="122"/>
-<text class="tick" x="174.0" y="138" text-anchor="middle">10</text>
-<line class="grid" x1="261.0" y1="26" x2="261.0" y2="122"/>
-<text class="tick" x="261.0" y="138" text-anchor="middle">15</text>
+<line class="grid" x1="69.6" y1="26" x2="69.6" y2="122"/>
+<text class="tick" x="69.6" y="138" text-anchor="middle">5</text>
+<line class="grid" x1="139.2" y1="26" x2="139.2" y2="122"/>
+<text class="tick" x="139.2" y="138" text-anchor="middle">10</text>
+<line class="grid" x1="208.8" y1="26" x2="208.8" y2="122"/>
+<text class="tick" x="208.8" y="138" text-anchor="middle">15</text>
+<line class="grid" x1="278.4" y1="26" x2="278.4" y2="122"/>
+<text class="tick" x="278.4" y="138" text-anchor="middle">20</text>
 <line class="grid" x1="348.0" y1="26" x2="348.0" y2="122"/>
-<text class="tick" x="348.0" y="138" text-anchor="middle">20</text>
+<text class="tick" x="348.0" y="138" text-anchor="middle">25</text>
 <text class="lb" x="0" y="41">up</text>
-<rect class="s0" x="0" y="47" width="219.2" height="10"/>
-<rect class="s0 range" x="219.2" y="47" width="3.5" height="10"/>
-<text class="val" x="227.7" y="56">12.6–12.8</text>
-<rect class="s1" x="0" y="60" width="167.0" height="10"/>
-<rect class="s1 range" x="167.0" y="60" width="12.2" height="10"/>
-<text class="val dim" x="184.2" y="69">9.6–10.3</text>
+<rect class="s0" x="0" y="47" width="103.0" height="10"/>
+<rect class="s0 range" x="103.0" y="47" width="3.9" height="10"/>
+<text class="val" x="111.9" y="56">7.40–7.68</text>
+<rect class="s1" x="0" y="60" width="188.2" height="10"/>
+<rect class="s1 range" x="188.2" y="60" width="3.2" height="10"/>
+<text class="val dim" x="196.4" y="69">13.52–13.75</text>
 <text class="lb" x="0" y="89">down</text>
-<rect class="s0" x="0" y="95" width="271.4" height="10"/>
-<rect class="s0 range" x="271.4" y="95" width="12.2" height="10"/>
-<text class="val" x="288.6" y="104">15.6–16.3</text>
-<rect class="s1" x="0" y="108" width="283.6" height="10"/>
-<rect class="s1 range" x="283.6" y="108" width="10.4" height="10"/>
-<text class="val dim" x="299.1" y="117">16.3–16.9</text>
+<rect class="s0" x="0" y="95" width="185.3" height="10"/>
+<rect class="s0 range" x="185.3" y="95" width="2.2" height="10"/>
+<text class="val" x="192.5" y="104">13.31–13.47</text>
+<rect class="s1" x="0" y="108" width="293.0" height="10"/>
+<rect class="s1 range" x="293.0" y="108" width="6.5" height="10"/>
+<text class="val dim" x="304.6" y="117">21.05–21.52</text>
 </svg>
-<details><summary>numbers</summary><table><tr><th>path</th><th>sbr</th><th>sing-box</th></tr><tr><td>up</td><td>12.6–12.8</td><td>9.6–10.3</td></tr><tr><td>down</td><td>15.6–16.3</td><td>16.3–16.9</td></tr></table></details>
+<details><summary>numbers</summary><table><tr><th>path</th><th>sbr</th><th>sing-box</th></tr><tr><td>up</td><td>7.40–7.68</td><td>13.52–13.75</td></tr><tr><td>down</td><td>13.31–13.47</td><td>21.05–21.52</td></tr></table></details>
 </figure>
 <!-- /chart -->
-<p>sbr is behind here: upload reached 0.86–0.88 Gbit/s against sing-box's 1.25–1.32, at more CPU per GB. Download is level. On Linux against a sing-box server the two were level. macOS has no UDP GSO, so the cost of sending each datagram dominates; this path has not been profiled yet.</p>
+<p>Upload is 18–28% faster than sing-box at about 45% less CPU per GB; download is within 3–6% in throughput at 37% less CPU per GB. Two changes produced this. On Darwin, sbr sends and receives QUIC on a socket connected to the server, because macOS routes every unconnected <code>sendto</code> afresh and has no UDP GSO to amortise that cost; this halved upload CPU per GB. sbr also spreads streams over two QUIC connections, since one connection's packet processing runs on one core; on a phone this nearly doubled throughput.</p>
 
 <h2>wireguard, apple silicon</h2>
-<p class="fine">Apple M1 Pro, macOS, Homebrew sing-box 1.14.4 as the peer and as the comparison client. The machine was shared with other builds (load average 10–17). sbr runs on the single-thread runtime that iOS uses.</p>
+<p class="fine">Apple M1 Pro, macOS, Homebrew sing-box 1.14.4 as the peer and as the comparison client, three rounds back to back. sbr runs on the single-thread runtime.</p>
+<!-- chart wireguard-throughput -->
+<figure id="wireguard-throughput">
+<figcaption>Throughput, WireGuard, Apple silicon</figcaption>
+<svg class="chart" viewBox="0 0 440 244" role="img" aria-labelledby="wireguard-throughput-t">
+<title id="wireguard-throughput-t">Throughput, WireGuard, Apple silicon, Gbit/s, higher is better</title>
+<rect class="s0" x="0" y="4" width="10" height="10"/>
+<text class="lg" x="16" y="13">sbr</text>
+<rect class="s1" x="60.2" y="4" width="10" height="10"/>
+<text class="lg" x="76.2" y="13">sing-box</text>
+<text class="lg dim" x="440" y="13" text-anchor="end">Gbit/s, higher is better</text>
+<line class="grid" x1="0.0" y1="26" x2="0.0" y2="218"/>
+<text class="tick" x="0.0" y="234" text-anchor="start">0</text>
+<line class="grid" x1="87.0" y1="26" x2="87.0" y2="218"/>
+<text class="tick" x="87.0" y="234" text-anchor="middle">0.5</text>
+<line class="grid" x1="174.0" y1="26" x2="174.0" y2="218"/>
+<text class="tick" x="174.0" y="234" text-anchor="middle">1</text>
+<line class="grid" x1="261.0" y1="26" x2="261.0" y2="218"/>
+<text class="tick" x="261.0" y="234" text-anchor="middle">1.5</text>
+<line class="grid" x1="348.0" y1="26" x2="348.0" y2="218"/>
+<text class="tick" x="348.0" y="234" text-anchor="middle">2</text>
+<text class="lb" x="0" y="41">1 stream, up</text>
+<rect class="s0" x="0" y="47" width="330.6" height="10"/>
+<rect class="s0 range" x="330.6" y="47" width="7.0" height="10"/>
+<text class="val" x="342.6" y="56">1.90–1.94</text>
+<rect class="s1" x="0" y="60" width="287.1" height="10"/>
+<rect class="s1 range" x="287.1" y="60" width="3.5" height="10"/>
+<text class="val dim" x="295.6" y="69">1.65–1.67</text>
+<text class="lb" x="0" y="89">1 stream, down</text>
+<rect class="s0" x="0" y="95" width="106.1" height="10"/>
+<rect class="s0 range" x="106.1" y="95" width="1.7" height="10"/>
+<text class="val" x="112.9" y="104">0.61–0.62</text>
+<rect class="s1" x="0" y="108" width="104.4" height="10"/>
+<rect class="s1 range" x="104.4" y="108" width="1.7" height="10"/>
+<text class="val dim" x="111.1" y="117">0.60–0.61</text>
+<text class="lb" x="0" y="137">4 streams, up</text>
+<rect class="s0" x="0" y="143" width="287.1" height="10"/>
+<rect class="s0 range" x="287.1" y="143" width="10.4" height="10"/>
+<text class="val" x="302.5" y="152">1.65–1.71</text>
+<rect class="s1" x="0" y="156" width="245.3" height="10"/>
+<rect class="s1 range" x="245.3" y="156" width="27.8" height="10"/>
+<text class="val dim" x="278.2" y="165">1.41–1.57</text>
+<text class="lb" x="0" y="185">4 streams, down</text>
+<rect class="s0" x="0" y="191" width="97.4" height="10"/>
+<rect class="s0 range" x="97.4" y="191" width="3.5" height="10"/>
+<text class="val" x="105.9" y="200">0.56–0.58</text>
+<rect class="s1" x="0" y="204" width="104.4" height="10"/>
+<rect class="s1 range" x="104.4" y="204" width="7.0" height="10"/>
+<text class="val dim" x="116.4" y="213">0.60–0.64</text>
+</svg>
+<details><summary>numbers</summary><table><tr><th>path</th><th>sbr</th><th>sing-box</th></tr><tr><td>1 stream, up</td><td>1.90–1.94</td><td>1.65–1.67</td></tr><tr><td>1 stream, down</td><td>0.61–0.62</td><td>0.60–0.61</td></tr><tr><td>4 streams, up</td><td>1.65–1.71</td><td>1.41–1.57</td></tr><tr><td>4 streams, down</td><td>0.56–0.58</td><td>0.60–0.64</td></tr></table></details>
+</figure>
+<!-- /chart -->
 <!-- chart wireguard-cpu -->
 <figure id="wireguard-cpu">
 <figcaption>Client CPU per GB, WireGuard, Apple silicon</figcaption>
@@ -243,49 +392,47 @@
 <text class="lg dim" x="440" y="13" text-anchor="end">CPU-s/GB, lower is better</text>
 <line class="grid" x1="0.0" y1="26" x2="0.0" y2="218"/>
 <text class="tick" x="0.0" y="234" text-anchor="start">0</text>
-<line class="grid" x1="69.6" y1="26" x2="69.6" y2="218"/>
-<text class="tick" x="69.6" y="234" text-anchor="middle">5</text>
-<line class="grid" x1="139.2" y1="26" x2="139.2" y2="218"/>
-<text class="tick" x="139.2" y="234" text-anchor="middle">10</text>
-<line class="grid" x1="208.8" y1="26" x2="208.8" y2="218"/>
-<text class="tick" x="208.8" y="234" text-anchor="middle">15</text>
-<line class="grid" x1="278.4" y1="26" x2="278.4" y2="218"/>
-<text class="tick" x="278.4" y="234" text-anchor="middle">20</text>
+<line class="grid" x1="87.0" y1="26" x2="87.0" y2="218"/>
+<text class="tick" x="87.0" y="234" text-anchor="middle">10</text>
+<line class="grid" x1="174.0" y1="26" x2="174.0" y2="218"/>
+<text class="tick" x="174.0" y="234" text-anchor="middle">20</text>
+<line class="grid" x1="261.0" y1="26" x2="261.0" y2="218"/>
+<text class="tick" x="261.0" y="234" text-anchor="middle">30</text>
 <line class="grid" x1="348.0" y1="26" x2="348.0" y2="218"/>
-<text class="tick" x="348.0" y="234" text-anchor="middle">25</text>
+<text class="tick" x="348.0" y="234" text-anchor="middle">40</text>
 <text class="lb" x="0" y="41">1 stream, up</text>
-<rect class="s0" x="0" y="47" width="44.5" height="10"/>
-<rect class="s0 range" x="44.5" y="47" width="1.4" height="10"/>
-<text class="val" x="50.9" y="56">3.2–3.3</text>
-<rect class="s1" x="0" y="60" width="158.7" height="10"/>
-<rect class="s1 range" x="158.7" y="60" width="13.9" height="10"/>
-<text class="val dim" x="177.6" y="69">11.4–12.4</text>
+<rect class="s0" x="0" y="47" width="34.2" height="10"/>
+<rect class="s0 range" x="34.2" y="47" width="0.2" height="10"/>
+<text class="val" x="39.4" y="56">3.93–3.95</text>
+<rect class="s1" x="0" y="60" width="118.8" height="10"/>
+<rect class="s1 range" x="118.8" y="60" width="3.2" height="10"/>
+<text class="val dim" x="127.1" y="69">13.66–14.03</text>
 <text class="lb" x="0" y="89">1 stream, down</text>
-<rect class="s0" x="0" y="95" width="93.3" height="10"/>
-<rect class="s0 range" x="93.3" y="95" width="23.7" height="10"/>
-<text class="val" x="121.9" y="104">6.7–8.4</text>
-<rect class="s1" x="0" y="108" width="175.4" height="10"/>
-<rect class="s1 range" x="175.4" y="108" width="103.0" height="10"/>
-<text class="val dim" x="283.4" y="117">12.6–20.0</text>
+<rect class="s0" x="0" y="95" width="80.1" height="10"/>
+<rect class="s0 range" x="80.1" y="95" width="0.2" height="10"/>
+<text class="val" x="85.3" y="104">9.21–9.23</text>
+<rect class="s1" x="0" y="108" width="237.3" height="10"/>
+<rect class="s1 range" x="237.3" y="108" width="18.2" height="10"/>
+<text class="val dim" x="260.5" y="117">27.28–29.37</text>
 <text class="lb" x="0" y="137">4 streams, up</text>
-<rect class="s0" x="0" y="143" width="48.7" height="10"/>
-<rect class="s0 range" x="48.7" y="143" width="1.4" height="10"/>
-<text class="val" x="55.1" y="152">3.5–3.6</text>
-<rect class="s1" x="0" y="156" width="158.7" height="10"/>
-<rect class="s1 range" x="158.7" y="156" width="7.0" height="10"/>
-<text class="val dim" x="170.6" y="165">11.4–11.9</text>
+<rect class="s0" x="0" y="143" width="38.5" height="10"/>
+<rect class="s0 range" x="38.5" y="143" width="1.2" height="10"/>
+<text class="val" x="44.8" y="152">4.43–4.57</text>
+<rect class="s1" x="0" y="156" width="121.1" height="10"/>
+<rect class="s1 range" x="121.1" y="156" width="14.7" height="10"/>
+<text class="val dim" x="140.8" y="165">13.92–15.61</text>
 <text class="lb" x="0" y="185">4 streams, down</text>
-<rect class="s0" x="0" y="191" width="80.7" height="10"/>
-<rect class="s0 range" x="80.7" y="191" width="26.4" height="10"/>
-<text class="val" x="112.2" y="200">5.8–7.7</text>
-<rect class="s1" x="0" y="204" width="154.5" height="10"/>
-<rect class="s1 range" x="154.5" y="204" width="130.8" height="10"/>
-<text class="val dim" x="290.4" y="213">11.1–20.5</text>
+<rect class="s0" x="0" y="191" width="85.7" height="10"/>
+<rect class="s0 range" x="85.7" y="191" width="4.8" height="10"/>
+<text class="val" x="95.5" y="200">9.85–10.40</text>
+<rect class="s1" x="0" y="204" width="217.3" height="10"/>
+<rect class="s1 range" x="217.3" y="204" width="75.1" height="10"/>
+<text class="val dim" x="297.4" y="213">24.98–33.61</text>
 </svg>
-<details><summary>numbers</summary><table><tr><th>path</th><th>sbr</th><th>sing-box</th></tr><tr><td>1 stream, up</td><td>3.2–3.3</td><td>11.4–12.4</td></tr><tr><td>1 stream, down</td><td>6.7–8.4</td><td>12.6–20.0</td></tr><tr><td>4 streams, up</td><td>3.5–3.6</td><td>11.4–11.9</td></tr><tr><td>4 streams, down</td><td>5.8–7.7</td><td>11.1–20.5</td></tr></table></details>
+<details><summary>numbers</summary><table><tr><th>path</th><th>sbr</th><th>sing-box</th></tr><tr><td>1 stream, up</td><td>3.93–3.95</td><td>13.66–14.03</td></tr><tr><td>1 stream, down</td><td>9.21–9.23</td><td>27.28–29.37</td></tr><tr><td>4 streams, up</td><td>4.43–4.57</td><td>13.92–15.61</td></tr><tr><td>4 streams, down</td><td>9.85–10.40</td><td>24.98–33.61</td></tr></table></details>
 </figure>
 <!-- /chart -->
-<p>Upload with four streams reached 1.54–2.16 Gbit/s for sbr and 1.23–1.80 for sing-box, and download is level, limited by the loopback server. The upload figures follow a change to connect the UDP socket to its single peer: Darwin routes every unconnected <code>sendto</code> afresh, and connecting it more than doubled upload and halved its CPU per byte.</p>
+<p>Upload is 5–21% faster than sing-box at 30% of its CPU per GB. Download is limited by the loopback sing-box server for both clients, and there sbr uses a third of sing-box's CPU per GB. Upload depends on connecting the UDP socket to its single peer: Darwin routes every unconnected <code>sendto</code> afresh, and connecting it more than doubled upload and halved its CPU per byte.</p>
 
 <h2 id="tun">tun: kernel and userspace tcp stacks</h2>
 <p class="fine">OrbStack Linux VM with 8 vCPUs on an Apple M1 Pro, host shared with other builds (load average about 7); the two stacks ran back to back in each round. Four streams for 5 s from apps through the TUN, the engine and <code>direct</code> to a loopback server. CPU is whole-machine, including the kernel's own TCP work.</p>

@@ -1,5 +1,5 @@
 {
-  "_source": "BENCHMARKS.md, runs of 2026-10-25. Each value is [min, max] over the rounds of that run.",
+  "_source": "BENCHMARKS.md: Linux runs of 2026-10-25, macOS runs of 2026-10-26. Each value is [min, max] over the rounds of that run.",
   "charts": [
     {
       "id": "linux-throughput",
@@ -23,16 +23,40 @@
       ]
     },
     {
+      "id": "vision-throughput",
+      "title": "Throughput, VLESS + TLS + Vision against Xray-core, macOS",
+      "unit": "Gbit/s",
+      "better": "higher",
+      "series": ["sbr", "sing-box"],
+      "rows": [
+        { "label": "plain inner, up", "values": [[9.02, 9.19], [7.68, 7.89]] },
+        { "label": "plain inner, down", "values": [[8.21, 8.34], [7.54, 7.83]] },
+        { "label": "tls inner, up", "values": [[11.75, 11.98], [11.66, 11.86]] },
+        { "label": "tls inner, down", "values": [[7.15, 9.26], [6.95, 9.52]] }
+      ]
+    },
+    {
       "id": "vision-cpu",
       "title": "Client CPU per GB, VLESS + TLS + Vision against Xray-core, macOS",
       "unit": "CPU-s/GB",
       "better": "lower",
       "series": ["sbr", "sing-box"],
       "rows": [
-        { "label": "plain inner, up", "values": [[0.45, 0.45], [0.72, 0.72]] },
-        { "label": "plain inner, down", "values": [[0.65, 0.65], [1.05, 1.05]] },
-        { "label": "tls inner, up", "values": [[0.27, 0.3], [0.28, 0.28]] },
-        { "label": "tls inner, down", "values": [[0.39, 0.54], [0.74, 1.96]] }
+        { "label": "plain inner, up", "values": [[0.66, 0.67], [1.28, 1.29]] },
+        { "label": "plain inner, down", "values": [[1.1, 1.18], [1.39, 1.45]] },
+        { "label": "tls inner, up", "values": [[0.59, 0.62], [0.69, 0.7]] },
+        { "label": "tls inner, down", "values": [[1.04, 1.58], [1.09, 1.78]] }
+      ]
+    },
+    {
+      "id": "hysteria2-throughput",
+      "title": "Throughput, hysteria2 (salamander) against apernet hysteria, macOS",
+      "unit": "Gbit/s",
+      "better": "higher",
+      "series": ["sbr", "sing-box"],
+      "rows": [
+        { "label": "up", "values": [[1.31, 1.38], [1.08, 1.11]] },
+        { "label": "down", "values": [[0.84, 0.85], [0.87, 0.89]] }
       ]
     },
     {
@@ -42,8 +66,21 @@
       "better": "lower",
       "series": ["sbr", "sing-box"],
       "rows": [
-        { "label": "up", "values": [[12.6, 12.8], [9.6, 10.3]] },
-        { "label": "down", "values": [[15.6, 16.3], [16.3, 16.9]] }
+        { "label": "up", "values": [[7.4, 7.68], [13.52, 13.75]] },
+        { "label": "down", "values": [[13.31, 13.47], [21.05, 21.52]] }
+      ]
+    },
+    {
+      "id": "wireguard-throughput",
+      "title": "Throughput, WireGuard, Apple silicon",
+      "unit": "Gbit/s",
+      "better": "higher",
+      "series": ["sbr", "sing-box"],
+      "rows": [
+        { "label": "1 stream, up", "values": [[1.9, 1.94], [1.65, 1.67]] },
+        { "label": "1 stream, down", "values": [[0.61, 0.62], [0.6, 0.61]] },
+        { "label": "4 streams, up", "values": [[1.65, 1.71], [1.41, 1.57]] },
+        { "label": "4 streams, down", "values": [[0.56, 0.58], [0.6, 0.64]] }
       ]
     },
     {
@@ -53,10 +90,10 @@
       "better": "lower",
       "series": ["sbr", "sing-box"],
       "rows": [
-        { "label": "1 stream, up", "values": [[3.2, 3.3], [11.4, 12.4]] },
-        { "label": "1 stream, down", "values": [[6.7, 8.4], [12.6, 20.0]] },
-        { "label": "4 streams, up", "values": [[3.5, 3.6], [11.4, 11.9]] },
-        { "label": "4 streams, down", "values": [[5.8, 7.7], [11.1, 20.5]] }
+        { "label": "1 stream, up", "values": [[3.93, 3.95], [13.66, 14.03]] },
+        { "label": "1 stream, down", "values": [[9.21, 9.23], [27.28, 29.37]] },
+        { "label": "4 streams, up", "values": [[4.43, 4.57], [13.92, 15.61]] },
+        { "label": "4 streams, down", "values": [[9.85, 10.4], [24.98, 33.61]] }
       ]
     },
     {

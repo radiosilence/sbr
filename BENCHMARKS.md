@@ -59,36 +59,41 @@ Reproduce (root, Linux): `tun_bench 4 5`, and `SBR_BENCH_MTU=1280 tun_bench 4 5`
 
 ## Against the servers jaritanet runs (macOS)
 
-Run 2026-10-25 on an Apple M1 Pro (8 cores, macOS), loopback, against
+Run 2026-10-26 on an Apple M1 Pro (8 cores, macOS), loopback, against
 Xray-core 26.10.21 and apernet hysteria 2.13.0 with jaritanet-shaped configs;
 the clients are sbr and Homebrew sing-box 1.14.4 with the same config file.
 4 streams × 5 s, three rounds back to back, min–max. Gbit/s, then client
-CPU-seconds per GB.
+CPU-seconds per GB. The machine was in use during the run, so absolute figures
+are lower than on 2026-10-25; compare the two clients within a row. The
+hysteria2 rows are from 49331a3, the rest from 61c5b99.
 
 | path | sbr | sing-box |
 |---|---|---|
-| REALITY + Vision, plain inner, up / down | 20.0–20.6, 0.52 / 17.5–18.4, 0.99 | refused |
-| REALITY + Vision, TLS inner, up / down | 19.7–23.0, 0.28 / 12.6–15.8, 0.55–0.72 | refused |
-| TLS + Vision, plain inner, up | 20.1–20.5, 0.45 | 18.6–18.9, 0.72 |
-| TLS + Vision, plain inner, down | 20.8–21.5, 0.65 | 16.9–17.7, 1.05 |
-| TLS + Vision, TLS inner, up | 17.4–28.1, 0.27–0.30 | 18.3–22.2, 0.28 |
-| TLS + Vision, TLS inner, down | 11.5–20.5, 0.39–0.54 | 3.4–14.1, 0.74–1.96 |
-| hysteria2 (salamander), up | 0.86–0.88, 12.6–12.8 | 1.25–1.32, 9.6–10.3 |
-| hysteria2 (salamander), down | 0.88–0.92, 15.6–16.3 | 0.94–0.99, 16.3–16.9 |
+| REALITY + Vision, plain inner, up / down | 8.94–9.31, 0.64 / 8.37–8.48, 1.16–1.18 | refused |
+| REALITY + Vision, TLS inner, up / down | 11.54–11.64, 0.60–0.63 / 5.63–8.53, 1.10–2.04 | refused |
+| TLS + Vision, plain inner, up | 9.02–9.19, 0.66–0.67 | 7.68–7.89, 1.28–1.29 |
+| TLS + Vision, plain inner, down | 8.21–8.34, 1.10–1.18 | 7.54–7.83, 1.39–1.45 |
+| TLS + Vision, TLS inner, up | 11.75–11.98, 0.59–0.62 | 11.66–11.86, 0.69–0.70 |
+| TLS + Vision, TLS inner, down | 7.15–9.26, 1.04–1.58 | 6.95–9.52, 1.09–1.78 |
+| hysteria2 (salamander), up | 1.31–1.38, 7.40–7.68 | 1.08–1.11, 13.52–13.75 |
+| hysteria2 (salamander), down | 0.84–0.85, 13.31–13.47 | 0.87–0.89, 21.05–21.52 |
 
 - sing-box strips X25519MLKEM768 from its REALITY ClientHello, which
   XTLS/REALITY servers have refused since 2026-09-08, so it cannot use the
   REALITY inbound at all. The TLS + Vision inbound (same Vision path, pinned
   certificate) is where the two clients compare.
-- Vision: sbr is ahead or level everywhere and uses 35–40% less CPU per GB
-  on the padded path. The TLS-inner rows (direct copy) vary widely between
-  rounds for both clients on macOS loopback.
-- hysteria2 upload loses: about 32% less throughput and 25% more CPU per GB
-  than sing-box against the apernet server. On Linux against a sing-box
-  server the two were level; this needs profiling on Darwin (no UDP GSO
-  there, so per-datagram send cost and salamander dominate).
+- Vision: sbr is 5–20% faster on the padded path at 15–49% less CPU per GB;
+  with TLS inside (direct copy) the two are level.
+- hysteria2: upload was 0.86–0.88 Gbit/s on 2026-10-25, behind sing-box. Two
+  changes fixed it. On Darwin, QUIC now sends and receives on a socket
+  connected to the server: Darwin routes every unconnected `sendto` afresh and
+  has no UDP GSO, and quinn-udp always names a destination. That halved upload
+  CPU per GB (15.4–16.2 to 7.4–7.7). Streams are also spread over two QUIC
+  connections, because quinn runs one connection's packet processing on one
+  task; that matters most on a phone, where one core was the ceiling.
+  Download is 3–6% behind in throughput at 37% less CPU per GB.
 
-Reproduce: `upstream_bench <xray> <hysteria> <sing-box> 4 5 3`.
+Reproduce: `upstream_bench <xray> <hysteria> <sing-box> 4 5 3`; `SBR_BENCH_ONLY=hysteria2` runs one case.
 
 ## WireGuard on Apple silicon
 
@@ -129,6 +134,20 @@ runtime (the iOS default) and `t0` the multi-thread default.
   about half sing-box's CPU per byte.
 - iOS keeps the current-thread runtime. One thread sustains about 2 Gbit/s at
   the lowest CPU per byte, more than a phone's uplink. See `apple/README.md`.
+
+Rerun 2026-10-26 (61c5b99), same machine in use, three rounds each, Gbit/s and
+CPU-s/GB, min–max:
+
+| streams | client | up | down |
+|---|---|---|---|
+| 1 | sbr t0 | 1.96–1.98, 5.09–5.21 | 0.61, 9.19–9.32 |
+| 1 | sbr t1 | 1.90–1.94, 3.93–3.95 | 0.61–0.62, 9.21–9.23 |
+| 1 | sing-box | 1.65–1.67, 13.66–14.03 | 0.60–0.61, 27.28–29.37 |
+| 4 | sbr t0 | 2.02–2.04, 5.61–5.85 | 0.59–0.60, 12.76–13.72 |
+| 4 | sbr t1 | 1.65–1.71, 4.43–4.57 | 0.56–0.58, 9.85–10.40 |
+| 4 | sing-box | 1.41–1.57, 13.92–15.61 | 0.60–0.64, 24.98–33.61 |
+
+Download is bound by the loopback sing-box server for every client.
 
 ## XHTTP against VLESS + REALITY + Vision (macOS)
 
