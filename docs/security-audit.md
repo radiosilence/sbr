@@ -50,8 +50,8 @@ Severity reflects impact for the intended users: a remote or local denial of ser
 | The plain UDP DNS transport accepted answers from any source address. | Fixed, 8c6e93c |
 | Remote rule-sets followed https→http redirects and could be 64 MiB in memory on iOS. | Fixed, a0cfead |
 | A failed REALITY authentication closes the connection without the HTTP request a browser would send. | #14 |
-| VMess AEAD chunk counter wraps after 65,536 chunks (nonce reuse on unencrypted transports). | #15 |
-| Outbound handshakes (ShadowTLS, AnyTLS, SOCKS, HTTP CONNECT, WebSocket, httpupgrade) and local inbound handshakes have no deadline. | #16 |
+| VMess AEAD chunk counter wraps after 65,536 chunks (nonce reuse on unencrypted transports). | Fixed without TLS (the stream ends); wraps inside TLS/REALITY like v2ray, 6181872 |
+| Outbound handshakes (ShadowTLS, AnyTLS, SOCKS, HTTP CONNECT, WebSocket, httpupgrade) and local inbound handshakes have no deadline. | Fixed (30 s connect deadline in dispatch, 15 s inbound handshake, slot taken at accept), b3b3cc7 |
 | TUN TCP NAT port space can be exhausted by one app; the table occupies about 5 MiB per family up front. | #17 |
 | QUIC and h2 receive windows, TUIC uni streams and QUIC UDP reassembly exceed the iOS memory budget. | #18 |
 | QUIC outbounds trust the platform certificate store; every other path uses bundled roots. | #19 |
