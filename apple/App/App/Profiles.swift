@@ -8,6 +8,8 @@ import SbrKit
 struct Profile: Codable, Identifiable, Hashable {
     var id = UUID()
     var name: String
+    /// A bearer link: stored with the config in the profile's Keychain item,
+    /// never encoded into the index. Decoded only from a pre-Keychain index.
     var remoteURL: URL?
     var updated: Date?
     /// sing-box's default remote-profile interval.
@@ -17,6 +19,16 @@ struct Profile: Codable, Identifiable, Hashable {
         guard remoteURL != nil else { return false }
         guard let updated else { return true }
         return Date().timeIntervalSince(updated) > Double(autoUpdateMinutes) * 60
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, name, remoteURL, updated, autoUpdateMinutes }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encodeIfPresent(updated, forKey: .updated)
+        try c.encode(autoUpdateMinutes, forKey: .autoUpdateMinutes)
     }
 }
 
@@ -46,13 +58,14 @@ struct ProfileLink {
     }
 }
 
-/// Profiles live in the app's own container (`Application Support/profiles`:
-/// `index.json` plus one JSON file per profile; on tvOS, see `dir`),
-/// protected until first unlock. The tunnel never reads them: the app hands it the active
-/// profile's text inside the VPN configuration (see `TunnelModel.apply`), so
-/// no shared container holds every profile's credentials. The tunnel keeps
-/// its own copy of what it downloads, which the app asks for over the
-/// provider message channel (`adopt`).
+/// Profiles live in the Keychain, in the access group the app shares with
+/// its tunnel: an index of names and refresh times, and per profile an
+/// `SbrProfileSecret` holding the whole config and its remote URL. Items are
+/// device-only and readable after first unlock, so they never reach iCloud or
+/// a computer backup, or a device restored from one. The tunnel reads the
+/// active profile's item itself (`SbrStoredProfile`), so the VPN preferences
+/// carry no credentials. It keeps its own download of the active profile,
+/// which the app asks for over the provider message channel (`adopt`).
 @MainActor
 final class ProfileStore: ObservableObject {
     @Published private(set) var profiles: [Profile] = []
@@ -61,19 +74,8 @@ final class ProfileStore: ObservableObject {
     /// The active profile's config, for the tunnel.
     @Published private(set) var activeText: String?
 
-    /// tvOS gives apps no persistent files, only a cache the system may
-    /// purge. There the index also lives in UserDefaults, and `restore`
-    /// downloads a purged remote profile again.
-    private var dir: URL? {
-        #if os(tvOS)
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-        #else
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-        #endif
-        return base?.appendingPathComponent("profiles", isDirectory: true)
-    }
-    private static let indexDefaultsKey = "profileIndex"
-    private var indexURL: URL? { dir?.appendingPathComponent("index.json") }
+    private let keychain = SbrKeychain(accessGroup: AppConfig.keychainGroup)
+    private static let indexAccount = "index"
 
     private struct Index: Codable {
         var profiles: [Profile]
@@ -88,19 +90,27 @@ final class ProfileStore: ObservableObject {
         return SbrRemoteProfile(url: url, refreshMinutes: p.autoUpdateMinutes, updated: p.updated)
     }
 
+    /// The Keychain item for the active profile, which the tunnel reads.
+    var activeStored: SbrStoredProfile? {
+        guard let p = active, let group = AppConfig.keychainGroup else { return nil }
+        return SbrStoredProfile(accessGroup: group, id: p.id.uuidString, refreshMinutes: p.autoUpdateMinutes,
+                                updated: p.updated)
+    }
+
     func load() {
-        var data = indexURL.flatMap { try? Data(contentsOf: $0) }
-        #if os(tvOS)
-        data = data ?? UserDefaults.standard.data(forKey: Self.indexDefaultsKey)
-        #endif
-        guard let data, let index = try? JSONDecoder().decode(Index.self, from: data) else { return }
-        profiles = index.profiles
+        migrate()
+        guard let index = try? keychain.value(Index.self, Self.indexAccount) else { return }
+        profiles = index.profiles.map { p in
+            var p = p
+            p.remoteURL = (try? secret(p.id))?.url
+            return p
+        }
         activeID = index.active
         activeText = active.flatMap { try? text(of: $0) }
     }
 
-    /// Download again any remote profile whose file is gone (a purged tvOS
-    /// cache). Elsewhere every file is present and this does nothing.
+    /// Download again any remote profile whose config is missing: one whose
+    /// purged tvOS cache file left only its URL to move to the Keychain.
     func restore() async {
         for p in profiles where p.remoteURL != nil && (try? text(of: p)) == nil {
             guard let url = p.remoteURL, let text = try? await fetch(url) else { continue }
@@ -150,8 +160,8 @@ final class ProfileStore: ObservableObject {
     }
 
     func text(of profile: Profile) throws -> String {
-        guard let url = file(profile.id) else { throw SbrError("no storage directory") }
-        return try String(contentsOf: url, encoding: .utf8)
+        guard let config = try secret(profile.id)?.config else { throw SbrError("this profile has not been downloaded") }
+        return config
     }
 
     /// Make `profile` the one the tunnel runs.
@@ -162,7 +172,7 @@ final class ProfileStore: ObservableObject {
     }
 
     func remove(_ profile: Profile) {
-        if let url = file(profile.id) { try? FileManager.default.removeItem(at: url) }
+        try? keychain.remove(SbrProfileSecret.account(profile.id.uuidString))
         profiles.removeAll { $0.id == profile.id }
         if activeID == profile.id {
             activeID = nil
@@ -230,10 +240,9 @@ final class ProfileStore: ObservableObject {
     }
 
     private func write(_ profile: Profile, text: String) throws {
-        guard let dir, let url = file(profile.id) else { throw SbrError("no storage directory") }
         if let problem = Sbr.check(config: text) { throw SbrError("this profile can't be used: \(problem)") }
-        try Self.prepare(dir)
-        try Data(text.utf8).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        try keychain.set(value: SbrProfileSecret(config: text, url: profile.remoteURL),
+                         for: SbrProfileSecret.account(profile.id.uuidString))
         if let i = profiles.firstIndex(where: { $0.id == profile.id }) {
             profiles[i] = profile
         } else {
@@ -243,26 +252,69 @@ final class ProfileStore: ObservableObject {
     }
 
     private func saveIndex() throws {
-        guard let dir, let indexURL else { return }
-        try Self.prepare(dir)
-        let data = try JSONEncoder().encode(Index(profiles: profiles, active: activeID))
+        try keychain.set(value: Index(profiles: profiles, active: activeID), for: Self.indexAccount)
+    }
+
+    private func secret(_ id: UUID) throws -> SbrProfileSecret? {
+        try keychain.value(SbrProfileSecret.self, SbrProfileSecret.account(id.uuidString))
+    }
+
+    /// Delete every profile and everything else in the shared Keychain group
+    /// (the tunnel's downloaded copy included).
+    func eraseAll() throws {
+        try keychain.removeAll()
+        if let legacyDir { try? FileManager.default.removeItem(at: legacyDir) }
+        profiles = []
+        activeID = nil
+        activeText = nil
+        refreshing = []
+    }
+
+    // MARK: Pre-Keychain storage
+
+    /// Where profiles were files: `index.json` and one JSON file per profile,
+    /// in Application Support, or on tvOS in the caches directory with the
+    /// index also in UserDefaults.
+    private var legacyDir: URL? {
         #if os(tvOS)
-        UserDefaults.standard.set(data, forKey: Self.indexDefaultsKey)
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        #else
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
         #endif
-        try data.write(to: indexURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        return base?.appendingPathComponent("profiles", isDirectory: true)
     }
 
-    /// Profiles hold server credentials: keep them out of iCloud and
-    /// computer backups.
-    private static func prepare(_ dir: URL) throws {
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        var d = dir
-        var values = URLResourceValues()
-        values.isExcludedFromBackup = true
-        try d.setResourceValues(values)
-    }
+    private static let legacyDefaultsKey = "profileIndex"
 
-    private func file(_ id: UUID) -> URL? { dir?.appendingPathComponent("\(id.uuidString).json") }
+    /// Move file-based profiles into the Keychain, then delete the files. A
+    /// remote profile whose file the system purged keeps its URL, for
+    /// `restore`. On failure the files stay, and the next launch retries.
+    private func migrate() {
+        var data = legacyDir.flatMap { try? Data(contentsOf: $0.appendingPathComponent("index.json")) }
+        #if os(tvOS)
+        data = data ?? UserDefaults.standard.data(forKey: Self.legacyDefaultsKey)
+        #endif
+        guard let data, let legacy = try? JSONDecoder().decode(Index.self, from: data) else { return }
+        do {
+            var index = try keychain.value(Index.self, Self.indexAccount) ?? Index(profiles: [], active: nil)
+            for p in legacy.profiles where !index.profiles.contains(where: { $0.id == p.id }) {
+                let file = legacyDir?.appendingPathComponent("\(p.id.uuidString).json")
+                let text = file.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+                guard text != nil || p.remoteURL != nil else { continue }
+                try keychain.set(value: SbrProfileSecret(config: text, url: p.remoteURL),
+                                 for: SbrProfileSecret.account(p.id.uuidString))
+                index.profiles.append(p)
+            }
+            if index.active == nil, index.profiles.contains(where: { $0.id == legacy.active }) {
+                index.active = legacy.active
+            }
+            try keychain.set(value: index, for: Self.indexAccount)
+        } catch {
+            return
+        }
+        if let legacyDir { try? FileManager.default.removeItem(at: legacyDir) }
+        UserDefaults.standard.removeObject(forKey: Self.legacyDefaultsKey)
+    }
 
     private static func defaultName(for url: URL) -> String {
         if let fragment = url.fragment, !fragment.isEmpty { return fragment }

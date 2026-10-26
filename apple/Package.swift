@@ -19,5 +19,6 @@ let package = Package(
                 .linkedFramework("Security"),
             ]
         ),
+        .testTarget(name: "SbrKitTests", dependencies: ["SbrKit"]),
     ]
 )

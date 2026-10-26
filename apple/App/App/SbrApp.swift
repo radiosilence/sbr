@@ -27,14 +27,15 @@ struct SbrApp: App {
                     profiles.load()
                     await profiles.restore()
                     await tunnel.load()
-                    await tunnel.apply(config: profiles.activeText, remote: profiles.activeRemote)
+                    await tunnel.apply(config: profiles.activeText, remote: profiles.activeRemote,
+                                       stored: profiles.activeStored)
                     await syncProfiles()
                 }
                 .onChange(of: profiles.activeText) { _, text in
-                    Task { await tunnel.apply(config: text, remote: profiles.activeRemote) }
+                    Task { await tunnel.apply(config: text, remote: profiles.activeRemote, stored: profiles.activeStored) }
                 }
                 .onChange(of: profiles.activeRemote) { _, remote in
-                    Task { await tunnel.apply(config: profiles.activeText, remote: remote) }
+                    Task { await tunnel.apply(config: profiles.activeText, remote: remote, stored: profiles.activeStored) }
                 }
                 .onOpenURL { url in
                     #if os(iOS)
@@ -72,4 +73,7 @@ struct SbrApp: App {
 /// Per-target values injected through Info.plist by project.yml.
 enum AppConfig {
     static let tunnelBundleIdentifier = Bundle.main.object(forInfoDictionaryKey: "SbrTunnelBundleIdentifier") as? String ?? ""
+    /// The Keychain access group shared with the tunnel (`keychain-access-groups`).
+    static let keychainGroup = (Bundle.main.object(forInfoDictionaryKey: "SbrKeychainGroup") as? String)
+        .flatMap { $0.isEmpty ? nil : $0 }
 }

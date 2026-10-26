@@ -21,6 +21,9 @@ settings:
     # lets the system extension's Mach service name live under it).
     SBR_APP_GROUP: group.$(SBR_BUNDLE_ID)
     "SBR_APP_GROUP[sdk=macosx*]": $(DEVELOPMENT_TEAM).$(SBR_BUNDLE_ID)
+    # Keychain access group shared by an app and its tunnel; profiles live
+    # there. Under the team prefix, which every provisioning profile allows.
+    SBR_KEYCHAIN_GROUP: $(AppIdentifierPrefix)$(SBR_BUNDLE_ID)
     SWIFT_VERSION: "5.9"
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
@@ -76,6 +79,7 @@ targets:
         NSLocalNetworkUsageDescription: sbr uses your local network only to send a profile between your own devices, such as from your iPhone to your Apple TV.
         NSBonjourServices: [_sbr-pair._tcp]
         SbrTunnelBundleIdentifier: $(SBR_BUNDLE_ID).tunnel
+        SbrKeychainGroup: $(SBR_KEYCHAIN_GROUP)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID)
@@ -184,9 +188,12 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         SbrAppGroup: $(SBR_APP_GROUP)
         SbrTunnelBundleIdentifier: $(SBR_BUNDLE_ID).mac.tunnel
+        SbrKeychainGroup: $(SBR_KEYCHAIN_GROUP)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID).mac
+        # Its own profiles, apart from the App Store build's on the same Mac.
+        SBR_KEYCHAIN_GROUP: $(AppIdentifierPrefix)$(SBR_BUNDLE_ID).mac
         CODE_SIGN_ENTITLEMENTS: App/App-macOS-SystemExtension.entitlements
         SWIFT_OBJC_BRIDGING_HEADER: App/Bridging.h
         OTHER_LDFLAGS: $(inherited) -lresolv

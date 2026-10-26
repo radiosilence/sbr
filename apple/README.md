@@ -22,9 +22,12 @@ final class PacketTunnelProvider: SbrPacketTunnelProvider {}
 
 That is the whole extension. The base class:
 
-1. Loads the sing-box config from `providerConfiguration["config"]`, or from
+1. Loads the sing-box config from the Keychain item named by
+   `providerConfiguration["stored"]` (an `SbrStoredProfile`, see
+   `SbrKeychain`), from `providerConfiguration["config"]`, or from
    `config.json` in the App Group named by `providerConfiguration["appGroup"]`
-   (see `SbrConfigStore`).
+   (see `SbrConfigStore`). The Keychain is preferred because the system keeps
+   `providerConfiguration` on disk with the VPN preferences.
 2. Builds `NEPacketTunnelNetworkSettings` from the config's `tun` inbound with
    `sbr_tun_network_settings`. That function is Rust, so it shares the strict parser and its
    tests:
@@ -49,9 +52,13 @@ That is the whole extension. The base class:
 6. Answers `SbrRequest` app messages (`groups`, `select`, `stats`, `connections`,
    `closeConnection`, `reload`, `profile`).
    On the app side, call `NETunnelProviderSession.send(_:)`.
-7. Refreshes a remote profile itself when `providerConfiguration["remote"]` names
-   one (an `SbrRemoteProfile`: URL, interval, when the config was downloaded).
-   See below.
+7. Refreshes a remote profile itself when the stored profile's Keychain item
+   has a URL, or `providerConfiguration["remote"]` names one (an
+   `SbrRemoteProfile`: URL, interval, when the config was downloaded). See
+   below.
+8. Keeps its working files (cache file, rule-set cache, session logs) in a
+   directory excluded from backups and protected until first unlock, and
+   deletes them on `SbrRequest.erase`.
 
 ### Remote profile refresh
 
@@ -70,9 +77,9 @@ The text is validated by the same checker as `sbr_check` and applied with
 `sbr_apply_profile`: unchanged text restarts nothing, a profile that fails
 validation leaves the running config untouched (retried in five minutes), and one
 whose tun inbound needs different interface settings gets them applied before the
-reload. The last good download is stored in the extension's own container (no App
-Group is needed) and used on the next start if it is newer than the config the app
-installed. The app asks for it with `SbrRequest.profile` when it comes to the front
+reload. The last good download is stored beside a stored profile in the Keychain,
+or otherwise in the extension's own container (no App Group is needed), and used on
+the next start if it is newer than the config the app installed. The app asks for it with `SbrRequest.profile` when it comes to the front
 and stores it, so it shows what the tunnel runs. The URL and the profile text are
 never logged.
 

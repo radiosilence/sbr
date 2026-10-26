@@ -42,6 +42,7 @@ struct TunnelView: View {
         .tint(.sbrAccent)
         AutoConnectSection()
         #endif
+        EraseSection()
     }
 
     private var header: some View {

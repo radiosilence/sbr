@@ -2,8 +2,13 @@ import Foundation
 
 /// Keys SbrKit reads from `NETunnelProviderProtocol.providerConfiguration`.
 public enum SbrProviderKey {
-    /// Inline sing-box JSON. Fine for small configs; the system stores it
-    /// with the VPN preferences.
+    /// JSON-encoded `SbrStoredProfile`: the config, and the remote URL it is
+    /// refreshed from, are read from the Keychain. Preferred, since the
+    /// system keeps `providerConfiguration` on disk with the VPN preferences.
+    public static let stored = "stored"
+    /// Inline sing-box JSON, stored by the system with the VPN preferences.
+    /// For a provider that cannot reach the app's Keychain, such as a macOS
+    /// system extension, which runs as root.
     public static let config = "config"
     /// The tun inbound's `stack`, overriding the profile: `"gvisor"` for sbr's
     /// userspace TCP, `"system"` for the kernel's; absent leaves the profile's.
