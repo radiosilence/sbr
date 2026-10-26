@@ -36,6 +36,11 @@ pub use outbound::{BuildContext, Group, Outbound, PacketConn, Selector};
 pub use sbr_config;
 pub use sbr_core;
 
+/// Built for a host with a hard memory limit (the iOS Network Extension's
+/// ~50 MB): buffers and windows that scale memory per connection are sized
+/// down.
+pub(crate) const MOBILE: bool = cfg!(any(target_os = "ios", target_os = "tvos", target_os = "visionos"));
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]

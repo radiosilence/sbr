@@ -65,22 +65,27 @@ pub(crate) fn client_config(
         .map_err(|e| e.to_string())?;
     let verifier: Arc<dyn ServerCertVerifier> = if t.insecure {
         Arc::new(NoVerify(provider.clone()))
-    } else if let Some(pem) = read(&t.certificate, &t.certificate_path, "certificate")? {
-        // sing-box: a configured certificate replaces the system roots.
+    } else {
         let mut roots = RootCertStore::empty();
-        for c in CertificateDer::pem_slice_iter(&pem) {
-            roots
-                .add(c.map_err(|e| format!("tls.certificate: {e}"))?)
-                .map_err(|e| format!("tls.certificate: {e}"))?;
-        }
-        if roots.is_empty() {
-            return Err("tls.certificate: no PEM certificate found".into());
+        match read(&t.certificate, &t.certificate_path, "certificate")? {
+            // sing-box: a configured certificate replaces the default roots.
+            Some(pem) => {
+                for c in CertificateDer::pem_slice_iter(&pem) {
+                    roots
+                        .add(c.map_err(|e| format!("tls.certificate: {e}"))?)
+                        .map_err(|e| format!("tls.certificate: {e}"))?;
+                }
+                if roots.is_empty() {
+                    return Err("tls.certificate: no PEM certificate found".into());
+                }
+            }
+            // The bundled Mozilla roots, as on every other TLS path, so a
+            // root installed on the device cannot intercept QUIC alone.
+            None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
         }
         rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
             .build()
             .map_err(|e| e.to_string())?
-    } else {
-        Arc::new(rustls_platform_verifier::Verifier::new(provider.clone()).map_err(|e| e.to_string())?)
     };
     let builder = builder.dangerous().with_custom_certificate_verifier(verifier);
     let cert = read(&t.client_certificate, &t.client_certificate_path, "client_certificate")?;

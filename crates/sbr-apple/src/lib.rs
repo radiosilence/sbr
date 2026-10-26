@@ -39,8 +39,11 @@ const fn default_relay_buffer() -> usize {
     }
 }
 
-/// 512 connections × 32 KiB = 16 MB of relay buffers at worst, leaving room
-/// under the extension's ~50 MB for the binary, TLS state and UDP sessions.
+/// 512 connections × 32 KiB = 16 MB of relay buffers at worst. UDP sessions
+/// are capped separately at the same number: 512 × 16 KiB reply buffers plus
+/// at most 4 MiB queued across them, 12 MB more. Each QUIC connection may
+/// also hold 4 MiB received and 4 MiB unacknowledged, and each h2 connection
+/// 4 MiB received, against the extension's ~50 MB.
 const fn default_max_connections() -> u32 {
     if MOBILE { 512 } else { 0 }
 }

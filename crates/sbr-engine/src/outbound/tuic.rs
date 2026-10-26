@@ -10,6 +10,7 @@
 //!   UDP-over-TCP v2 inside a TCP stream. `5 3 assoc` dissociates.
 //! - Heartbeat: datagram `5 4`, only while the connection has users.
 
+use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -20,15 +21,16 @@ use std::time::Duration;
 use bytes::{BufMut, Bytes, BytesMut};
 use quinn::congestion::{BbrConfig, ControllerFactory, CubicConfig, NewRenoConfig};
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
-use sbr_config::{Network, TuicCongestion, TuicOutbound, TuicUdpRelay};
+use sbr_config::{DomainStrategy, Network, TuicCongestion, TuicOutbound, TuicUdpRelay};
+use sbr_core::dns::Dns;
 use sbr_core::{BoxFuture, BoxPacketConn, Destination, Host, Outbound, PacketConn, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 
 use super::Upstream;
 use super::quic::{
-    DEFAULT_IDLE, Dialer, Packet, Pool, Pooled, SessionEntry, Sessions, Tuning, UDP_QUEUE, Usage, UseGuard, io_err,
-    recv_into, transport, watch,
+    DEFAULT_IDLE, Dialer, Packet, PinnedUdp, Pool, Pooled, SessionEntry, Sessions, Tuning, UDP_QUEUE, Usage, UseGuard,
+    io_err, recv_into, transport, watch,
 };
 
 const VERSION: u8 = 5;
@@ -41,6 +43,12 @@ const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(10);
 /// quic-go's maximum receive windows (it auto-tunes up to these).
 const STREAM_WINDOW: u64 = 6 << 20;
 const CONN_WINDOW: u64 = 15 << 20;
+/// Server-opened unidirectional streams in flight under `udp_relay: quic`,
+/// one UDP packet each.
+const UNI_STREAMS: u32 = if crate::MOBILE { 64 } else { 1024 };
+/// How long a server-opened stream may take to deliver its packet before it
+/// is dropped, freeing its slot and buffer.
+const UNI_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const UOT_MAGIC: &str = "sp.v2.udp-over-tcp.arpa";
 
 pub struct Tuic {
@@ -55,6 +63,9 @@ pub struct Tuic {
     heartbeat: Duration,
     network: Option<Network>,
     quic: sbr_config::QuicOptions,
+    /// Resolves UDP destinations given as names ([`PinnedUdp`]).
+    dns: Arc<dyn Dns>,
+    strategy: Option<DomainStrategy>,
 }
 
 struct Session {
@@ -119,7 +130,7 @@ fn get_addr(b: &[u8]) -> Option<(Option<Destination>, usize)> {
 }
 
 impl Tuic {
-    pub fn new(tag: String, c: &TuicOutbound, upstream: Upstream) -> Result<Self, String> {
+    pub fn new(tag: String, c: &TuicOutbound, upstream: Upstream, dns: Arc<dyn Dns>) -> Result<Self, String> {
         let server = Destination::from_host_port(&c.server.server, c.server.server_port);
         // sing-box sets no default ALPN for TUIC.
         let mut dialer = Dialer::new(upstream, server, &c.tls, &[], c.zero_rtt_handshake)?;
@@ -136,6 +147,8 @@ impl Tuic {
             heartbeat: c.heartbeat.unwrap_or(DEFAULT_HEARTBEAT),
             network: c.network,
             quic: c.quic.clone(),
+            dns,
+            strategy: c.dial.domain_strategy,
         })
     }
 
@@ -151,7 +164,11 @@ impl Tuic {
                 stream_window: STREAM_WINDOW,
                 conn_window: CONN_WINDOW,
                 keep_alive: None,
-                incoming_uni: if self.relay == TuicUdpRelay::Quic { 1024 } else { 16 },
+                incoming_uni: if self.relay == TuicUdpRelay::Quic {
+                    UNI_STREAMS
+                } else {
+                    16
+                },
             },
             cc,
         );
@@ -264,6 +281,21 @@ fn deliver(sessions: &Sessions<u16>, msg: &Bytes) {
     }
 }
 
+/// The next association ID no live session holds, or `None` when all 65,536
+/// are taken. The counter wraps, and reusing a live ID would hand that
+/// session's replies to the new one.
+fn free_assoc_id(next: &AtomicU16, live: &HashMap<u16, SessionEntry>) -> Option<u16> {
+    if live.len() > usize::from(u16::MAX) {
+        return None;
+    }
+    loop {
+        let id = next.fetch_add(1, Ordering::Relaxed);
+        if !live.contains_key(&id) {
+            return Some(id);
+        }
+    }
+}
+
 async fn recv_datagrams(conn: Connection, sessions: Arc<Sessions<u16>>) {
     while let Ok(d) = conn.read_datagram().await {
         deliver(&sessions, &d);
@@ -274,7 +306,7 @@ async fn recv_uni(conn: Connection, sessions: Arc<Sessions<u16>>) {
     while let Ok(mut s) = conn.accept_uni().await {
         let sessions = sessions.clone();
         tokio::spawn(async move {
-            if let Ok(msg) = s.read_to_end(u16::MAX as usize + 512).await {
+            if let Ok(Ok(msg)) = tokio::time::timeout(UNI_READ_TIMEOUT, s.read_to_end(u16::MAX as usize + 512)).await {
                 deliver(&sessions, &Bytes::from(msg));
             }
         });
@@ -316,30 +348,37 @@ impl Outbound for Tuic {
                 let mut req = vec![0u8];
                 put_socks_addr(&mut req, dest);
                 s.send.write_all(&req).await.map_err(io_err)?;
-                return Ok(Box::new(Uot {
+                let uot = Uot {
                     send: tokio::sync::Mutex::new(s.send),
                     recv: tokio::sync::Mutex::new(s.recv),
                     _guard: s._guard,
-                }) as BoxPacketConn);
+                };
+                return Ok(Box::new(PinnedUdp::new(uot, self.dns.clone(), self.strategy)) as BoxPacketConn);
             }
             let (s, guard) = self.pool.get(|| self.dial()).await?;
-            let id = s.next_udp.fetch_add(1, Ordering::Relaxed);
             let (tx, rx) = mpsc::channel(UDP_QUEUE);
-            s.udp.map.lock().unwrap().insert(
-                id,
-                SessionEntry {
-                    tx,
-                    defrag: Default::default(),
-                },
-            );
-            Ok(Box::new(TuicUdp {
+            let id = {
+                let mut map = s.udp.map.lock().unwrap();
+                let id = free_assoc_id(&s.next_udp, &map)
+                    .ok_or_else(|| io_err("tuic: every UDP association ID is in use"))?;
+                map.insert(
+                    id,
+                    SessionEntry {
+                        tx,
+                        defrag: Default::default(),
+                    },
+                );
+                id
+            };
+            let udp = TuicUdp {
                 session: s,
                 id,
                 rx: Mutex::new(rx),
                 packet_id: AtomicU16::new(0),
                 over_streams: self.relay == TuicUdpRelay::Quic,
                 _guard: guard,
-            }) as BoxPacketConn)
+            };
+            Ok(Box::new(PinnedUdp::new(udp, self.dns.clone(), self.strategy)) as BoxPacketConn)
         })
     }
 }
@@ -583,6 +622,20 @@ impl PacketConn for Uot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assoc_ids_skip_live_sessions() {
+        let entry = || SessionEntry {
+            tx: mpsc::channel(1).0,
+            defrag: Default::default(),
+        };
+        let mut live: HashMap<u16, SessionEntry> = [u16::MAX, 0, 1, 3].into_iter().map(|id| (id, entry())).collect();
+        let next = AtomicU16::new(u16::MAX);
+        assert_eq!(free_assoc_id(&next, &live), Some(2), "wraps past the live IDs");
+        assert_eq!(free_assoc_id(&next, &live), Some(4));
+        live.extend((0..=u16::MAX).map(|id| (id, entry())));
+        assert_eq!(free_assoc_id(&next, &live), None);
+    }
 
     #[test]
     fn addresses_roundtrip() {

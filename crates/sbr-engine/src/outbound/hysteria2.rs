@@ -19,7 +19,8 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
-use sbr_config::{Hysteria2Outbound, Network};
+use sbr_config::{DomainStrategy, Hysteria2Outbound, Network};
+use sbr_core::dns::Dns;
 use sbr_core::{BoxFuture, BoxPacketConn, Destination, Outbound, PacketConn, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
@@ -27,8 +28,8 @@ use tokio::sync::mpsc;
 use super::Upstream;
 use super::quic::brutal::{BrutalSwitch, SwitchableFactory};
 use super::quic::{
-    DEFAULT_IDLE, Dialer, Hop, Packet, Pool, Pooled, Sessions, Tuning, UDP_QUEUE, Usage, UseGuard, get_varint, io_err,
-    parse_host_port, put_varint, recv_into, transport,
+    DEFAULT_IDLE, Dialer, Hop, Packet, PinnedUdp, Pool, Pooled, Sessions, Tuning, UDP_QUEUE, Usage, UseGuard,
+    get_varint, io_err, parse_host_port, put_varint, recv_into, transport,
 };
 
 const TCP_REQUEST: u64 = 0x401;
@@ -63,6 +64,9 @@ pub struct Hysteria2 {
     recv_bps: u64,
     network: Option<Network>,
     quic: sbr_config::QuicOptions,
+    /// Resolves UDP destinations given as names ([`PinnedUdp`]).
+    dns: Arc<dyn Dns>,
+    strategy: Option<DomainStrategy>,
 }
 
 struct Session {
@@ -86,7 +90,7 @@ impl Pooled for Session {
 }
 
 impl Hysteria2 {
-    pub fn new(tag: String, c: &Hysteria2Outbound, upstream: Upstream) -> Result<Self, String> {
+    pub fn new(tag: String, c: &Hysteria2Outbound, upstream: Upstream, dns: Arc<dyn Dns>) -> Result<Self, String> {
         let server = Destination::from_host_port(&c.server.server, c.server.server_port);
         let mut dialer = Dialer::new(upstream, server, &c.tls, &["h3"], false)?;
         if !c.server_ports.is_empty() {
@@ -109,6 +113,8 @@ impl Hysteria2 {
             recv_bps: u64::from(c.down_mbps) * MBPS,
             network: c.network,
             quic: c.quic.clone(),
+            dns,
+            strategy: c.dial.domain_strategy,
         })
     }
 
@@ -329,13 +335,14 @@ impl Outbound for Hysteria2 {
                     defrag: Default::default(),
                 },
             );
-            Ok(Box::new(Hy2Udp {
+            let udp = Hy2Udp {
                 session: s,
                 id,
                 rx: Mutex::new(rx),
                 packet_id: AtomicU16::new(0),
                 _guard: guard,
-            }) as BoxPacketConn)
+            };
+            Ok(Box::new(PinnedUdp::new(udp, self.dns.clone(), self.strategy)) as BoxPacketConn)
         })
     }
 }

@@ -20,7 +20,10 @@ use super::ServerDialer;
 /// Per-stream receive window. Go uses 4 MiB; this is plenty for one stream
 /// at LAN speed and bounds per-connection memory on iOS.
 const STREAM_WINDOW: u32 = 2 * 1024 * 1024;
-const CONN_WINDOW: u32 = 8 * 1024 * 1024;
+/// What the server may park unread across all streams; a slow-reading app
+/// during a fast download holds this much, so it is halved where memory is
+/// capped (the iOS extension's ~50 MB).
+const CONN_WINDOW: u32 = if crate::MOBILE { 4 } else { 8 } * 1024 * 1024;
 /// Most bytes queued per write before backpressure.
 const MAX_WRITE: usize = 64 * 1024;
 
