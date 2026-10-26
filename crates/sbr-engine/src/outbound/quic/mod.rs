@@ -25,8 +25,9 @@ use quinn::congestion::ControllerFactory;
 use quinn::{
     ClientConfig, Connecting, Endpoint, EndpointConfig, IdleTimeout, MtuDiscoveryConfig, TransportConfig, VarInt,
 };
-use sbr_config::{QuicOptions, TlsOutbound};
-use sbr_core::{Destination, Host};
+use sbr_config::{DomainStrategy, QuicOptions, TlsOutbound};
+use sbr_core::dns::Dns;
+use sbr_core::{BoxFuture, Destination, Host, PacketConn};
 use tokio::sync::Notify;
 
 use self::socket::{HopDial, HopSocket, PLACEHOLDER_PEER, PacketConnSocket, Salamander, Socket, Witness};
@@ -558,6 +559,77 @@ pub(crate) async fn recv_into(
     Ok((n, from))
 }
 
+/// Names a UDP session keeps an address for; later ones are resolved per
+/// datagram.
+const MAX_PINNED: usize = 64;
+
+/// A UDP session that resolves each domain it sends to once, through the
+/// outbound's resolver, and keeps that address for its lifetime. Sent as a
+/// name, a destination is resolved by the server for every datagram; when the
+/// name has several addresses, one flow reaches several hosts and stateful
+/// protocols such as QUIC fail. Replies from a pinned address are reported
+/// under the name.
+pub(crate) struct PinnedUdp<C> {
+    inner: C,
+    dns: Arc<dyn Dns>,
+    strategy: Option<DomainStrategy>,
+    pinned: Mutex<HashMap<Destination, Destination>>,
+}
+
+impl<C: PacketConn> PinnedUdp<C> {
+    pub(crate) fn new(inner: C, dns: Arc<dyn Dns>, strategy: Option<DomainStrategy>) -> Self {
+        Self {
+            inner,
+            dns,
+            strategy,
+            pinned: Mutex::default(),
+        }
+    }
+
+    async fn target(&self, dest: &Destination) -> io::Result<Destination> {
+        if !matches!(dest.host, Host::Domain(_)) {
+            return Ok(dest.clone());
+        }
+        if let Some(t) = self.pinned.lock().unwrap().get(dest) {
+            return Ok(t.clone());
+        }
+        let addr = sbr_core::dial::resolve(dest, self.strategy, self.dns.as_ref())
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no address for {dest}")))?;
+        let addr = Destination::from(addr);
+        let mut pinned = self.pinned.lock().unwrap();
+        if pinned.len() >= MAX_PINNED && !pinned.contains_key(dest) {
+            return Ok(addr);
+        }
+        // A concurrent send may have pinned the name first; keep its address.
+        Ok(pinned.entry(dest.clone()).or_insert(addr).clone())
+    }
+}
+
+impl<C: PacketConn> PacketConn for PinnedUdp<C> {
+    fn send_to<'a>(&'a self, buf: &'a [u8], dest: &'a Destination) -> BoxFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            let target = self.target(dest).await?;
+            self.inner.send_to(buf, &target).await
+        })
+    }
+
+    fn recv_from<'a>(&'a self, buf: &'a mut [u8]) -> BoxFuture<'a, io::Result<(usize, Destination)>> {
+        Box::pin(async move {
+            let (n, from) = self.inner.recv_from(buf).await?;
+            let name = self
+                .pinned
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|(name, addr)| (*addr == from).then(|| name.clone()));
+            Ok((n, name.unwrap_or(from)))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,5 +676,62 @@ mod tests {
             assert!(f.feed(1, i, total, d(), part.clone()).is_none());
         }
         assert!(f.partial.is_empty(), "the oversized packet is discarded");
+    }
+
+    /// Hands out a new address for every lookup, as a name behind a CDN
+    /// may.
+    struct Rotating(AtomicUsize);
+
+    impl Dns for Rotating {
+        fn lookup<'a>(
+            &'a self,
+            _: &'a str,
+            _: Option<DomainStrategy>,
+        ) -> BoxFuture<'a, io::Result<Vec<std::net::IpAddr>>> {
+            let i = self.0.fetch_add(1, Ordering::Relaxed) as u8;
+            Box::pin(async move { Ok(vec![std::net::IpAddr::from([10, 0, 0, i])]) })
+        }
+
+        fn exchange<'a>(&'a self, _: &'a [u8], _: &'a sbr_core::Metadata) -> BoxFuture<'a, io::Result<Vec<u8>>> {
+            Box::pin(async { Err(io::ErrorKind::Unsupported.into()) })
+        }
+    }
+
+    /// Answers every datagram from the address it was sent to.
+    struct Echo(
+        tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Destination>>,
+        tokio::sync::mpsc::UnboundedSender<Destination>,
+    );
+
+    impl PacketConn for Echo {
+        fn send_to<'a>(&'a self, _: &'a [u8], dest: &'a Destination) -> BoxFuture<'a, io::Result<()>> {
+            let _ = self.1.send(dest.clone());
+            Box::pin(async { Ok(()) })
+        }
+
+        fn recv_from<'a>(&'a self, _: &'a mut [u8]) -> BoxFuture<'a, io::Result<(usize, Destination)>> {
+            Box::pin(async move { Ok((0, self.0.lock().await.recv().await.unwrap())) })
+        }
+    }
+
+    #[tokio::test]
+    async fn pinned_udp_resolves_a_name_once() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let dns = Arc::new(Rotating(AtomicUsize::new(1)));
+        let conn = PinnedUdp::new(Echo(tokio::sync::Mutex::new(rx), tx), dns.clone(), None);
+        let name = Destination::from_host_port("www.example.com", 443);
+        let mut buf = [0u8; 16];
+        for _ in 0..3 {
+            conn.send_to(b"x", &name).await.unwrap();
+            assert_eq!(conn.recv_from(&mut buf).await.unwrap().1, name);
+        }
+        assert_eq!(dns.0.load(Ordering::Relaxed), 2, "one lookup for the session");
+        assert_eq!(
+            conn.pinned.lock().unwrap()[&name],
+            Destination::from_host_port("10.0.0.1", 443)
+        );
+        let ip = Destination::from_host_port("192.0.2.1", 53);
+        conn.send_to(b"x", &ip).await.unwrap();
+        assert_eq!(conn.recv_from(&mut buf).await.unwrap().1, ip);
     }
 }

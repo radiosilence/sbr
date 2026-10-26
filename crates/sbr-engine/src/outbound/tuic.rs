@@ -21,15 +21,16 @@ use std::time::Duration;
 use bytes::{BufMut, Bytes, BytesMut};
 use quinn::congestion::{BbrConfig, ControllerFactory, CubicConfig, NewRenoConfig};
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
-use sbr_config::{Network, TuicCongestion, TuicOutbound, TuicUdpRelay};
+use sbr_config::{DomainStrategy, Network, TuicCongestion, TuicOutbound, TuicUdpRelay};
+use sbr_core::dns::Dns;
 use sbr_core::{BoxFuture, BoxPacketConn, Destination, Host, Outbound, PacketConn, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 
 use super::Upstream;
 use super::quic::{
-    DEFAULT_IDLE, Dialer, Packet, Pool, Pooled, SessionEntry, Sessions, Tuning, UDP_QUEUE, Usage, UseGuard, io_err,
-    recv_into, transport, watch,
+    DEFAULT_IDLE, Dialer, Packet, PinnedUdp, Pool, Pooled, SessionEntry, Sessions, Tuning, UDP_QUEUE, Usage, UseGuard,
+    io_err, recv_into, transport, watch,
 };
 
 const VERSION: u8 = 5;
@@ -62,6 +63,9 @@ pub struct Tuic {
     heartbeat: Duration,
     network: Option<Network>,
     quic: sbr_config::QuicOptions,
+    /// Resolves UDP destinations given as names ([`PinnedUdp`]).
+    dns: Arc<dyn Dns>,
+    strategy: Option<DomainStrategy>,
 }
 
 struct Session {
@@ -126,7 +130,7 @@ fn get_addr(b: &[u8]) -> Option<(Option<Destination>, usize)> {
 }
 
 impl Tuic {
-    pub fn new(tag: String, c: &TuicOutbound, upstream: Upstream) -> Result<Self, String> {
+    pub fn new(tag: String, c: &TuicOutbound, upstream: Upstream, dns: Arc<dyn Dns>) -> Result<Self, String> {
         let server = Destination::from_host_port(&c.server.server, c.server.server_port);
         // sing-box sets no default ALPN for TUIC.
         let mut dialer = Dialer::new(upstream, server, &c.tls, &[], c.zero_rtt_handshake)?;
@@ -143,6 +147,8 @@ impl Tuic {
             heartbeat: c.heartbeat.unwrap_or(DEFAULT_HEARTBEAT),
             network: c.network,
             quic: c.quic.clone(),
+            dns,
+            strategy: c.dial.domain_strategy,
         })
     }
 
@@ -342,11 +348,12 @@ impl Outbound for Tuic {
                 let mut req = vec![0u8];
                 put_socks_addr(&mut req, dest);
                 s.send.write_all(&req).await.map_err(io_err)?;
-                return Ok(Box::new(Uot {
+                let uot = Uot {
                     send: tokio::sync::Mutex::new(s.send),
                     recv: tokio::sync::Mutex::new(s.recv),
                     _guard: s._guard,
-                }) as BoxPacketConn);
+                };
+                return Ok(Box::new(PinnedUdp::new(uot, self.dns.clone(), self.strategy)) as BoxPacketConn);
             }
             let (s, guard) = self.pool.get(|| self.dial()).await?;
             let (tx, rx) = mpsc::channel(UDP_QUEUE);
@@ -363,14 +370,15 @@ impl Outbound for Tuic {
                 );
                 id
             };
-            Ok(Box::new(TuicUdp {
+            let udp = TuicUdp {
                 session: s,
                 id,
                 rx: Mutex::new(rx),
                 packet_id: AtomicU16::new(0),
                 over_streams: self.relay == TuicUdpRelay::Quic,
                 _guard: guard,
-            }) as BoxPacketConn)
+            };
+            Ok(Box::new(PinnedUdp::new(udp, self.dns.clone(), self.strategy)) as BoxPacketConn)
         })
     }
 }
