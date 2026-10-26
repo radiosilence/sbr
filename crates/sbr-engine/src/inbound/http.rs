@@ -6,8 +6,9 @@ use std::task::{Context as TaskContext, Poll};
 use sbr_core::{BoxFuture, Destination, Metadata, Network};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::time::Instant;
 
-use super::Context;
+use super::{Context, within};
 use crate::dispatch::{InboundStream, OpenError};
 use crate::httpx::{read_request_head, split_authority};
 
@@ -90,9 +91,9 @@ impl AsyncWrite for HttpClient {
     }
 }
 
-pub async fn handle(ctx: &Context, mut s: TcpStream, buf: Vec<u8>) -> io::Result<()> {
+pub async fn handle(ctx: &Context, mut s: TcpStream, buf: Vec<u8>, deadline: Instant) -> io::Result<()> {
     let source = s.peer_addr()?;
-    let (buf, head_len) = read_request_head(&mut s, buf).await?;
+    let (buf, head_len) = within(deadline, read_request_head(&mut s, buf)).await?;
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
     req.parse(&buf)
@@ -153,7 +154,7 @@ pub async fn handle(ctx: &Context, mut s: TcpStream, buf: Vec<u8>) -> io::Result
     let mut meta = Metadata::new(ctx.tag.clone(), ctx.type_name(), Network::Tcp, source, destination);
     meta.user = user;
     ctx.engine
-        .handle_tcp(
+        .route_tcp(
             meta,
             HttpClient {
                 s,

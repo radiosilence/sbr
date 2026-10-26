@@ -20,6 +20,13 @@ use crate::{Engine, health};
 pub const SNIFF_TIMEOUT: Duration = Duration::from_millis(300);
 const SNIFF_MAX: usize = 8 * 1024;
 
+/// Bound on an outbound's whole connect: dial, TLS and protocol handshake,
+/// through any detours. TCP connect and TLS have their own timeouts
+/// (`connect_timeout`, `tls.handshake_timeout`, 5 s and 15 s by default);
+/// this also covers a server that accepts TCP and then goes silent in a step
+/// that has none (SOCKS, HTTP CONNECT, WebSocket, ShadowTLS, AnyTLS).
+pub const CONNECT_DEADLINE: Duration = Duration::from_secs(30);
+
 /// Why a connection could not be opened.
 #[derive(Debug)]
 pub enum OpenError {
@@ -92,11 +99,17 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Replay<S> {
 
 impl Engine {
     /// Run a client TCP connection to completion.
-    pub async fn handle_tcp<S: InboundStream>(&self, mut meta: Metadata, mut client: S) -> io::Result<()> {
+    pub async fn handle_tcp<S: InboundStream>(&self, meta: Metadata, mut client: S) -> io::Result<()> {
         let Some(_slot) = self.admit() else {
             debug!(inbound = %meta.inbound, dest = %meta.destination, limit = self.max_connections, "connection limit reached");
             return client.fail(&OpenError::Rejected { drop: false }).await;
         };
+        self.route_tcp(meta, client).await
+    }
+
+    /// [`Engine::handle_tcp`] for a connection that already holds a slot
+    /// (the proxy inbounds take theirs at accept).
+    pub(crate) async fn route_tcp<S: InboundStream>(&self, mut meta: Metadata, mut client: S) -> io::Result<()> {
         // DNS: a FakeIP destination becomes its domain (and, with
         // reverse_mapping, a recently resolved IP gains one) before routing.
         if let Err(e) = self.restore_domain(&mut meta) {
@@ -153,7 +166,15 @@ impl Engine {
                 let out = &self.outbounds[outbound];
                 let dest = options.apply(&meta.destination);
                 debug!(inbound = %meta.inbound, dest = %meta.destination, domain = meta.sniffed_domain.as_deref().unwrap_or(""), outbound = out.tag(), "route");
-                match out.connect(&dest).await {
+                let connected = tokio::time::timeout(CONNECT_DEADLINE, out.connect(&dest))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("connect timed out after {}s", CONNECT_DEADLINE.as_secs()),
+                        ))
+                    });
+                match connected {
                     Ok(mut remote) => {
                         // sing-box `route-options` `tls_fragment`: split the
                         // client's own ClientHello on its way out.

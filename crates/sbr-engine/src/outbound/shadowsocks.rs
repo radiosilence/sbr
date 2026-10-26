@@ -222,31 +222,55 @@ impl PacketConn for SsPacket {
     }
 }
 
-/// Sliding anti-replay window over packet ids (WireGuard-style), reset when
-/// the server starts a new session.
+/// Server sessions whose replay windows are kept. Datagrams from a new
+/// server session must not reset the window of an older one still in
+/// flight, or that session's packets could be replayed.
+const REPLAY_SESSIONS: usize = 4;
+
+/// Anti-replay state per server session, most recently used first.
 #[derive(Default)]
 struct ReplayWindow {
-    session: Option<u64>,
-    last: u64,
-    bits: u128,
+    sessions: Vec<(u64, PacketWindow)>,
 }
 
 impl ReplayWindow {
     fn accept(&mut self, session: u64, id: u64) -> bool {
-        if self.session != Some(session) {
-            self.session = Some(session);
-            self.last = id;
+        let i = match self.sessions.iter().position(|(s, _)| *s == session) {
+            Some(i) => i,
+            None => {
+                self.sessions.truncate(REPLAY_SESSIONS - 1);
+                self.sessions.push((session, PacketWindow::default()));
+                self.sessions.len() - 1
+            }
+        };
+        self.sessions[..=i].rotate_right(1);
+        self.sessions[0].1.accept(id)
+    }
+}
+
+/// Sliding window over packet ids (WireGuard-style).
+#[derive(Default)]
+struct PacketWindow {
+    /// Highest id seen; `None` until the first.
+    last: Option<u64>,
+    bits: u128,
+}
+
+impl PacketWindow {
+    fn accept(&mut self, id: u64) -> bool {
+        let Some(last) = self.last else {
+            self.last = Some(id);
             self.bits = 1;
             return true;
-        }
-        if id > self.last {
-            let shift = id - self.last;
+        };
+        if id > last {
+            let shift = id - last;
             self.bits = if shift >= 128 { 0 } else { self.bits << shift };
             self.bits |= 1;
-            self.last = id;
+            self.last = Some(id);
             true
         } else {
-            let back = self.last - id;
+            let back = last - id;
             if back >= 128 || self.bits & (1 << back) != 0 {
                 return false;
             }
@@ -335,6 +359,23 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for WriteFix<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_window_survives_session_changes() {
+        let mut w = ReplayWindow::default();
+        assert!(w.accept(1, 10));
+        assert!(w.accept(2, 0));
+        assert!(!w.accept(1, 10), "a new server session must not reopen the old window");
+        assert!(w.accept(1, 9));
+        assert!(!w.accept(2, 0));
+        for s in 3..3 + REPLAY_SESSIONS as u64 {
+            assert!(w.accept(s, 0));
+        }
+        // Session 1 was evicted; its window starts over.
+        assert!(w.accept(1, 10));
+        assert!(!w.accept(1, 10));
+        assert!(w.sessions.len() <= REPLAY_SESSIONS);
+    }
     use shadowsocks::relay::tcprelay::proxy_stream::ProxyServerStream;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

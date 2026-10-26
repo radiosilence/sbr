@@ -37,6 +37,8 @@ const OPT_AUTH_LENGTH: u8 = 16;
 const TAG: usize = 16;
 /// sing-vmess `WriteChunkSize`; its reader rejects chunks over 16 KiB.
 const MAX_CHUNK: usize = 15000;
+/// Chunks per direction before the 16-bit nonce counter repeats.
+const MAX_CHUNKS: u32 = 1 << 16;
 
 pub struct Vmess {
     tag: String,
@@ -48,6 +50,10 @@ pub struct Vmess {
     dialer: ProxyDialer,
     tcp: bool,
     udp: bool,
+    /// The transport is TLS or REALITY, so the chunk counter may wrap: the
+    /// VMess ciphertext is never on the wire, and v2ray and Xray wrap too.
+    /// Without it a connection ends before a (key, nonce) pair repeats.
+    may_wrap: bool,
 }
 
 impl Vmess {
@@ -83,6 +89,7 @@ impl Vmess {
             dialer,
             tcp: c.common.tcp(),
             udp: c.common.udp(),
+            may_wrap: c.common.tls().is_some(),
         })
     }
 
@@ -254,10 +261,12 @@ struct Codec {
     option: u8,
     body: Option<LessSafeKey>,
     nonce: [u8; 16],
-    count: u16,
+    count: u32,
     mask: Option<sha3::Shake128Reader>,
     /// Authenticated length: key and its own counter (nonce base = request nonce).
-    len_key: Option<(LessSafeKey, [u8; 16], u16)>,
+    len_key: Option<(LessSafeKey, [u8; 16], u32)>,
+    /// Counters may pass [`MAX_CHUNKS`] and repeat nonces.
+    may_wrap: bool,
 }
 
 impl Codec {
@@ -268,6 +277,7 @@ impl Codec {
         nonce: &[u8; 16],
         req_key: &[u8; 16],
         req_nonce: &[u8; 16],
+        may_wrap: bool,
     ) -> Self {
         let chunked = option & OPT_CHUNK_STREAM != 0;
         let mask = (chunked && option & (OPT_CHUNK_MASKING | OPT_GLOBAL_PADDING) != 0 && option & OPT_AUTH_LENGTH == 0
@@ -275,7 +285,7 @@ impl Codec {
             .then(|| shake(nonce));
         let len_key = (option & OPT_AUTH_LENGTH != 0).then(|| {
             let k = kdf(req_key, "auth_len", &[]);
-            (aead(security, &k[..16]), *req_nonce, 0u16)
+            (aead(security, &k[..16]), *req_nonce, 0)
         });
         Self {
             option,
@@ -284,6 +294,7 @@ impl Codec {
             count: 0,
             mask,
             len_key,
+            may_wrap,
         }
     }
 
@@ -291,12 +302,23 @@ impl Codec {
         self.option & OPT_CHUNK_STREAM != 0
     }
 
-    fn next_nonce(base: &[u8; 16], count: &mut u16) -> [u8; 12] {
+    fn next_nonce(base: &[u8; 16], count: &mut u32) -> [u8; 12] {
         let mut n = [0u8; 12];
         n.copy_from_slice(&base[..12]);
-        n[..2].copy_from_slice(&count.to_be_bytes());
+        n[..2].copy_from_slice(&(*count as u16).to_be_bytes());
         *count = count.wrapping_add(1);
         n
+    }
+
+    /// Refuse the next chunk when its nonce would repeat an earlier one.
+    fn check_counter(&self) -> io::Result<()> {
+        let used = self.count.max(self.len_key.as_ref().map_or(0, |l| l.2));
+        if !self.may_wrap && used >= MAX_CHUNKS {
+            return Err(io::Error::other(
+                "vmess: chunk counter exhausted (65536 chunks); without TLS the connection ends before nonces repeat",
+            ));
+        }
+        Ok(())
     }
 
     fn padding_len(&mut self) -> usize {
@@ -307,11 +329,12 @@ impl Codec {
     }
 
     /// Append one encoded chunk carrying `data` to `out`.
-    fn encode(&mut self, data: &[u8], out: &mut Vec<u8>) {
+    fn encode(&mut self, data: &[u8], out: &mut Vec<u8>) -> io::Result<()> {
         if !self.chunked() {
             out.extend_from_slice(data);
-            return;
+            return Ok(());
         }
+        self.check_counter()?;
         let tag = if self.body.is_some() { TAG } else { 0 };
         let padding = self.padding_len();
         let size = data.len() + tag + padding;
@@ -340,6 +363,7 @@ impl Codec {
             out.resize(at + padding, 0);
             let _ = aws_lc_rs::rand::fill(&mut out[at..]);
         }
+        Ok(())
     }
 
     /// Bytes of the length field.
@@ -349,6 +373,7 @@ impl Codec {
 
     /// Decode a length field: (sealed size incl. tag, padding).
     fn decode_len(&mut self, b: &[u8]) -> io::Result<(usize, usize)> {
+        self.check_counter()?;
         let padding = self.padding_len();
         let size = if let Some((k, base, count)) = &mut self.len_key {
             let mut tmp = [0u8; 2 + TAG];
@@ -495,10 +520,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> VmessStream<S> {
 
         let resp_key: [u8; 16] = sha256(&req_key)[..16].try_into().unwrap();
         let resp_nonce: [u8; 16] = sha256(&req_nonce)[..16].try_into().unwrap();
-        let rcodec = Codec::new(security, option, &resp_key, &resp_nonce, &req_key, &req_nonce);
+        let rcodec = Codec::new(
+            security,
+            option,
+            &resp_key,
+            &resp_nonce,
+            &req_key,
+            &req_nonce,
+            v.may_wrap,
+        );
         Self {
             inner,
-            wcodec: Codec::new(security, option, &req_key, &req_nonce, &req_key, &req_nonce),
+            wcodec: Codec::new(security, option, &req_key, &req_nonce, &req_key, &req_nonce, v.may_wrap),
             rstate: ReadState::RespLen,
             rcodec,
             header: Some(wire),
@@ -697,7 +730,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for VmessStream<S> {
         let mut taken = 0;
         while taken < buf.len() && taken < 64 * 1024 {
             let n = (buf.len() - taken).min(this.chunk);
-            this.wcodec.encode(&buf[taken..taken + n], &mut this.wbuf);
+            if let Err(e) = this.wcodec.encode(&buf[taken..taken + n], &mut this.wbuf) {
+                if taken == 0 {
+                    return Poll::Ready(Err(e));
+                }
+                break;
+            }
             taken += n;
         }
         if let Poll::Ready(Err(e)) = this.poll_flush_wbuf(cx) {
@@ -732,6 +770,56 @@ mod tests {
         let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, b"VMess AEAD KDF");
         let want = aws_lc_rs::hmac::sign(&key, b"payload");
         assert_eq!(nested(1, &[b"VMess AEAD KDF"], &[b"payload"]), want.as_ref());
+    }
+
+    fn codec(may_wrap: bool, auth_length: bool) -> Codec {
+        let mut option = OPT_CHUNK_STREAM | OPT_CHUNK_MASKING;
+        if auth_length {
+            option |= OPT_AUTH_LENGTH;
+        }
+        Codec::new(SEC_AES128GCM, option, &[1; 16], &[2; 16], &[3; 16], &[4; 16], may_wrap)
+    }
+
+    /// The 65,536th chunk is the last one: the next would reuse chunk 0's
+    /// nonce, so without TLS both directions stop there.
+    #[test]
+    fn chunk_counter_stops_before_wrapping() {
+        for auth_length in [false, true] {
+            let (mut w, mut r) = (codec(false, auth_length), codec(false, auth_length));
+            w.count = MAX_CHUNKS - 1;
+            r.count = MAX_CHUNKS - 1;
+            if let Some(l) = &mut w.len_key {
+                l.2 = MAX_CHUNKS - 1;
+            }
+            if let Some(l) = &mut r.len_key {
+                l.2 = MAX_CHUNKS - 1;
+            }
+            let mut out = Vec::new();
+            w.encode(b"last", &mut out).unwrap();
+            let ls = r.len_size();
+            let (size, padding) = r.decode_len(&out[..ls]).unwrap();
+            let n = r.open(&mut out[ls..ls + size]).unwrap();
+            assert_eq!((&out[ls..ls + n], padding), (&b"last"[..], 0));
+
+            let before = out.len();
+            assert!(w.encode(b"wrapped", &mut out).is_err());
+            assert_eq!(out.len(), before, "nothing is written past the limit");
+            assert!(r.decode_len(&[0; 2 + TAG]).is_err());
+        }
+    }
+
+    /// Over TLS the counter wraps, as v2ray and Xray do: chunk 65,536 has
+    /// chunk 0's nonce.
+    #[test]
+    fn chunk_counter_wraps_over_tls() {
+        let mut w = codec(true, false);
+        let mut first = Vec::new();
+        w.encode(b"same", &mut first).unwrap();
+        let mut w2 = codec(true, false);
+        w2.count = MAX_CHUNKS;
+        let mut wrapped = Vec::new();
+        w2.encode(b"same", &mut wrapped).unwrap();
+        assert_eq!(first[2..], wrapped[2..]);
     }
 
     #[test]

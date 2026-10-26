@@ -2,11 +2,15 @@ pub mod http;
 pub mod socks;
 pub mod tun;
 
+use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine as _;
 use sbr_config::{InboundKind, User};
 use tokio::net::TcpStream;
+use tokio::time::Instant;
+use tracing::debug;
 
 use crate::Engine;
 
@@ -63,23 +67,42 @@ impl Context {
     }
 }
 
-pub async fn handle(ctx: Arc<Context>, stream: TcpStream) -> std::io::Result<()> {
+/// Time a client has to finish the SOCKS or HTTP handshake (the request and
+/// any authentication). Until then it holds a connection slot.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Serve one accepted connection. The connection slot is taken before the
+/// handshake, so idle or slow clients count against `max_connections` and
+/// a SOCKS5 UDP association counts for as long as its control connection.
+pub async fn handle(ctx: Arc<Context>, stream: TcpStream) -> io::Result<()> {
+    let Some(_slot) = ctx.engine.admit() else {
+        debug!(inbound = %ctx.tag, limit = ctx.engine.max_connections, "connection limit reached");
+        return Ok(());
+    };
     stream.set_nodelay(true)?;
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     match ctx.flavor {
-        Flavor::Socks => socks::handle(&ctx, stream).await,
-        Flavor::Http => http::handle(&ctx, stream, Vec::new()).await,
+        Flavor::Socks => socks::handle(&ctx, stream, deadline).await,
+        Flavor::Http => http::handle(&ctx, stream, Vec::new(), deadline).await,
         Flavor::Mixed => {
             let mut first = [0u8; 1];
-            let n = stream.peek(&mut first).await?;
+            let n = within(deadline, stream.peek(&mut first)).await?;
             match (n, first[0]) {
                 (0, _) => Ok(()),
-                (_, 5) => socks::handle(&ctx, stream).await,
-                (_, 4) => Err(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
+                (_, 5) => socks::handle(&ctx, stream, deadline).await,
+                (_, 4) => Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
                     "SOCKS4 not supported by sbr yet",
                 )),
-                _ => http::handle(&ctx, stream, Vec::new()).await,
+                _ => http::handle(&ctx, stream, Vec::new(), deadline).await,
             }
         }
     }
+}
+
+/// Run a handshake step, failing with `TimedOut` at `deadline`.
+async fn within<T>(deadline: Instant, step: impl Future<Output = io::Result<T>>) -> io::Result<T> {
+    tokio::time::timeout_at(deadline, step)
+        .await
+        .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "inbound handshake timed out")))
 }

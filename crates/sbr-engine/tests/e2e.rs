@@ -97,6 +97,42 @@ async fn mixed_socks5_and_http_connect() {
     roundtrip(&mut h, b"hello over http").await;
 }
 
+/// A client that connects and sends nothing holds a slot: over the cap, the
+/// next connection is closed before its handshake.
+#[tokio::test]
+async fn idle_clients_count_against_connection_limit() {
+    let target = echo().await;
+    let o =
+        Options::parse(r#"{"inbounds":[{"type":"mixed","tag":"in","listen":"127.0.0.1","listen_port":0}]}"#).unwrap();
+    let settings = Settings {
+        max_connections: 1,
+        ..Settings::default()
+    };
+    let i = Instance::start(&o, settings).await.unwrap();
+    let p = port(&i, "in");
+    let until = |n: usize| {
+        let engine = i.engine.clone();
+        async move {
+            while engine.active_connections() != n {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+    };
+    let timeout = std::time::Duration::from_secs(5);
+
+    let idle = TcpStream::connect(("127.0.0.1", p)).await.unwrap();
+    tokio::time::timeout(timeout, until(1)).await.unwrap();
+    let mut refused = TcpStream::connect(("127.0.0.1", p)).await.unwrap();
+    let mut b = [0u8; 1];
+    let n = tokio::time::timeout(timeout, refused.read(&mut b)).await.unwrap();
+    assert!(matches!(n, Ok(0) | Err(_)), "over the cap the connection is closed");
+
+    drop(idle);
+    tokio::time::timeout(timeout, until(0)).await.unwrap();
+    let mut s = socks_connect(p, "localhost", target.port(), None).await.unwrap();
+    roundtrip(&mut s, b"slot released").await;
+}
+
 #[tokio::test]
 async fn http_forward_proxy_rewrites_request() {
     // A fake origin that returns the request line it saw.

@@ -846,6 +846,17 @@ impl Group for UrlTest {
     }
 }
 
+/// Forgets a member's delay history when dropped while still armed.
+struct ForgetOnDrop<'a>(Option<(&'a GroupEnv, &'a str)>);
+
+impl Drop for ForgetOnDrop<'_> {
+    fn drop(&mut self) {
+        if let Some((env, tag)) = self.0 {
+            env.forget(tag);
+        }
+    }
+}
+
 impl Outbound for UrlTest {
     fn tag(&self) -> &str {
         &self.tag
@@ -857,10 +868,12 @@ impl Outbound for UrlTest {
         self.touch();
         let member = self.current();
         Box::pin(async move {
+            // sing-box drops the member's history so the next check re-probes
+            // it. A connect cut short by the caller's deadline counts too.
+            let mut failed = ForgetOnDrop(Some((&self.env, member.tag())));
             let r = member.connect(dest).await;
-            if r.is_err() {
-                // sing-box drops the member's history so the next check re-probes it.
-                self.env.forget(member.tag());
+            if r.is_ok() {
+                failed.0 = None;
             }
             r
         })
