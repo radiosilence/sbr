@@ -46,7 +46,7 @@ pub(crate) fn system(peer: SocketAddr, opts: &DialOptions) -> io::Result<Socket>
     let _ = s2.set_send_buffer_size(SOCKET_BUFFER);
     #[cfg(target_vendor = "apple")]
     {
-        Connected::new(sock, peer)
+        Connected::open(sock, peer)
     }
     #[cfg(not(target_vendor = "apple"))]
     TokioRuntime.wrap_udp_socket(sock)
@@ -68,7 +68,7 @@ struct Connected {
 
 #[cfg(target_vendor = "apple")]
 impl Connected {
-    fn new(sock: std::net::UdpSocket, peer: SocketAddr) -> io::Result<Socket> {
+    fn open(sock: std::net::UdpSocket, peer: SocketAddr) -> io::Result<Socket> {
         use std::os::fd::AsRawFd;
         let on: libc::c_int = 1;
         let (level, name) = match peer {
