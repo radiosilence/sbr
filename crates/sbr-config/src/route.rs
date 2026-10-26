@@ -123,6 +123,8 @@ pub struct RouteOptionsAction {
     pub tls_fragment: bool,
     pub tls_fragment_fallback_delay: Option<std::time::Duration>,
     pub tls_record_fragment: bool,
+    /// sbr extension: `tls.fragment_split` for routed connections.
+    pub tls_fragment_split: Option<crate::FragmentSplit>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -515,7 +517,14 @@ fn parse_route_options(o: &mut Obj, diag: &mut Diag) -> Result<RouteOptionsActio
         tls_fragment: o.bool("tls_fragment")?,
         tls_fragment_fallback_delay: o.duration("tls_fragment_fallback_delay")?,
         tls_record_fragment: o.bool("tls_record_fragment")?,
+        tls_fragment_split: crate::tls::parse_fragment_split(o, "tls_fragment_split")?,
     };
+    if r.tls_fragment_split.is_some() && (r.tls_fragment || r.tls_record_fragment) {
+        return Err(Error::at(
+            &o.sub("tls_fragment_split"),
+            "set either tls_fragment_split or tls_fragment / tls_record_fragment, not both",
+        ));
+    }
     o.tolerate(
         diag,
         &[

@@ -424,6 +424,7 @@ fn dns_tls(o: &mut Obj, diag: &mut Diag) -> Result<TlsOutbound> {
         ("ech", tls.ech.as_ref().is_some_and(|e| e.enabled)),
         ("fragment", tls.fragment),
         ("record_fragment", tls.record_fragment),
+        ("fragment_split", tls.fragment_split.is_some()),
         ("certificate_sha256", !tls.certificate_sha256.is_empty()),
         (
             "certificate_public_key_sha256",

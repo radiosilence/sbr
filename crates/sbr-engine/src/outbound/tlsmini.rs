@@ -1,8 +1,9 @@
 //! A minimal TLS client for the protocols that drive the handshake
 //! themselves (ShadowTLS, AnyTLS). Supports `server_name`, `disable_sni`,
 //! `insecure`, `alpn`, `min_version`/`max_version`, a pinned
-//! `certificate`/`certificate_path` and `utls`; everything else in `tls` is
-//! refused at build time rather than ignored.
+//! `certificate`/`certificate_path`, `utls` and configured ClientHello
+//! fragmentation (for the outbounds that accept it); everything else in
+//! `tls` is refused at build time rather than ignored.
 //!
 //! The handshake is a browser's (`sbr-reality`, [`TlsClient::browser`])
 //! unless [`crate::tls::browser_fingerprint`] picks rustls.
@@ -30,6 +31,8 @@ pub struct TlsClient {
     config: Arc<ClientConfig>,
     /// Browser-fingerprinted TLS 1.3, when chosen over rustls.
     pub browser: Option<sbr_reality::TlsConfig>,
+    /// `fragment` / `record_fragment` / `fragment_split`.
+    pub fragment: Option<crate::tls::FragmentOptions>,
 }
 
 fn provider() -> Arc<CryptoProvider> {
@@ -52,9 +55,6 @@ impl TlsClient {
         }
         if !t.certificate_sha256.is_empty() || !t.certificate_public_key_sha256.is_empty() {
             return Err("tls certificate pinning: not supported by sbr yet".into());
-        }
-        if t.fragment || t.record_fragment {
-            return Err("tls.fragment: not supported by sbr yet".into());
         }
         let fingerprint = crate::tls::browser_fingerprint(t)?;
         let version = |v: &str| match v {
@@ -121,6 +121,12 @@ impl TlsClient {
             enable_sni,
             config,
             browser,
+            fragment: crate::tls::FragmentOptions::configured(
+                t.fragment,
+                t.record_fragment,
+                t.fragment_split,
+                t.fragment_fallback_delay,
+            ),
         })
     }
 

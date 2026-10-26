@@ -261,8 +261,8 @@ const AUTO_MAX: u8 = 2;
 
 /// ClientHello fragmentation for one outbound, shared by its ALPN variants.
 ///
-/// `fragment` / `record_fragment` as configured apply to every handshake.
-/// With neither set, the automatic mode (an sbr extension, on unless
+/// `fragment` / `record_fragment` or `fragment_split` as configured apply
+/// to every handshake. With none set, the automatic mode (an sbr extension, on unless
 /// `disable_auto_fragment`) starts unfragmented and steps up when a
 /// handshake is reset or closed before the server sent a byte, which is how
 /// SNI filtering by the GFW and most DPI vendors looks from the client:
@@ -285,11 +285,12 @@ impl Fragment {
             .filter(|d| !d.is_zero())
             .unwrap_or(FRAGMENT_FALLBACK_DELAY);
         Self {
-            configured: (t.fragment || t.record_fragment).then_some(FragmentOptions {
-                split_packet: t.fragment,
-                split_record: t.record_fragment,
-                fallback_delay,
-            }),
+            configured: FragmentOptions::configured(
+                t.fragment,
+                t.record_fragment,
+                t.fragment_split,
+                t.fragment_fallback_delay,
+            ),
             auto: !t.disable_auto_fragment,
             fallback_delay,
             state: AtomicU64::new(NETWORK_EPOCH.load(Ordering::Relaxed) << 8),
@@ -317,6 +318,7 @@ impl Fragment {
                 split_packet: l >= 2,
                 split_record: true,
                 fallback_delay: self.fallback_delay,
+                split: None,
             }),
         })
     }

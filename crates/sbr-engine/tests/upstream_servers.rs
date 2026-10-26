@@ -673,7 +673,10 @@ async fn xray_reality_fragmented_client_hello() {
     both["tls"]["fragment"] = json!(true);
     both["tls"]["record_fragment"] = json!(true);
     both["tls"]["fragment_fallback_delay"] = json!("20ms");
-    let engine = engine(vec![auto, both]);
+    let mut split = xray.outbound("split", ADMIN_UUID, SERVER_NAMES[0], "chrome");
+    split["server_port"] = json!(censor.port);
+    split["tls"]["fragment_split"] = json!({"pieces": "3-5", "delay": "5-15"});
+    let engine = engine(vec![auto, both, split]);
 
     let out = engine.outbound("auto").unwrap().clone();
     tcp_roundtrip(&out, techo, MIB).await.unwrap();
@@ -682,6 +685,10 @@ async fn xray_reality_fragmented_client_hello() {
     let out = engine.outbound("both").unwrap().clone();
     tcp_roundtrip(&out, techo, MIB).await.unwrap();
     vision_paths(&out).await.unwrap();
+    let out = engine.outbound("split").unwrap().clone();
+    tcp_roundtrip(&out, techo, MIB).await.unwrap();
+    vision_paths(&out).await.unwrap();
+    assert_eq!(censor.resets(), 2, "fragment_split passes the filter");
 }
 
 async fn probe_dest(port: u16, sni: &str, root_pem: &str) -> Result<String, String> {

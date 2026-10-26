@@ -522,7 +522,10 @@ impl Pool {
     }
 
     async fn new_session(self: &Arc<Self>) -> io::Result<Arc<Session>> {
-        let s = self.upstream.connect(&self.server).await?;
+        let mut s = self.upstream.connect(&self.server).await?;
+        if self.tls.fragment.is_some() {
+            s = Box::new(crate::tls::TlsIo::new(s, None, self.tls.fragment));
+        }
         let tls: Tls = match &self.tls.browser {
             Some(cfg) => Box::new(sbr_reality::connect_tls(s, cfg).await?),
             None => Box::new(

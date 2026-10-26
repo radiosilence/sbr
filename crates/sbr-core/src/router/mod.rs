@@ -83,6 +83,7 @@ pub struct RouteOptions {
     pub tls_fragment: bool,
     pub tls_record_fragment: bool,
     pub tls_fragment_fallback_delay: Option<std::time::Duration>,
+    pub tls_fragment_split: Option<sbr_config::FragmentSplit>,
 }
 
 impl RouteOptions {
@@ -99,6 +100,7 @@ impl RouteOptions {
             tls_fragment: o.tls_fragment,
             tls_record_fragment: o.tls_record_fragment,
             tls_fragment_fallback_delay: o.tls_fragment_fallback_delay,
+            tls_fragment_split: o.tls_fragment_split,
         }
     }
 
@@ -118,6 +120,9 @@ impl RouteOptions {
         self.tls_record_fragment |= o.tls_record_fragment;
         if o.tls_fragment_fallback_delay.is_some() {
             self.tls_fragment_fallback_delay = o.tls_fragment_fallback_delay;
+        }
+        if o.tls_fragment_split.is_some() {
+            self.tls_fragment_split = o.tls_fragment_split;
         }
     }
 

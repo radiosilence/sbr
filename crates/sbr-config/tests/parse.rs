@@ -208,6 +208,62 @@ fn tun_inbound_and_actions() {
 }
 
 #[test]
+fn fragment_split() {
+    let http = |tls: &str| {
+        format!(
+            r#"{{"outbounds":[{{"type":"http","tag":"h","server":"a.com","server_port":443,"tls":{{"enabled":true,{tls}}}}}]}}"#
+        )
+    };
+    let o = Options::parse(&http(r#""fragment_split":{"pieces":"6-3","delay":"10-20"}"#)).unwrap();
+    let OutboundKind::Http(h) = &o.outbounds[0].kind else {
+        panic!()
+    };
+    assert_eq!(
+        h.tls.as_ref().unwrap().fragment_split,
+        Some(FragmentSplit {
+            segments: true,
+            records: true,
+            pieces: Some(Range::new(3, 6)),
+            length: None,
+            delay: Some(Range::new(10, 20)),
+        })
+    );
+    let o = Options::parse(&http(r#""fragment_split":{"mode":"record","length":40}"#)).unwrap();
+    let OutboundKind::Http(h) = &o.outbounds[0].kind else {
+        panic!()
+    };
+    let s = h.tls.as_ref().unwrap().fragment_split.unwrap();
+    assert!(!s.segments && s.records && s.length == Some(Range::new(40, 40)));
+
+    for (tls, path) in [
+        (r#""fragment":true,"fragment_split":{}"#, "tls.fragment_split"),
+        (r#""fragment_split":{"pieces":3,"length":10}"#, "fragment_split.length"),
+        (r#""fragment_split":{"pieces":1}"#, "fragment_split.pieces"),
+        (
+            r#""fragment_split":{"mode":"record","delay":5}"#,
+            "fragment_split.delay",
+        ),
+        (r#""fragment_split":{"mode":"packet"}"#, "fragment_split.mode"),
+    ] {
+        let e = err(&http(tls));
+        assert!(e.contains(path), "{tls}: {e}");
+    }
+
+    let route = |opts: &str| {
+        format!(
+            r#"{{"outbounds":[{{"type":"direct","tag":"d"}}],"route":{{"rules":[{{"action":"route-options",{opts}}}]}}}}"#
+        )
+    };
+    let o = Options::parse(&route(r#""tls_fragment_split":{"pieces":3}"#)).unwrap();
+    let RuleAction::RouteOptions(r) = &o.route.rules[0].action else {
+        panic!()
+    };
+    assert_eq!(r.tls_fragment_split.unwrap().pieces, Some(Range::new(3, 3)));
+    let e = err(&route(r#""tls_record_fragment":true,"tls_fragment_split":{}"#));
+    assert!(e.contains("tls_fragment_split"), "{e}");
+}
+
+#[test]
 fn quic_outbounds() {
     let o = Options::parse(
         r#"{"outbounds":[

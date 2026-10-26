@@ -45,7 +45,7 @@ pub(crate) fn client_config(
     if t.ech.as_ref().is_some_and(|e| e.enabled) {
         return unsupported("ech");
     }
-    if t.fragment || t.record_fragment {
+    if t.fragment || t.record_fragment || t.fragment_split.is_some() {
         return Err("tls.fragment: not supported by QUIC".into());
     }
     if !t.certificate_sha256.is_empty() {

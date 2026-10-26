@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::obj::{Diag, Obj};
+use crate::xhttp::Range;
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -32,6 +33,8 @@ pub struct TlsOutbound {
     pub record_fragment: bool,
     /// sbr extension: no automatic ClientHello fragmentation.
     pub disable_auto_fragment: bool,
+    /// sbr extension `fragment_split`, in place of `fragment` / `record_fragment`.
+    pub fragment_split: Option<FragmentSplit>,
     pub handshake_timeout: Option<Duration>,
     pub utls: Option<Utls>,
     pub reality: Option<Reality>,
@@ -73,6 +76,65 @@ impl TlsOutbound {
         }
         Ok(explicit.or(browser_by_default.then_some("")))
     }
+}
+
+/// sbr extension: ClientHello fragmentation with Xray-like controls, drawn
+/// afresh for every connection. One cut always falls inside the SNI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FragmentSplit {
+    /// Send each piece as its own TCP segment.
+    pub segments: bool,
+    /// Send each piece as its own TLS record.
+    pub records: bool,
+    /// Number of pieces. With neither this nor `length`, the cuts are the
+    /// `record_fragment` ones, inside every label of the name but the last.
+    pub pieces: Option<Range>,
+    /// Bytes of the handshake message per piece.
+    pub length: Option<Range>,
+    /// Milliseconds between TCP segments; unset waits for each segment's ACK
+    /// (Linux) or `fragment_fallback_delay` (elsewhere).
+    pub delay: Option<Range>,
+}
+
+pub(crate) fn parse_fragment_split(parent: &mut Obj, key: &str) -> Result<Option<FragmentSplit>> {
+    let Some(v) = parent.raw(key) else { return Ok(None) };
+    let mut o = Obj::new(v, parent.sub(key))?;
+    let (segments, records) = match o.string("mode")?.as_deref() {
+        None | Some("both") => (true, true),
+        Some("segment") => (true, false),
+        Some("record") => (false, true),
+        Some(m) => {
+            return Err(Error::at(
+                &o.sub("mode"),
+                format!("unknown mode {m:?}, expected \"segment\", \"record\" or \"both\""),
+            ));
+        }
+    };
+    let mut range = |k: &str, min: i32, max: i32| -> Result<Option<Range>> {
+        let r: Option<Range> = o.opt(k)?;
+        match r {
+            Some(r) if r.from < min || r.to > max => Err(Error::at(&o.sub(k), format!("must lie within {min}-{max}"))),
+            r => Ok(r),
+        }
+    };
+    let s = FragmentSplit {
+        segments,
+        records,
+        pieces: range("pieces", 2, 64)?,
+        length: range("length", 1, 16384)?,
+        delay: range("delay", 0, 10_000)?,
+    };
+    if s.pieces.is_some() && s.length.is_some() {
+        return Err(Error::at(&o.sub("length"), "set either pieces or length, not both"));
+    }
+    if s.delay.is_some() && !s.segments {
+        return Err(Error::at(
+            &o.sub("delay"),
+            "applies between TCP segments; mode is \"record\"",
+        ));
+    }
+    o.finish()?;
+    Ok(Some(s))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -125,11 +187,18 @@ pub(crate) fn parse_tls(parent: &mut Obj, key: &str, diag: &mut Diag) -> Result<
         fragment_fallback_delay: o.duration("fragment_fallback_delay")?,
         record_fragment: o.bool("record_fragment")?,
         disable_auto_fragment: o.bool("disable_auto_fragment")?,
+        fragment_split: parse_fragment_split(&mut o, "fragment_split")?,
         handshake_timeout: o.duration("handshake_timeout")?,
         utls: None,
         reality: None,
         ech: None,
     };
+    if t.fragment_split.is_some() && (t.fragment || t.record_fragment) {
+        return Err(Error::at(
+            &o.sub("fragment_split"),
+            "set either fragment_split or fragment / record_fragment, not both",
+        ));
+    }
     for v in [&t.min_version, &t.max_version].into_iter().flatten() {
         if !["1.0", "1.1", "1.2", "1.3"].contains(&v.as_str()) {
             return Err(Error::at(&o.sub("min_version"), format!("unknown TLS version {v:?}")));
