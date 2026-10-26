@@ -198,7 +198,7 @@ impl Dialer {
     async fn socket(&self, keep: Option<SocketAddr>) -> io::Result<(Socket, SocketAddr)> {
         let (socket, peer): (Socket, SocketAddr) = match &self.hop {
             None => match (keep, &self.upstream) {
-                (Some(peer), Upstream::System(opts, _)) => (socket::system(peer.ip(), opts)?, peer),
+                (Some(peer), Upstream::System(opts, _)) => (socket::system(peer, opts)?, peer),
                 _ => base_socket(&self.upstream, &self.server, self.server.port).await?,
             },
             Some(hop) => {
@@ -235,7 +235,7 @@ async fn base_socket(upstream: &Upstream, server: &Destination, port: u16) -> io
                 .into_iter()
                 .next()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no address for {dest}")))?;
-            Ok((socket::system(addr.ip(), opts)?, addr))
+            Ok((socket::system(addr, opts)?, addr))
         }
         Upstream::Detour(o) => {
             let pc = o.connect_udp(&dest).await?;

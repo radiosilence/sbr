@@ -2,7 +2,8 @@
 //!
 //! - The system path hands quinn a real socket through
 //!   [`quinn::Runtime::wrap_udp_socket`], which keeps quinn-udp's GSO/GRO,
-//!   ECN and pktinfo fast paths.
+//!   ECN and pktinfo fast paths. On Darwin, which has no GSO, it is a
+//!   connected socket instead (`Connected`).
 //! - A `detour` gives us a [`PacketConn`]; [`PacketConnSocket`] adapts it.
 //! - [`Salamander`] (hysteria2 obfs) and [`HopSocket`] (port hopping) wrap
 //!   either of those.
@@ -23,7 +24,9 @@ use std::time::Duration;
 use blake2::Digest;
 use bytes::Bytes;
 use quinn::udp::{RecvMeta, Transmit};
-use quinn::{AsyncUdpSocket, Runtime, TokioRuntime, UdpPoller};
+use quinn::{AsyncUdpSocket, UdpPoller};
+#[cfg(not(target_vendor = "apple"))]
+use quinn::{Runtime, TokioRuntime};
 use sbr_core::dial::{self, DialOptions};
 use sbr_core::{BoxPacketConn, Destination};
 use tokio::sync::{Notify, mpsc};
@@ -35,13 +38,148 @@ const SOCKET_BUFFER: usize = 8 << 20;
 pub(crate) type Socket = Arc<dyn AsyncUdpSocket>;
 
 /// A real UDP socket for `peer`'s address family with large buffers.
-pub(crate) fn system(peer: IpAddr, opts: &DialOptions) -> io::Result<Socket> {
-    let sock = dial::bind_udp(peer, opts)?.into_std()?;
+pub(crate) fn system(peer: SocketAddr, opts: &DialOptions) -> io::Result<Socket> {
+    let sock = dial::bind_udp(peer.ip(), opts)?.into_std()?;
     let s2 = socket2::SockRef::from(&sock);
     // Best effort: the kernel caps these at its sysctl limits.
     let _ = s2.set_recv_buffer_size(SOCKET_BUFFER);
     let _ = s2.set_send_buffer_size(SOCKET_BUFFER);
+    #[cfg(target_vendor = "apple")]
+    {
+        Connected::new(sock, peer)
+    }
+    #[cfg(not(target_vendor = "apple"))]
     TokioRuntime.wrap_udp_socket(sock)
+}
+
+/// A UDP socket connected to its one peer, for Darwin.
+///
+/// Darwin routes every unconnected `sendto` afresh, which costs more than
+/// the rest of the send, and has no UDP GSO to amortise it. quinn-udp always
+/// names a destination, which a connected socket refuses (`EISCONN`), so this
+/// sends and receives with plain `send`/`recv` instead. ECN is not reported;
+/// quinn then runs without it.
+#[cfg(target_vendor = "apple")]
+#[derive(Debug)]
+struct Connected {
+    sock: tokio::net::UdpSocket,
+    peer: SocketAddr,
+}
+
+#[cfg(target_vendor = "apple")]
+impl Connected {
+    fn new(sock: std::net::UdpSocket, peer: SocketAddr) -> io::Result<Socket> {
+        use std::os::fd::AsRawFd;
+        let on: libc::c_int = 1;
+        let (level, name) = match peer {
+            SocketAddr::V4(_) => (libc::IPPROTO_IP, libc::IP_DONTFRAG),
+            SocketAddr::V6(_) => (libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG),
+        };
+        // SAFETY: a valid socket and a c_int option value of the right size.
+        let r = unsafe {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                level,
+                name,
+                (&raw const on).cast(),
+                size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if r != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        sock.connect(peer)?;
+        sock.set_nonblocking(true)?;
+        Ok(Arc::new(Self {
+            sock: tokio::net::UdpSocket::from_std(sock)?,
+            peer,
+        }))
+    }
+}
+
+/// An ICMP error queued on a connected socket surfaces on its next call.
+/// QUIC ignores ICMP, and quinn treats a receive error as fatal.
+#[cfg(target_vendor = "apple")]
+fn transient(e: &io::Error) -> bool {
+    use io::ErrorKind::*;
+    matches!(
+        e.kind(),
+        ConnectionRefused | ConnectionReset | HostUnreachable | NetworkUnreachable
+    )
+}
+
+#[cfg(target_vendor = "apple")]
+#[derive(Debug)]
+struct SendReady(Arc<Connected>);
+
+#[cfg(target_vendor = "apple")]
+impl UdpPoller for SendReady {
+    fn poll_writable(self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+        self.0.sock.poll_send_ready(cx)
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+impl AsyncUdpSocket for Connected {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+        Box::pin(SendReady(self))
+    }
+
+    fn try_send(&self, t: &Transmit) -> io::Result<()> {
+        // max_transmit_segments is 1, so this is one datagram.
+        match self.sock.try_send(t.contents) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(e),
+            // As quinn-udp does: anything else loses the datagram, which QUIC
+            // recovers.
+            Err(_) => Ok(()),
+        }
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut Context,
+        bufs: &mut [IoSliceMut<'_>],
+        meta: &mut [RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        let mut n = 0;
+        while n < bufs.len().min(meta.len()) {
+            let r = if n == 0 {
+                let mut rb = tokio::io::ReadBuf::new(&mut bufs[0]);
+                match self.sock.poll_recv(cx, &mut rb) {
+                    Poll::Ready(Ok(())) => Ok(rb.filled().len()),
+                    Poll::Ready(Err(e)) => Err(e),
+                    Poll::Pending => return Poll::Pending,
+                }
+            } else {
+                self.sock.try_recv(&mut bufs[n])
+            };
+            match r {
+                Ok(len) => {
+                    meta[n] = RecvMeta {
+                        addr: self.peer,
+                        len,
+                        stride: len,
+                        ecn: None,
+                        dst_ip: None,
+                    };
+                    n += 1;
+                }
+                Err(e) if transient(&e) => {}
+                Err(e) if n > 0 && e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => return Poll::Ready(Err(e)),
+            }
+        }
+        Poll::Ready(Ok(n))
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.sock.local_addr()
+    }
+
+    fn may_fragment(&self) -> bool {
+        false
+    }
 }
 
 /// The address quinn sees for a peer it cannot address directly (a

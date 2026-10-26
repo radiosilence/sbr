@@ -418,7 +418,12 @@ async fn bench(args: Vec<String>) {
         ("xray tls+vision, TLS", &vless_tls, true),
         ("apernet hysteria2", &hy2, false),
     ];
+    // SBR_BENCH_ONLY=hysteria2 runs only the cases whose label contains it.
+    let only = std::env::var("SBR_BENCH_ONLY").ok();
     for (label, outbound, inner) in cases {
+        if only.as_deref().is_some_and(|o| !label.contains(o)) {
+            continue;
+        }
         for dir_ in [Dir::Up, Dir::Down] {
             let up_total = Arc::new(AtomicU64::new(0));
             let acceptor = inner.then(|| tls.acceptor.clone());
