@@ -245,10 +245,34 @@ impl GroupEnv {
 
     /// A passive signal from a connection carried by `leaf`.
     pub(crate) fn report(self: &Arc<Self>, leaf: &str, signal: Signal, dest: &Destination, conn: Option<u64>) {
-        let out = self
-            .health
-            .with(leaf, |r| r.report(Instant::now(), signal, health::dest_key(dest), conn));
-        debug!(outbound = leaf, signal = signal.as_str(), %dest, "suspect connection");
+        let carrying = signal == Signal::Closed && self.tracker.carrying(leaf, conn);
+        let (out, suspects) = self.health.with(leaf, |r| {
+            let now = Instant::now();
+            if carrying {
+                r.carrying(now);
+            }
+            let out = r.report(now, signal, &dest.to_string(), conn);
+            let suspects = out.confirm.then(|| r.suspects().join(", "));
+            (out, suspects)
+        });
+        debug!(outbound = leaf, signal = signal.as_str(), %dest, ignored = out.ignored, "suspect connection");
+        if let Some(dests) = suspects {
+            debug!(outbound = leaf, %dests, "closed before any data from several destinations; confirming with a probe");
+            match self.leaf(leaf) {
+                Some(o) => {
+                    let url = self.containing(leaf).iter().find_map(|g| g.url.clone());
+                    let env = self.clone();
+                    self.spawn(async move {
+                        if env.measure(&o, url.as_ref()).await.is_ok() {
+                            env.check(o, url, true).await;
+                        } else {
+                            env.probed(o.tag(), Verdict::Unreachable);
+                        }
+                    });
+                }
+                None => self.probed(leaf, Verdict::Inconclusive),
+            }
+        }
         if out.degraded {
             self.on_degraded(leaf);
         }
@@ -272,7 +296,7 @@ impl GroupEnv {
     /// A relay on `leaf` ended.
     pub(crate) fn finished(self: &Arc<Self>, leaf: &str, conn: &Conn, dest: &Destination) {
         match health::finish(conn) {
-            Some(Finish::Proven) => self.health.with(leaf, Record::success),
+            Some(Finish::Proven) => self.health.with(leaf, |r| r.success(Instant::now())),
             Some(Finish::Failed(s)) => self.report(leaf, s, dest, Some(conn.id)),
             None => {}
         }

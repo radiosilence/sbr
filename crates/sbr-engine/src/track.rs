@@ -218,6 +218,21 @@ impl Tracker {
         hit.len()
     }
 
+    /// Another connection on `leaf` than `except` has moved [`PROOF_BYTES`]
+    /// downstream and is still receiving.
+    ///
+    /// [`PROOF_BYTES`]: crate::health::PROOF_BYTES
+    pub fn carrying(&self, leaf: &str, except: Option<u64>) -> bool {
+        self.shards.iter().any(|s| {
+            s.lock().unwrap().values().any(|c| {
+                Some(c.id) != except
+                    && c.chain.first().is_some_and(|t| &**t == leaf)
+                    && c.down.load(Ordering::Relaxed) >= crate::health::PROOF_BYTES
+                    && c.activity.receiving(crate::health::STALL)
+            })
+        })
+    }
+
     /// Clash dashboards key connections by UUID. Ours embed the counter in
     /// the last 48 bits so they can be looked up without a second map.
     pub fn uuid(&self, id: u64) -> String {
@@ -363,6 +378,24 @@ mod tests {
             "itself, a subdomain and a sniffed subdomain"
         );
         drop(regs);
+    }
+
+    #[test]
+    fn carrying_needs_a_proven_connection_still_receiving() {
+        let t = Tracker::default();
+        let (busy, _c1) = t.register(meta(), vec!["leaf".into()], None);
+        let (empty, _c2) = t.register(meta(), vec!["leaf".into()], None);
+        assert!(!t.carrying("leaf", Some(empty.conn.id)));
+        busy.conn.add_down(crate::health::PROOF_BYTES as usize - 1);
+        busy.conn.activity.on_down();
+        assert!(!t.carrying("leaf", Some(empty.conn.id)), "not proven yet");
+        busy.conn.add_down(1);
+        assert!(t.carrying("leaf", Some(empty.conn.id)));
+        assert!(
+            !t.carrying("leaf", Some(busy.conn.id)),
+            "a connection does not vouch for itself"
+        );
+        assert!(!t.carrying("other", None));
     }
 
     #[tokio::test]
