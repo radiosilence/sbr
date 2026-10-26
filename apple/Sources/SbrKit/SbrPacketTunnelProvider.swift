@@ -61,10 +61,15 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
 
     /// The extension's own Application Support directory: where relative
     /// paths in the config (cache_file, local rule-sets) live when no App
-    /// Group is configured.
+    /// Group is configured. tvOS has no persistent files, so there it is the
+    /// caches directory, which the system may purge; both are rebuilt.
     static var privateDirectory: URL? {
-        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-        else { return nil }
+        #if os(tvOS)
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        #else
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        #endif
+        guard let dir = base else { return nil }
         let sbr = dir.appendingPathComponent("sbr", isDirectory: true)
         try? FileManager.default.createDirectory(at: sbr, withIntermediateDirectories: true)
         return sbr

@@ -47,8 +47,8 @@ struct ProfileLink {
 }
 
 /// Profiles live in the app's own container (`Application Support/profiles`:
-/// `index.json` plus one JSON file per profile), protected until first
-/// unlock. The tunnel never reads them: the app hands it the active
+/// `index.json` plus one JSON file per profile; on tvOS, see `dir`),
+/// protected until first unlock. The tunnel never reads them: the app hands it the active
 /// profile's text inside the VPN configuration (see `TunnelModel.apply`), so
 /// no shared container holds every profile's credentials. The tunnel keeps
 /// its own copy of what it downloads, which the app asks for over the
@@ -61,10 +61,18 @@ final class ProfileStore: ObservableObject {
     /// The active profile's config, for the tunnel.
     @Published private(set) var activeText: String?
 
+    /// tvOS gives apps no persistent files, only a cache the system may
+    /// purge. There the index also lives in UserDefaults, and `restore`
+    /// downloads a purged remote profile again.
     private var dir: URL? {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("profiles", isDirectory: true)
+        #if os(tvOS)
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        #else
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        #endif
+        return base?.appendingPathComponent("profiles", isDirectory: true)
     }
+    private static let indexDefaultsKey = "profileIndex"
     private var indexURL: URL? { dir?.appendingPathComponent("index.json") }
 
     private struct Index: Codable {
@@ -81,12 +89,24 @@ final class ProfileStore: ObservableObject {
     }
 
     func load() {
-        guard let indexURL, let data = try? Data(contentsOf: indexURL),
-              let index = try? JSONDecoder().decode(Index.self, from: data)
-        else { return }
+        var data = indexURL.flatMap { try? Data(contentsOf: $0) }
+        #if os(tvOS)
+        data = data ?? UserDefaults.standard.data(forKey: Self.indexDefaultsKey)
+        #endif
+        guard let data, let index = try? JSONDecoder().decode(Index.self, from: data) else { return }
         profiles = index.profiles
         activeID = index.active
         activeText = active.flatMap { try? text(of: $0) }
+    }
+
+    /// Download again any remote profile whose file is gone (a purged tvOS
+    /// cache). Elsewhere every file is present and this does nothing.
+    func restore() async {
+        for p in profiles where p.remoteURL != nil && (try? text(of: p)) == nil {
+            guard let url = p.remoteURL, let text = try? await fetch(url) else { continue }
+            guard (try? write(p, text: text)) != nil else { continue }
+            if p.id == activeID { activeText = text }
+        }
     }
 
     /// Download a remote profile, validate it with the tunnel's own parser,
@@ -226,6 +246,9 @@ final class ProfileStore: ObservableObject {
         guard let dir, let indexURL else { return }
         try Self.prepare(dir)
         let data = try JSONEncoder().encode(Index(profiles: profiles, active: activeID))
+        #if os(tvOS)
+        UserDefaults.standard.set(data, forKey: Self.indexDefaultsKey)
+        #endif
         try data.write(to: indexURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 

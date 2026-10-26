@@ -18,6 +18,7 @@ struct SbrApp: App {
                 .environmentObject(profiles)
                 .task {
                     profiles.load()
+                    await profiles.restore()
                     await tunnel.load()
                     await tunnel.apply(config: profiles.activeText, remote: profiles.activeRemote)
                     await syncProfiles()
