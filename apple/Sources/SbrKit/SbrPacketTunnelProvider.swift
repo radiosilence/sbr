@@ -370,7 +370,11 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     private static let snapshotAccount = "tunnel.snapshot"
 
     private func loadSnapshot() -> SbrProfileSnapshot? {
-        if let stored { return try? stored.keychain.value(SbrProfileSnapshot.self, Self.snapshotAccount) }
+        if let stored {
+            // A file left by a build that kept the download on disk.
+            if let url = Self.snapshotURL { try? FileManager.default.removeItem(at: url) }
+            return try? stored.keychain.value(SbrProfileSnapshot.self, Self.snapshotAccount)
+        }
         guard let url = Self.snapshotURL, let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(SbrProfileSnapshot.self, from: data)
     }
