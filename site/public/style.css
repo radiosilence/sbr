@@ -405,3 +405,53 @@ footer .wrap {
 footer a {
   color: var(--muted);
 }
+
+/* Prose comparison: cells wrap, and on narrow screens each row stacks under its heading. */
+table.compare {
+  margin-bottom: 16px;
+}
+
+.compare th,
+.compare td {
+  white-space: normal;
+}
+
+.compare th[scope="row"] {
+  color: var(--strong);
+  font-weight: 500;
+}
+
+.compare td {
+  min-width: 10em;
+}
+
+@media (max-width: 639px) {
+  .compare thead {
+    display: none;
+  }
+
+  .compare tr,
+  .compare th[scope="row"],
+  .compare td {
+    display: block;
+  }
+
+  .compare tr {
+    padding: 14px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .compare th[scope="row"],
+  .compare td {
+    border: 0;
+    padding: 0 0 6px;
+    min-width: 0;
+  }
+
+  .compare td::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--muted);
+    font-size: 12px;
+  }
+}
