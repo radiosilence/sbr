@@ -1,6 +1,6 @@
 # sbr app
 
-The sbr client for iOS 17+, macOS 14+ and tvOS 17+. It runs sing-box profiles in
+The sbr client for iOS 17+, macOS 15+ and tvOS 17+. It runs sing-box profiles in
 a packet tunnel extension (an empty subclass of SbrKit's
 `SbrPacketTunnelProvider`) and follows kōan's design language: Geist Mono,
 lowercase interface text, square corners, hairlines and a single mint accent
@@ -26,10 +26,20 @@ open Sbr.xcodeproj
 
 The App Store and TestFlight route uses the app extension on every platform.
 Developer ID distribution outside the store needs the system extension, which
-the user approves once in System Settings › Privacy & Security.
+the user approves once in System Settings › General › Login Items &
+Extensions. `apple/macos-release.sh` archives `SbrMac` and packages it as a
+disk image (`--notarise` also notarises and staples it); CI runs it for each
+release. Its Release configuration signs manually with the "sbr mac Developer
+ID" and "sbr mac tunnel Developer ID" profiles (bundle IDs `cc.blit.sbr.mac`
+and `cc.blit.sbr.mac.tunnel`), so archiving it locally needs them installed:
+`uv run apple/tools/fetch-profiles.py "sbr mac Developer ID" "sbr mac tunnel
+Developer ID"`. Each build gets a new build number, because macOS replaces an
+active system extension only when its version changes.
 
-Both bundle IDs need the **Network Extensions** and **App Groups**
-capabilities. The group is `group.cc.blit.sbr` on iOS and tvOS, and
+Every bundle ID (`cc.blit.sbr`, `cc.blit.sbr.tunnel`, `cc.blit.sbr.mac`,
+`cc.blit.sbr.mac.tunnel`) needs the **Network Extensions** and **App Groups**
+capabilities, and `cc.blit.sbr.mac` also **System Extension**, to install its
+tunnel. The group is `group.cc.blit.sbr` on iOS and tvOS, and
 `<TEAM_ID>.cc.blit.sbr` on macOS. The app and its tunnel share the Keychain
 access group `<TEAM_ID>.cc.blit.sbr` (`<TEAM_ID>.cc.blit.sbr.mac` for
 `SbrMac`); groups under the team prefix are allowed by every provisioning
@@ -39,12 +49,31 @@ the toggle loads and starts the VPN configuration itself. Packet tunnels do not
 run in simulators.
 
 The icon is drawn by `apple/tools/make-icon.swift`; re-run it to regenerate
-`AppIcon.appiconset/icon-1024.png`.
+`AppIcon.appiconset/icon-1024.png`. `make-icon.swift --glyph App/Assets.xcassets`
+regenerates the macOS menu bar glyphs from the same arch.
+
+## macOS menu bar
+
+On macOS sbr is a menu bar app. It has no Dock icon until its window is open,
+and the window opens only when asked (from the menu, by opening the app again,
+or when a profile link arrives), never at launch or login. The status item is
+the arch, with its light while the tunnel is connected. The menu connects and
+disconnects, switches profiles and shows errors from the background.
+
+The app delegate owns the tunnel and profile models, so launching at login
+loads them and keeps the VPN configuration pointed at the active profile with
+no window. **launch at login** registers the app with `SMAppService`. The
+Developer ID build offers it only from `/Applications`, since its system
+extension cannot be activated from anywhere else.
+
+While the system extension waits for approval, connecting reports it and the
+menu links to the settings pane, rather than waiting.
 
 ## Profiles
 
 A profile is a sing-box config. Remote profiles keep their URL and re-download
-when the app comes to the front after `autoUpdateMinutes` (60, as in sing-box).
+when the app comes to the front (on macOS, when its window opens) after
+`autoUpdateMinutes` (60, as in sing-box).
 The app sets no background timers for this. Profiles can be added from:
 
 - a `sing-box://import-remote-profile?url=<encoded>#<name>` link, which is
@@ -82,9 +111,11 @@ personal rules, trusted networks and saved logs, and has the tunnel delete
 its own files (cache file, rule-set cache, session logs). Those sit in the
 extension's container, out of the app's reach, so a disconnected tunnel is
 started with `SbrStartOption.erase`, which deletes them and stops without
-connecting. The app stays installed. Keychain items outlive deleting the app
-on iOS, so erase before deleting it. What erasing leaves behind is listed in
-`docs/threat-model.md` under "Device seizure".
+connecting. On macOS it also removes the login item. The app stays installed,
+and so does `SbrMac`'s system extension, until the app is deleted. Keychain
+items outlive deleting the app on iOS, so erase before deleting it. What
+erasing leaves behind is listed in `docs/threat-model.md` under "Device
+seizure".
 
 Deleting the active profile stops the tunnel, disarms on demand, deletes the
 tunnel's files and its downloaded copy of the profile, and keeps the VPN

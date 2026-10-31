@@ -3,21 +3,41 @@ import SwiftUI
 
 @main
 struct SbrApp: App {
+    #if os(macOS)
+    @NSApplicationDelegateAdaptor private var delegate: AppDelegate
+    #else
     @StateObject private var tunnel = TunnelModel()
     @StateObject private var profiles = ProfileStore()
+    @Environment(\.scenePhase) private var scenePhase
+    /// A link opened from elsewhere, waiting for the user to confirm.
+    @State private var pendingLink: ProfileLink?
+    #endif
     #if os(iOS)
     @StateObject private var inbox = PairInbox()
     #endif
-    @Environment(\.scenePhase) private var scenePhase
-    /// A link opened from elsewhere, waiting for the user to confirm: opening
-    /// it downloads from its host, before any tunnel is up.
-    @State private var pendingLink: ProfileLink?
 
     init() {
         Theme.registerFont()
     }
 
     var body: some Scene {
+        #if os(macOS)
+        MenuBarExtra {
+            MenuBarContent(delegate: delegate)
+                .environmentObject(delegate.tunnel)
+                .environmentObject(delegate.profiles)
+        } label: {
+            MenuBarLabel(delegate: delegate)
+                .environmentObject(delegate.tunnel)
+        }
+        Window("sbr", id: MainWindow.id) {
+            RootView()
+                .environmentObject(delegate.tunnel)
+                .environmentObject(delegate.profiles)
+                .mainWindow(delegate)
+        }
+        .launchHidden()
+        #else
         WindowGroup {
             RootView()
                 .environmentObject(tunnel)
@@ -27,18 +47,14 @@ struct SbrApp: App {
                 .sheet(item: $inbox.invite) { SendToTVSheet(invite: $0).environmentObject(profiles) }
                 #endif
                 .task {
-                    profiles.load()
-                    await profiles.restore()
-                    await tunnel.load()
-                    await tunnel.apply(config: profiles.activeText, remote: profiles.activeRemote,
-                                       stored: profiles.activeStored)
-                    await syncProfiles()
+                    await AppFlow.start(tunnel: tunnel, profiles: profiles)
+                    await AppFlow.sync(tunnel: tunnel, profiles: profiles)
                 }
-                .onChange(of: profiles.activeText) { _, text in
-                    Task { await tunnel.apply(config: text, remote: profiles.activeRemote, stored: profiles.activeStored) }
+                .onChange(of: profiles.activeText) { _, _ in
+                    Task { await AppFlow.applyActive(tunnel: tunnel, profiles: profiles) }
                 }
-                .onChange(of: profiles.activeRemote) { _, remote in
-                    Task { await tunnel.apply(config: profiles.activeText, remote: remote, stored: profiles.activeStored) }
+                .onChange(of: profiles.activeRemote) { _, _ in
+                    Task { await AppFlow.applyActive(tunnel: tunnel, profiles: profiles) }
                 }
                 .onOpenURL { url in
                     #if os(iOS)
@@ -50,30 +66,55 @@ struct SbrApp: App {
                     guard let link = ProfileLink(url) else { return }
                     pendingLink = link
                 }
-                .alert("download this profile?", isPresented: Binding(
+                .alert(AppFlow.confirmTitle, isPresented: Binding(
                     get: { pendingLink != nil },
                     set: { if !$0 { pendingLink = nil } }
                 ), presenting: pendingLink) { link in
-                    Button("download") { Task { await importLink(link) } }
+                    Button("download") { Task { await AppFlow.importLink(link, tunnel: tunnel, profiles: profiles) } }
                     Button("cancel", role: .cancel) {}
                 } message: { link in
-                    Text("sbr will connect to \(link.url.host ?? "an unknown host") directly, outside any tunnel. Only continue if you trust this link.")
+                    Text(AppFlow.confirmMessage(link))
                 }
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else { return }
-                    Task { await syncProfiles() }
+                    Task { await AppFlow.sync(tunnel: tunnel, profiles: profiles) }
                 }
         }
+        #endif
+    }
+}
+
+/// What the app does with its models outside any one view, shared by the
+/// iOS/tvOS scene and the macOS app delegate.
+@MainActor
+enum AppFlow {
+    static func start(tunnel: TunnelModel, profiles: ProfileStore) async {
+        profiles.load()
+        await profiles.restore()
+        await tunnel.load()
+        await applyActive(tunnel: tunnel, profiles: profiles)
+    }
+
+    static func applyActive(tunnel: TunnelModel, profiles: ProfileStore) async {
+        await tunnel.apply(config: profiles.activeText, remote: profiles.activeRemote, stored: profiles.activeStored)
     }
 
     /// A running tunnel refreshes the active remote profile itself, through
     /// its own outbounds: take its copy rather than downloading another.
-    private func syncProfiles() async {
+    static func sync(tunnel: TunnelModel, profiles: ProfileStore) async {
         if let snapshot = await tunnel.tunnelProfile() { profiles.adopt(snapshot) }
         _ = await profiles.refreshStale(except: tunnel.isConnected ? profiles.activeID : nil)
     }
 
-    private func importLink(_ link: ProfileLink) async {
+    /// Opening a link downloads from its host before any tunnel is up, so
+    /// the user confirms it first, seeing the host.
+    static let confirmTitle = "download this profile?"
+
+    static func confirmMessage(_ link: ProfileLink) -> String {
+        "sbr will connect to \(link.url.host ?? "an unknown host") directly, outside any tunnel. Only continue if you trust this link."
+    }
+
+    static func importLink(_ link: ProfileLink, tunnel: TunnelModel, profiles: ProfileStore) async {
         do {
             try await profiles.add(remote: link.url, name: link.name)
         } catch {

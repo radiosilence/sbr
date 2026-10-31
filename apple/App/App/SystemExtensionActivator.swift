@@ -1,15 +1,39 @@
 #if SBR_SYSTEM_EXTENSION
 import Foundation
+import SbrKit
 import SystemExtensions
 
 /// macOS Developer ID builds ship the tunnel as a system extension, which
 /// must be activated (and approved by the user in System Settings) before
 /// the VPN profile can use it. Activating an already active extension is a
 /// cheap no-op.
+@MainActor
 final class SystemExtensionActivator: NSObject, OSSystemExtensionRequestDelegate {
+    /// A request waiting for the user's approval. It stays submitted, and
+    /// finishes by itself once they allow it, so another is not submitted.
+    private static var pending: SystemExtensionActivator?
+    private static var inFlight: Task<Void, Error>?
     private var continuation: CheckedContinuation<Void, Error>?
 
+    static let approvalNeeded = SbrError("allow sbr's network extension in System Settings, then connect again")
+    static let rebootNeeded = SbrError("restart your Mac to finish installing sbr's network extension")
+
+    /// Called whenever `awaitingApproval` changes, including when the user
+    /// allows the extension long after the request that asked, with the
+    /// error if that request then failed: nobody is waiting on it by then.
+    static var approvalChanged: ((Error?) -> Void)?
+    static var awaitingApproval: Bool { pending != nil }
+
     static func activate(identifier: String) async throws {
+        if pending != nil { throw approvalNeeded }
+        if let inFlight { return try await inFlight.value }
+        let task = Task { try await submit(identifier: identifier) }
+        inFlight = task
+        defer { inFlight = nil }
+        try await task.value
+    }
+
+    private static func submit(identifier: String) async throws {
         let activator = SystemExtensionActivator()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             activator.continuation = cont
@@ -19,7 +43,20 @@ final class SystemExtensionActivator: NSObject, OSSystemExtensionRequestDelegate
         }
     }
 
-    func request(
+    private func finish(_ result: Result<Void, Error>) {
+        if Self.pending === self {
+            Self.pending = nil
+            if case .failure(let error) = result {
+                Self.approvalChanged?(error)
+            } else {
+                Self.approvalChanged?(nil)
+            }
+        }
+        continuation?.resume(with: result)
+        continuation = nil
+    }
+
+    nonisolated func request(
         _ request: OSSystemExtensionRequest,
         actionForReplacingExtension existing: OSSystemExtensionProperties,
         withExtension ext: OSSystemExtensionProperties
@@ -27,18 +64,23 @@ final class SystemExtensionActivator: NSObject, OSSystemExtensionRequestDelegate
         .replace
     }
 
-    func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
-        // Stays pending until the user allows it in System Settings › Privacy & Security.
+    nonisolated func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
+        MainActor.assumeIsolated {
+            Self.pending = self
+            Self.approvalChanged?(nil)
+            continuation?.resume(throwing: Self.approvalNeeded)
+            continuation = nil
+        }
     }
 
-    func request(_ request: OSSystemExtensionRequest, didFinishWithResult result: OSSystemExtensionRequest.Result) {
-        continuation?.resume()
-        continuation = nil
+    nonisolated func request(_ request: OSSystemExtensionRequest, didFinishWithResult result: OSSystemExtensionRequest.Result) {
+        MainActor.assumeIsolated {
+            finish(result == .willCompleteAfterReboot ? .failure(Self.rebootNeeded) : .success(()))
+        }
     }
 
-    func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
-        continuation?.resume(throwing: error)
-        continuation = nil
+    nonisolated func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
+        MainActor.assumeIsolated { finish(.failure(error)) }
     }
 }
 #endif

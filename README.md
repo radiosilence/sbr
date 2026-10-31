@@ -274,6 +274,12 @@ Vision skips sing-box's 5 ms sleep before the first raw write; rustls is fed one
 
 Every push and pull request to `main` runs `cargo fmt`, clippy and the tests on Linux and macOS, with the interop tests running against sing-box, Xray and hysteria on macOS, and builds the xcframework and the Apple app. Each push to `main` that passes uploads an iOS build to TestFlight. See [`apple/README.md`](apple/README.md#ci).
 
+## Releases
+
+A change records itself as a fragment under `changelog.d/unreleased/` (see [`changelog.d/README.md`](changelog.d/README.md)), not in `CHANGELOG.md`, so open pull requests never conflict over it. `mise run release patch|minor|major|X.Y.Z` opens the release pull request: it bumps the workspace version and the Apple apps' `MARKETING_VERSION` together, and turns the fragments into that version's changelog section. That pull request also signs and packages the Developer ID macOS app, without notarising it, so a signing problem shows before anything is released.
+
+Merging it is what releases: CI sees the push change the version to one with no GitHub release yet, notarises and staples the macOS app and its disk image, and publishes the release with the disk image, creating the `vX.Y.Z` tag. Nothing else creates tags. A failed release is retried by re-running the failed jobs (a re-run of a failed notarisation job takes up the submission already made), or by running CI/CD by hand on `main` with **release** ticked. It needs the `RELEASE_TOKEN` secret, a token with `contents: write` on this repository, because GitHub does not let the workflow token create a tag on a commit that changes a workflow.
+
 ## Website
 
 `site/` is [sbr.blit.cc](https://sbr.blit.cc), including the app's privacy policy: plain HTML and one stylesheet, with the font served from the site itself, so a visit makes no third-party request. The benchmark charts are inline SVG rendered from `site/src/benchmarks.json` by `site/src/charts.py` (`mise run charts` in `site/`); update that file when `BENCHMARKS.md` changes, since CI fails when the committed page differs from what the data renders. `mise run preview` serves it on port 3000. Every push to `main` publishes `ghcr.io/radiosilence/sbr-site:sha-<commit>` (`.github/workflows/site.yml`), which jaritanet deploys.

@@ -2,13 +2,15 @@
 # requires-python = ">=3.11"
 # dependencies = ["pyjwt[crypto]>=2.8"]
 # ///
-"""Install App Store provisioning profiles by name from App Store Connect.
+"""Install provisioning profiles by name from App Store Connect.
 
     uv run apple/tools/fetch-profiles.py "sbr App Store" "sbr tunnel App Store" "sbr widgets App Store"
+    uv run apple/tools/fetch-profiles.py "sbr mac Developer ID" "sbr mac tunnel Developer ID"
 
-Release builds for iOS sign manually (see App/project.yml), so a machine that
-has never opened Xcode with the team's account, such as a CI runner, needs the
-profiles installed before it can archive. Reads APPLE_API_KEY_PATH,
+Release builds for iOS and the Developer ID macOS build sign manually (see
+App/project.yml), so a machine that has never opened Xcode with the team's
+account, such as a CI runner, needs the profiles installed before it can
+archive. Reads APPLE_API_KEY_PATH,
 APPLE_API_KEY_ID and APPLE_API_ISSUER_ID, as the archive does.
 """
 
@@ -59,8 +61,10 @@ def main() -> None:
     for name in sys.argv[1:]:
         p = profile(name, auth)
         content = base64.b64decode(p["profileContent"])
+        # Xcode finds a macOS profile only under this extension.
+        ext = "provisionprofile" if p["profileType"].startswith("MAC_") else "mobileprovision"
         for d in DIRS:
-            (d / f"{p['uuid']}.mobileprovision").write_bytes(content)
+            (d / f"{p['uuid']}.{ext}").write_bytes(content)
         print(f"installed {name!r} ({p['uuid']}, expires {p['expirationDate']})")
 
 
