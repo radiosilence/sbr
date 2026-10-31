@@ -152,8 +152,14 @@ final class TunnelModel: ObservableObject {
 
     #if SBR_SYSTEM_EXTENSION
     init() {
-        SystemExtensionActivator.approvalChanged = { [weak self] in
-            self?.needsApproval = SystemExtensionActivator.awaitingApproval
+        SystemExtensionActivator.approvalChanged = { [weak self] error in
+            guard let self else { return }
+            needsApproval = SystemExtensionActivator.awaitingApproval
+            if let error {
+                errorMessage = error.localizedDescription
+            } else if !needsApproval, errorMessage == SystemExtensionActivator.approvalNeeded.description {
+                errorMessage = nil
+            }
         }
     }
     #endif
@@ -192,6 +198,12 @@ final class TunnelModel: ObservableObject {
         guard manager != nil, config != nil else { return }
         do {
             try await install()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        // A running tunnel takes the new profile even when saving it failed;
+        // the next connect saves it again (installFailed).
+        do {
             if isConnected, let session {
                 groups = try await session.send(.reload(config: config, remote: remote, logLevel: logLevel, rules: rules))
                     .groups ?? groups
