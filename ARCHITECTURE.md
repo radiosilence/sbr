@@ -70,7 +70,7 @@ The WireGuard outbound runs its TCP on the same stack (`Tcp::client`), adding th
 
 The trade-off is at the cap. Each connection may always buffer one chunk (4 KiB on iOS) each way, so a WireGuard connection that finds the cap taken by stalled readers (relayed downloads whose app stopped reading) proceeds no slower than about one chunk per round trip, about 40 KB/s at 100 ms, plus whatever window it was offered before the cap filled. smoltcp never throttled: it kept allocating instead. With 256 KiB windows it takes 32 stalled connections to reach the cap.
 
-smoltcp still carries the tunnel's UDP; IP fragments are reassembled before either stack sees them.
+A connection whose data goes unacknowledged for two minutes (`TcpConfig::user_timeout`) is aborted, as smoltcp's socket timeout did, so a dead tunnel does not hold its buffers against the cap. smoltcp still carries the tunnel's UDP; IP fragments are reassembled before either stack sees them.
 
 ## Performance rules
 

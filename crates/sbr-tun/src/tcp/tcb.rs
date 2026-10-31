@@ -162,8 +162,9 @@ pub struct Tcb {
     /// Karn's algorithm: the one segment being timed, unless retransmitted.
     rtt_seq: Option<(u32, Instant)>,
     retries: u32,
-    /// When the oldest unacknowledged data was last sent before the
-    /// retransmissions now under way.
+    /// When the retransmission timer now firing was armed: the last ACK
+    /// that advanced `snd_una`, or the first send. A connection that keeps
+    /// making progress, however slowly, never reaches the user timeout.
     stall_start: Option<Instant>,
     /// Abort once data has gone unacknowledged this long (RFC 5482's user
     /// timeout); `None` leaves it to `DATA_RETRIES`.
