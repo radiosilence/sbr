@@ -125,7 +125,7 @@ pub struct H2Stream {
 }
 
 impl H2Stream {
-    fn new(resp: ResponseFuture, send: SendStream<Bytes>, gun: bool) -> Self {
+    pub(crate) fn new(resp: ResponseFuture, send: SendStream<Bytes>, gun: bool) -> Self {
         Self {
             send,
             recv: Recv::Response(resp),

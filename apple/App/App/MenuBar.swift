@@ -48,9 +48,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !links.isEmpty else { return }
         Task {
             await ready()
-            for link in links { await AppFlow.importLink(link, tunnel: tunnel, profiles: profiles) }
+            for link in links where confirm(link) {
+                await AppFlow.importLink(link, tunnel: tunnel, profiles: profiles)
+            }
             window.open()
         }
+    }
+
+    private func confirm(_ link: ProfileLink) -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = AppFlow.confirmTitle
+        alert.informativeText = AppFlow.confirmMessage(link)
+        alert.addButton(withTitle: "Download")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// Opening the app again from Finder or Spotlight shows the window.

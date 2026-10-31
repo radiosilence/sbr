@@ -27,6 +27,14 @@ public enum SbrProviderKey {
     public static let personalRules = "personalRules"
 }
 
+/// Keys of the options passed to `startVPNTunnel(options:)`.
+public enum SbrStartOption {
+    /// Delete the extension's files (`SbrRequest.erase`) and stop without
+    /// connecting: how the app erases them while the tunnel is off, since
+    /// they sit in the extension's own container.
+    public static let erase = "sbrErase"
+}
+
 /// The config file shared between the app and its tunnel extension through
 /// an App Group container.
 public struct SbrConfigStore: Sendable {
@@ -55,9 +63,13 @@ public struct SbrConfigStore: Sendable {
     }
 
     /// Atomic write. Readable after first unlock, so on-demand / always-on
-    /// tunnels can start before the user unlocks again.
+    /// tunnels can start before the user unlocks again. Kept out of backups:
+    /// it holds server credentials.
     public func save(_ config: String) throws {
-        guard let url = configURL else { throw SbrError("App Group \(appGroup) is not available (entitlement missing?)") }
+        guard var url = configURL else { throw SbrError("App Group \(appGroup) is not available (entitlement missing?)") }
         try Data(config.utf8).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try url.setResourceValues(values)
     }
 }

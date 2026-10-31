@@ -81,6 +81,9 @@ fn lifecycle_over_the_c_abi() {
         let e = take(sbr_check(c(r#"{"outbounds":[{"type":"warp-drive"}]}"#).as_ptr()));
         assert!(e.contains("outbounds[0].type"), "{e}");
         assert!(take(sbr_check(ptr::null())).contains("NULL"));
+        assert!(sbr_check_warnings(c(CFG).as_ptr()).is_null());
+        let tun = r#"{"inbounds":[{"type":"tun","address":["172.19.0.1/30"]}],"outbounds":[{"type":"direct"}]}"#;
+        assert!(take(sbr_check_warnings(c(tun).as_ptr())).starts_with("dns: missing"));
         assert!(!CStr::from_ptr(sbr_version()).to_bytes().is_empty());
 
         let mut err = ptr::null_mut();

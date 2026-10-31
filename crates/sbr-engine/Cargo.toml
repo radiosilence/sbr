@@ -37,6 +37,7 @@ sha3 = "0.11"
 crc32fast = "1"
 aes = "0.9"
 libc = "0.2"
+russh = { version = "0.65", default-features = false, features = ["aws-lc-rs", "rsa", "flate2"] }
 # Clash API, rule-set downloads, urltest probes, cache file.
 serde.workspace = true
 serde_json.workspace = true

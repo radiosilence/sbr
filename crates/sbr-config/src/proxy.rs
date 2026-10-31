@@ -14,6 +14,8 @@ pub struct V2rayCommon {
     pub network: Vec<Network>,
     pub tls: Option<TlsOutbound>,
     pub transport: Option<Transport>,
+    /// `multiplex`, when enabled.
+    pub multiplex: Option<Multiplex>,
 }
 
 impl V2rayCommon {
@@ -90,22 +92,15 @@ fn common(o: &mut Obj, diag: &mut Diag) -> Result<V2rayCommon> {
             "quic transport not supported by sbr yet",
         ));
     }
-    let mux = parse_multiplex(o, "multiplex")?;
-    reject_multiplex(o, mux)?;
+    let multiplex = parse_multiplex(o, "multiplex")?.filter(|m| m.enabled);
     Ok(V2rayCommon {
         server,
         dial,
         network,
         tls,
         transport,
+        multiplex,
     })
-}
-
-fn reject_multiplex(o: &Obj, m: Option<Multiplex>) -> Result<()> {
-    match m {
-        Some(m) if m.enabled => Err(Error::at(&o.sub("multiplex"), "not supported by sbr yet")),
-        _ => Ok(()),
-    }
 }
 
 fn packet_encoding(o: &mut Obj, default: PacketEncoding) -> Result<PacketEncoding> {
@@ -133,6 +128,12 @@ pub(crate) fn parse_vless(o: &mut Obj, diag: &mut Diag) -> Result<VlessOutbound>
         && f != "xtls-rprx-vision"
     {
         return Err(Error::at(&o.sub("flow"), format!("unsupported flow: {f}")));
+    }
+    if flow.is_some() && common.multiplex.is_some() {
+        return Err(Error::at(
+            &o.sub("multiplex"),
+            "multiplex is not supported with xtls-rprx-vision",
+        ));
     }
     if flow.is_some() && common.tls().is_none() {
         return Err(Error::at(&o.sub("flow"), "xtls-rprx-vision requires tls"));
