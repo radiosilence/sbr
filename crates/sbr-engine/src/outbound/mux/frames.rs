@@ -263,7 +263,11 @@ impl Session {
         // forever); the write itself is not, since half a frame would
         // corrupt the session.
         let r = match tokio::time::timeout(OPEN_TIMEOUT, self.writer.lock()).await {
-            Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "mux: session writer stalled")),
+            Err(_) => {
+                // Live streams keep it; new ones go elsewhere.
+                self.draining.store(true, Ordering::Release);
+                Err(io::Error::new(io::ErrorKind::TimedOut, "mux: session writer stalled"))
+            }
             Ok(mut w) => {
                 let r = async {
                     w.write_all(&syn).await?;
