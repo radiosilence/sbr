@@ -70,6 +70,17 @@ fn write_all(bytes: &[u8]) {
     }
 }
 
+/// `si_code` of a signal sent by kill(), raise() or sigqueue() rather than
+/// raised by a fault (<sys/signal.h>; libc exports them only for Linux).
+#[cfg(target_vendor = "apple")]
+const SI_USER: c_int = 0x10001;
+#[cfg(target_vendor = "apple")]
+const SI_QUEUE: c_int = 0x10002;
+#[cfg(not(target_vendor = "apple"))]
+const SI_USER: c_int = 0;
+#[cfg(not(target_vendor = "apple"))]
+const SI_QUEUE: c_int = -1;
+
 extern "C" fn on_signal(sig: c_int, info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
     let msg: &[u8] = match sig {
         libc::SIGSEGV => b"fatal signal SIGSEGV (bad memory access or stack overflow)\n",
@@ -89,7 +100,7 @@ extern "C" fn on_signal(sig: c_int, info: *mut libc::siginfo_t, _ctx: *mut libc:
     // SAFETY: `info` is the kernel's for this signal; sigaction, signal and
     // raise are async-signal-safe.
     unsafe {
-        let sent = !info.is_null() && matches!((*info).si_code, libc::SI_USER | libc::SI_QUEUE);
+        let sent = !info.is_null() && matches!((*info).si_code, SI_USER | SI_QUEUE);
         match previous {
             Some(previous) => {
                 libc::sigaction(sig, previous, std::ptr::null_mut());

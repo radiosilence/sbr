@@ -54,7 +54,7 @@ struct Running {
     started: std::time::Instant,
     /// Detour receive tasks: they end only when a datagram finds the device
     /// gone, so they are stopped with it.
-    readers: Readers,
+    _readers: Readers,
 }
 
 /// Detour receive tasks, aborted when dropped: with the device, or when
@@ -253,7 +253,7 @@ impl WireGuard {
             shared,
             task,
             started: std::time::Instant::now(),
-            readers,
+            _readers: readers,
         })
     }
 
