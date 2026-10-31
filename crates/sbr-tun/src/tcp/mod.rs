@@ -1,5 +1,7 @@
 //! sbr's userspace TCP: terminates the TUN's TCP in-process, so no
-//! connection depends on a kernel socket. Selected by `stack: gvisor`.
+//! connection depends on a kernel socket (selected by `stack: gvisor`), and
+//! opens the WireGuard outbound's connections inside the tunnel
+//! (`Tcp::client`, `Connector`).
 //!
 //! One task (the TUN packet loop) owns every connection's state machine
 //! (`tcb`). The engine talks to a connection through a `Stream`, which
@@ -20,21 +22,23 @@ pub(crate) mod wire;
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::future::poll_fn;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 use tracing::{debug, trace};
 
 use crate::packet::Parsed;
 use buf::{ChunkBuf, Pool};
-use tcb::{Blocked, State, Tcb};
+pub use tcb::Blocked;
+use tcb::{State, Tcb};
 use wire::{ACK, RST, SYN};
 
 /// Limits for the userspace stack.
@@ -59,6 +63,10 @@ pub struct TcpConfig {
     /// die. A config that sniffs before routing still completes the
     /// handshake first, since sniffing needs the app's first bytes.
     pub defer_handshake: bool,
+    /// Abort a connection whose sent data has gone unacknowledged this long
+    /// (a dead path). `None` gives up after about five minutes of
+    /// backed-off retransmissions.
+    pub user_timeout: Option<Duration>,
     /// Cap on what all connections' buffers hold together (0: none). At the
     /// cap, receive windows stop opening and writes wait, except that each
     /// connection may always buffer one chunk (`buf::CHUNK`: 4 KiB on mobile,
@@ -88,6 +96,7 @@ impl Default for TcpConfig {
                 pool_keep: 1 << 20,
                 memory_limit: 8 << 20,
                 defer_handshake: true,
+                user_timeout: None,
             }
         } else {
             Self {
@@ -97,6 +106,7 @@ impl Default for TcpConfig {
                 pool_keep: 8 << 20,
                 memory_limit: 0,
                 defer_handshake: true,
+                user_timeout: None,
             }
         }
     }
@@ -136,6 +146,8 @@ pub(crate) struct Inner {
     pub handed: bool,
     /// The engine asked for the handshake to complete.
     pub accept: bool,
+    /// An active open reached ESTABLISHED.
+    pub connected: bool,
 }
 
 impl Inner {
@@ -157,15 +169,62 @@ impl Inner {
             queued: false,
             handed: false,
             accept: false,
+            connected: false,
         }
     }
 }
 
 /// State shared by the packet loop and every stream.
-pub(crate) struct Env {
+pub struct Env {
     pending: Mutex<Vec<(u32, u32)>>,
+    /// Woken when the packet loop has work from the streams.
     pub notify: Notify,
     pool: Arc<Pool>,
+    connects: Mutex<Connects>,
+}
+
+/// Active opens waiting for the packet loop.
+#[derive(Default)]
+struct Connects {
+    /// The stack is gone: no request will be served.
+    closed: bool,
+    q: Vec<ConnectReq>,
+}
+
+struct ConnectReq {
+    local: IpAddr,
+    remote: SocketAddr,
+    reply: oneshot::Sender<io::Result<Stream>>,
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Opens connections through a client stack (`Tcp::client`) from any task.
+#[derive(Clone)]
+pub struct Connector {
+    env: Arc<Env>,
+}
+
+impl Connector {
+    /// Connect from `local` (an address of the stack's interface; the port
+    /// is chosen here) to `remote`, returning once the handshake completes.
+    /// Dropping the future abandons the attempt without a reset.
+    pub async fn connect(&self, local: IpAddr, remote: SocketAddr) -> io::Result<Stream> {
+        let (reply, rx) = oneshot::channel();
+        {
+            let mut c = lock(&self.env.connects);
+            if c.closed {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            c.q.push(ConnectReq { local, remote, reply });
+        }
+        self.env.notify.notify_one();
+        let s = rx.await.map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))??;
+        poll_fn(|cx| s.poll_connected(cx)).await?;
+        Ok(s)
+    }
 }
 
 impl Env {
@@ -185,6 +244,25 @@ pub struct Stream {
 }
 
 impl Stream {
+    /// Ready once an active open is established, or with the reason it
+    /// failed (`ConnectionRefused`, `TimedOut`).
+    fn poll_connected(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut g = self.shared.m.lock().unwrap();
+        if g.connected {
+            return Poll::Ready(Ok(()));
+        }
+        if let Some(e) = g.err {
+            return Poll::Ready(Err(e.into()));
+        }
+        if g.gone {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()));
+        }
+        if !g.wr.as_ref().is_some_and(|w| w.will_wake(cx.waker())) {
+            g.wr = Some(cx.waker().clone());
+        }
+        Poll::Pending
+    }
+
     /// Complete the handshake (with `defer_handshake`; otherwise it is
     /// already complete). Idempotent.
     pub fn accept(&self) {
@@ -332,23 +410,29 @@ pub struct Stats {
     /// Retransmission timeouts (each resends from the first unacked byte).
     pub timeouts: u64,
     pub resets_out: u64,
+    /// Out-of-order segments dropped because the queue was full.
+    pub ooo_dropped: u64,
 }
 
 /// A packet sink for the stack: `buf` holds the packet at `[HEADROOM..]`.
 /// `Err(Blocked)` means the interface queue is full and nothing was sent.
-pub(crate) type Link<'a> = dyn FnMut(&mut [u8]) -> Result<(), Blocked> + 'a;
+pub type Link<'a> = dyn FnMut(&mut [u8]) -> Result<(), Blocked> + 'a;
 
 struct Slot {
     serial: u32,
     tcb: Option<Box<Tcb>>,
 }
 
-/// Every connection on one TUN.
-pub(crate) struct Tcp {
+type OnAccept = Box<dyn FnMut(SocketAddr, SocketAddr, Stream) + Send>;
+
+/// Every connection on one interface: the TUN (answering SYNs) or a
+/// WireGuard tunnel (sending them).
+pub struct Tcp {
     cfg: TcpConfig,
     mtu: usize,
     env: Arc<Env>,
-    on_accept: Box<dyn FnMut(SocketAddr, SocketAddr, Stream) + Send>,
+    /// None for a client stack, which resets every SYN it did not ask for.
+    on_accept: Option<OnAccept>,
     table: FxHashMap<(SocketAddr, SocketAddr), u32>,
     slots: Vec<Slot>,
     free: Vec<u32>,
@@ -358,6 +442,7 @@ pub(crate) struct Tcp {
     buf: Vec<u8>,
     epoch: Instant,
     isn: u64,
+    port_seed: u64,
     /// The interface refused a write: retry output for `dirty` then.
     blocked_until: Option<Instant>,
     pub stats: Stats,
@@ -367,12 +452,22 @@ pub(crate) struct Tcp {
 const BLOCKED_RETRY: Duration = Duration::from_millis(1);
 
 impl Tcp {
+    /// A stack that answers SYNs and hands each connection to `on_accept`.
     pub fn new(
         cfg: TcpConfig,
         mtu: usize,
         on_accept: impl FnMut(SocketAddr, SocketAddr, Stream) + Send + 'static,
         now: Instant,
     ) -> Self {
+        Self::with(cfg, mtu, Some(Box::new(on_accept)), now)
+    }
+
+    /// A stack that only opens connections (`connector`).
+    pub fn client(cfg: TcpConfig, mtu: usize, now: Instant) -> Self {
+        Self::with(cfg, mtu, None, now)
+    }
+
+    fn with(cfg: TcpConfig, mtu: usize, on_accept: Option<OnAccept>, now: Instant) -> Self {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as u64);
@@ -381,10 +476,11 @@ impl Tcp {
                 pending: Mutex::new(Vec::new()),
                 notify: Notify::new(),
                 pool: Pool::new(cfg.pool_keep, cfg.memory_limit),
+                connects: Mutex::default(),
             }),
             cfg,
             mtu,
-            on_accept: Box::new(on_accept),
+            on_accept,
             table: FxHashMap::default(),
             slots: Vec::new(),
             free: Vec::new(),
@@ -394,6 +490,7 @@ impl Tcp {
             buf: Vec::with_capacity(crate::device::HEADROOM + mtu),
             epoch: now,
             isn: seed | 1,
+            port_seed: seed.rotate_left(32) | 1,
             blocked_until: None,
             stats: Stats::default(),
         }
@@ -401,6 +498,16 @@ impl Tcp {
 
     pub fn env(&self) -> &Arc<Env> {
         &self.env
+    }
+
+    pub fn connector(&self) -> Connector {
+        Connector { env: self.env.clone() }
+    }
+
+    /// The caller drained the link, so a `Blocked` it returned no longer
+    /// holds: send again on the next `flush` instead of after the backoff.
+    pub fn unblock(&mut self) {
+        self.blocked_until = None;
     }
 
     #[cfg(test)]
@@ -443,6 +550,7 @@ impl Tcp {
                 let t = self.slots[i as usize].tcb.as_ref().unwrap();
                 let fresh_syn = seg.has(SYN) && !seg.has(ACK) && !seg.has(RST);
                 let replace = fresh_syn
+                    && self.on_accept.is_some()
                     && (matches!(t.state, State::TimeWait | State::Closed)
                         || (t.state == State::SynReceived && seg.seq != t.irs()));
                 if replace {
@@ -457,7 +565,7 @@ impl Tcp {
         let i = match slot {
             Some(i) => i,
             None => {
-                if !(seg.has(SYN) && !seg.has(ACK)) || seg.has(RST) {
+                if !(seg.has(SYN) && !seg.has(ACK)) || seg.has(RST) || self.on_accept.is_none() {
                     trace!(%remote, %local, flags = seg.flags, "tcp: no connection, reset");
                     let (mut cx, _) = self.ctx(now, link);
                     let _ = tcb::send_rst_for(local, remote, &seg, &mut cx);
@@ -478,7 +586,8 @@ impl Tcp {
         self.after(i, blocked, now);
     }
 
-    fn open(&mut self, local: SocketAddr, remote: SocketAddr, seg: &wire::Seg, now: Instant) -> u32 {
+    /// A free slot and the stream state for a connection in it.
+    fn alloc(&mut self) -> (u32, Arc<Shared>) {
         let i = match self.free.pop() {
             Some(i) => i,
             None => {
@@ -493,8 +602,13 @@ impl Tcp {
             tx_cap: self.cfg.tx_buffer,
             m: Mutex::new(Inner::new(&self.env.pool)),
         });
+        (i, shared)
+    }
+
+    fn open(&mut self, local: SocketAddr, remote: SocketAddr, seg: &wire::Seg, now: Instant) -> u32 {
+        let (i, shared) = self.alloc();
         let iss = self.iss(local, remote, now);
-        let t = Tcb::from_syn(
+        let mut t = Tcb::from_syn(
             local,
             remote,
             seg,
@@ -506,6 +620,7 @@ impl Tcp {
             self.cfg.defer_handshake.then_some(now),
             self.env.pool.clone(),
         );
+        t.user_timeout = self.cfg.user_timeout;
         self.slots[i as usize].tcb = Some(Box::new(t));
         self.table.insert((remote, local), i);
         self.live += 1;
@@ -519,8 +634,71 @@ impl Tcp {
         self.dirty.push(i);
     }
 
-    /// Streams that wrote, read, closed or dropped since the last call.
+    /// A random ephemeral port free towards `remote`.
+    fn ephemeral(&mut self, local: IpAddr, remote: SocketAddr) -> Option<SocketAddr> {
+        for _ in 0..64 {
+            self.port_seed ^= self.port_seed << 13;
+            self.port_seed ^= self.port_seed >> 7;
+            self.port_seed ^= self.port_seed << 17;
+            let port = 32768 + (self.port_seed % 28232) as u16;
+            let addr = SocketAddr::new(local, port);
+            if !self.table.contains_key(&(remote, addr)) {
+                return Some(addr);
+            }
+        }
+        None
+    }
+
+    /// Start the active opens queued by `Connector::connect`.
+    fn drain_connects(&mut self, now: Instant) {
+        let reqs = std::mem::take(&mut lock(&self.env.connects).q);
+        for r in reqs {
+            if r.reply.is_closed() {
+                continue;
+            }
+            if self.cfg.max_connections != 0 && self.live >= self.cfg.max_connections {
+                let _ = r.reply.send(Err(io::Error::other("tcp: connection limit reached")));
+                continue;
+            }
+            let Some(local) = self.ephemeral(r.local, r.remote) else {
+                let _ = r
+                    .reply
+                    .send(Err(io::Error::new(io::ErrorKind::AddrInUse, "tcp: no free local port")));
+                continue;
+            };
+            let (i, shared) = self.alloc();
+            let iss = self.iss(local, r.remote, now);
+            let mut t = Tcb::connect(
+                local,
+                r.remote,
+                iss,
+                self.mtu,
+                self.cfg.rx_buffer,
+                self.cfg.tx_buffer,
+                shared.clone(),
+                self.env.pool.clone(),
+            );
+            t.user_timeout = self.cfg.user_timeout;
+            self.slots[i as usize].tcb = Some(Box::new(t));
+            self.table.insert((r.remote, local), i);
+            self.live += 1;
+            let stream = Stream {
+                shared,
+                env: self.env.clone(),
+            };
+            if r.reply.send(Ok(stream)).is_err() {
+                // Abandoned while queued; nothing has been sent yet.
+                self.remove(i);
+                continue;
+            }
+            self.dirty.push(i);
+        }
+    }
+
+    /// Streams that wrote, read, closed or dropped since the last call, and
+    /// new active opens.
     pub fn drain_app(&mut self, now: Instant) {
+        self.drain_connects(now);
         let pending = std::mem::take(&mut *self.env.pending.lock().unwrap());
         for (i, serial) in pending {
             let Some(s) = self.slots.get_mut(i as usize) else {
@@ -639,7 +817,9 @@ impl Tcp {
             };
             let (src, dst) = (t.remote, t.local);
             self.stats.accepted += 1;
-            (self.on_accept)(src, dst, stream);
+            if let Some(f) = self.on_accept.as_mut() {
+                f(src, dst, stream);
+            }
         }
         let t = self.slots[i as usize].tcb.as_mut().unwrap();
         if t.state == State::Closed {
@@ -661,7 +841,7 @@ impl Tcp {
         self.table.remove(&(t.remote, t.local));
         self.free.push(i);
         self.live -= 1;
-        let mut g = t.shared.m.lock().unwrap();
+        let mut g = lock(&t.shared.m);
         if !g.gone && g.err.is_none() {
             g.err = Some(t.error.unwrap_or(io::ErrorKind::ConnectionReset));
         }
@@ -683,6 +863,14 @@ impl Tcp {
 
 impl Drop for Tcp {
     fn drop(&mut self) {
+        let reqs = {
+            let mut c = lock(&self.env.connects);
+            c.closed = true;
+            std::mem::take(&mut c.q)
+        };
+        for r in reqs {
+            let _ = r.reply.send(Err(io::ErrorKind::BrokenPipe.into()));
+        }
         for i in 0..self.slots.len() as u32 {
             if let Some(t) = self.slots[i as usize].tcb.as_mut() {
                 t.error.get_or_insert(io::ErrorKind::BrokenPipe);

@@ -153,33 +153,57 @@ struct Sim {
     imp_down: Impair,
     rng: Rng,
     next_port: u16,
+    /// Added to every packet's one-way trip (a WAN path).
+    delay: Duration,
 }
 
 impl Sim {
+    /// Our stack answers smoltcp's connects (the TUN's role).
     fn new(cfg: TcpConfig, mtu: usize) -> Self {
         let t0 = Instant::now();
         let accepted: Accepts = Arc::default();
         let acc = accepted.clone();
         let tcp = Tcp::new(cfg, mtu, move |s, d, st| acc.lock().unwrap().push((s, d, st)), t0);
+        let mut sim = Self::with(tcp, accepted, t0, mtu);
+        sim.iface.update_ip_addrs(|a| {
+            a.push(IpCidr::new(IpAddress::v4(172, 19, 0, 1), 30)).unwrap();
+            a.push(IpCidr::new(CLIENT6.parse::<std::net::Ipv6Addr>().unwrap().into(), 126))
+                .unwrap();
+        });
+        sim.iface
+            .routes_mut()
+            .add_default_ipv4_route(smoltcp::wire::Ipv4Address::new(172, 19, 0, 2))
+            .unwrap();
+        sim.iface
+            .routes_mut()
+            .add_default_ipv6_route("fdfe:dcba:9876::2".parse::<std::net::Ipv6Addr>().unwrap())
+            .unwrap();
+        sim
+    }
+
+    /// Our stack connects to smoltcp servers (the WireGuard outbound's role).
+    fn client(cfg: TcpConfig, mtu: usize) -> Self {
+        let t0 = Instant::now();
+        let tcp = Tcp::client(cfg, mtu, t0);
+        let mut sim = Self::with(tcp, Arc::default(), t0, mtu);
+        let (s4, s6): (std::net::Ipv4Addr, std::net::Ipv6Addr) = (SERVER4.parse().unwrap(), SERVER6.parse().unwrap());
+        sim.iface.update_ip_addrs(|a| {
+            a.push(IpCidr::new(s4.into(), 32)).unwrap();
+            a.push(IpCidr::new(s6.into(), 128)).unwrap();
+        });
+        // Everything leaves through the one link.
+        sim.iface.routes_mut().add_default_ipv4_route(s4).unwrap();
+        sim.iface.routes_mut().add_default_ipv6_route(s6).unwrap();
+        sim
+    }
+
+    fn with(tcp: Tcp, accepted: Accepts, t0: Instant, mtu: usize) -> Self {
         let mut dev = Dev {
             rx: VecDeque::new(),
             tx: Vec::new(),
             mtu,
         };
-        let mut iface = Interface::new(Config::new(HardwareAddress::Ip), &mut dev, SInstant::from_micros(0));
-        iface.update_ip_addrs(|a| {
-            a.push(IpCidr::new(IpAddress::v4(172, 19, 0, 1), 30)).unwrap();
-            a.push(IpCidr::new(CLIENT6.parse::<std::net::Ipv6Addr>().unwrap().into(), 126))
-                .unwrap();
-        });
-        iface
-            .routes_mut()
-            .add_default_ipv4_route(smoltcp::wire::Ipv4Address::new(172, 19, 0, 2))
-            .unwrap();
-        iface
-            .routes_mut()
-            .add_default_ipv6_route("fdfe:dcba:9876::2".parse::<std::net::Ipv6Addr>().unwrap())
-            .unwrap();
+        let iface = Interface::new(Config::new(HardwareAddress::Ip), &mut dev, SInstant::from_micros(0));
         Self {
             t0,
             now: Duration::ZERO,
@@ -194,6 +218,7 @@ impl Sim {
             imp_down: Impair::default(),
             rng: Rng(0x9e37_79b9_7f4a_7c15),
             next_port: 40000,
+            delay: Duration::ZERO,
         }
     }
 
@@ -233,7 +258,7 @@ impl Sim {
         let snow = SInstant::from_micros(self.now.as_micros() as i64);
         self.iface.poll(snow, &mut self.dev, &mut self.sockets);
         for p in self.dev.tx.drain(..) {
-            self.up.push(self.now, p, self.imp_up, &mut self.rng);
+            self.up.push(self.now + self.delay, p, self.imp_up, &mut self.rng);
         }
         let now = self.t0 + self.now;
         let arrivals = self.up.due(self.now);
@@ -244,12 +269,13 @@ impl Sim {
             imp_down,
             rng,
             now: vnow,
+            delay,
             ..
         } = self;
         let mut link = |b: &mut [u8]| {
             let p = b[HEADROOM..].to_vec();
             assert!(packet::verify(&p), "bad checksum from the stack");
-            down.push(*vnow, p, *imp_down, rng);
+            down.push(*vnow + *delay, p, *imp_down, rng);
             Ok(())
         };
         for p in arrivals {
@@ -461,6 +487,7 @@ fn cfg(rx: usize, tx: usize) -> TcpConfig {
         pool_keep: 1 << 20,
         memory_limit: 0,
         defer_handshake: false,
+        user_timeout: None,
     }
 }
 
@@ -1106,4 +1133,511 @@ fn deferred_handshake_echo_under_loss() {
         dup: 0.0,
     });
     echo(&mut sim, 20, 64 << 10, false, true, 64 << 10, Duration::from_secs(300));
+}
+
+// --- active open: our stack connects to smoltcp servers -----------------
+
+const CLIENT4: &str = "172.19.0.1";
+
+type Connecting = Pin<Box<dyn Future<Output = io::Result<Stream>> + Send>>;
+
+impl Sim {
+    /// A smoltcp server socket accepting one connection on `port`.
+    fn listen(&mut self, port: u16, rx: usize, tx: usize, ts: bool) -> SocketHandle {
+        let mut s = stcp::Socket::new(
+            stcp::SocketBuffer::new(vec![0; rx]),
+            stcp::SocketBuffer::new(vec![0; tx]),
+        );
+        if ts {
+            s.set_tsval_generator(Some(|| 0x1234_5678));
+        }
+        s.set_nagle_enabled(false);
+        s.listen(port).unwrap();
+        self.sockets.add(s)
+    }
+
+    fn dial(&self, v6: bool, port: u16) -> Connecting {
+        let c = self.tcp.connector();
+        let (local, remote): (IpAddr, IpAddr) = if v6 {
+            (CLIENT6.parse().unwrap(), SERVER6.parse().unwrap())
+        } else {
+            (CLIENT4.parse().unwrap(), SERVER4.parse().unwrap())
+        };
+        Box::pin(async move { c.connect(local, SocketAddr::new(remote, port)).await })
+    }
+}
+
+fn poll_connect(f: &mut Connecting) -> Option<io::Result<Stream>> {
+    let mut cx = Context::from_waker(Waker::noop());
+    match f.as_mut().poll(&mut cx) {
+        Poll::Ready(r) => Some(r),
+        Poll::Pending => None,
+    }
+}
+
+/// A smoltcp server that echoes and closes after the client does.
+struct ServerEcho {
+    h: SocketHandle,
+    pend: Vec<u8>,
+}
+
+impl ServerEcho {
+    fn step(&mut self, sim: &mut Sim) {
+        let s = sim.sock(self.h);
+        while s.can_recv() && self.pend.len() < 1 << 20 {
+            s.recv(|b| {
+                self.pend.extend_from_slice(b);
+                (b.len(), ())
+            })
+            .unwrap();
+        }
+        if s.can_send() && !self.pend.is_empty() {
+            let n = s.send_slice(&self.pend).unwrap();
+            self.pend.drain(..n);
+        }
+        if self.pend.is_empty() && !s.may_recv() && s.may_send() {
+            s.close();
+        }
+    }
+}
+
+/// Our side: connect, send `data`, shut down, collect the echo.
+struct Dialer {
+    f: Option<Connecting>,
+    s: Option<Stream>,
+    data: Vec<u8>,
+    sent: usize,
+    got: Vec<u8>,
+    eof: bool,
+    err: Option<io::ErrorKind>,
+}
+
+impl Dialer {
+    fn new(f: Connecting, data: Vec<u8>) -> Self {
+        Self {
+            f: Some(f),
+            s: None,
+            data,
+            sent: 0,
+            got: Vec::new(),
+            eof: false,
+            err: None,
+        }
+    }
+
+    fn step(&mut self) {
+        if let Some(f) = self.f.as_mut()
+            && let Some(r) = poll_connect(f)
+        {
+            self.f = None;
+            match r {
+                Ok(s) => self.s = Some(s),
+                Err(e) => self.err = Some(e.kind()),
+            }
+        }
+        let Some(s) = self.s.as_mut() else { return };
+        while self.sent < self.data.len() {
+            match poll_write(s, &self.data[self.sent..]) {
+                Some(Ok(n)) => {
+                    self.sent += n;
+                    if self.sent == self.data.len() {
+                        shutdown(s);
+                    }
+                }
+                Some(Err(e)) => {
+                    self.err = Some(e.kind());
+                    return;
+                }
+                None => break,
+            }
+        }
+        let mut b = [0u8; 9000];
+        while !self.eof {
+            match poll_read(s, &mut b) {
+                Some(Ok(0)) => self.eof = true,
+                Some(Ok(n)) => self.got.extend_from_slice(&b[..n]),
+                Some(Err(e)) => {
+                    self.err = Some(e.kind());
+                    return;
+                }
+                None => break,
+            }
+        }
+    }
+}
+
+/// Echo `n` connections of `len` bytes each through smoltcp servers.
+fn dial_echo(sim: &mut Sim, n: usize, len: usize, v6: bool, ts: bool, server_buf: usize, limit: Duration) {
+    let mut servers: Vec<ServerEcho> = (0..n)
+        .map(|_| ServerEcho {
+            h: sim.listen(443, server_buf, server_buf, ts),
+            pend: Vec::new(),
+        })
+        .collect();
+    let mut dialers: Vec<Dialer> = (0..n)
+        .map(|i| Dialer::new(sim.dial(v6, 443), pattern(len, i as u32)))
+        .collect();
+    sim.run(limit, |sim| {
+        for d in &mut dialers {
+            d.step();
+            assert!(d.err.is_none(), "dialer failed: {:?}", d.err);
+        }
+        for s in &mut servers {
+            s.step(sim);
+        }
+        dialers.iter().all(|d| d.eof)
+    });
+    for (i, d) in dialers.iter().enumerate() {
+        assert!(d.got == d.data, "connection {i}: echo corrupted");
+    }
+    drop(dialers);
+    sim.run(Duration::from_secs(30), |sim| {
+        for s in &mut servers {
+            s.step(sim);
+        }
+        sim.tcp.live() == 0
+    });
+}
+
+#[test]
+fn active_open_echo_v4_and_v6() {
+    for v6 in [false, true] {
+        let mut sim = Sim::client(cfg(256 << 10, 256 << 10), 1500);
+        dial_echo(&mut sim, 2, 1 << 20, v6, true, 128 << 10, Duration::from_millis(200));
+        let st = sim.tcp.stats;
+        assert_eq!((st.fast_retransmits, st.timeouts, st.accepted), (0, 0, 0), "{st:?}");
+    }
+}
+
+#[test]
+fn active_open_without_timestamps_or_window_scaling() {
+    // A 32 KiB server buffer needs no window scaling; smoltcp still offers
+    // it, and without timestamps the MSS carries no option overhead.
+    let mut sim = Sim::client(cfg(64 << 10, 64 << 10), 1500);
+    dial_echo(&mut sim, 1, 256 << 10, false, false, 32 << 10, Duration::from_secs(5));
+}
+
+#[test]
+fn active_open_echo_under_loss() {
+    for seed in [1u64, 2, 3] {
+        let mut sim = Sim::client(cfg(256 << 10, 256 << 10), 1500);
+        sim.rng = Rng(0x2545_f491_4f6c_dd1d ^ seed);
+        sim.impair(Impair {
+            loss: 0.02,
+            reorder: 0.05,
+            dup: 0.01,
+        });
+        dial_echo(
+            &mut sim,
+            2,
+            1 << 20,
+            seed == 2,
+            true,
+            128 << 10,
+            Duration::from_secs(300),
+        );
+        let st = sim.tcp.stats;
+        assert!(sim.down.dropped > 0, "the test must lose our packets");
+        assert!(st.timeouts * 4 < sim.down.dropped as u64, "{st:?}");
+    }
+}
+
+/// A smoltcp server that sends `data` and closes.
+struct Source {
+    h: SocketHandle,
+    data: Vec<u8>,
+    sent: usize,
+}
+
+impl Source {
+    fn step(&mut self, sim: &mut Sim) {
+        let s = sim.sock(self.h);
+        if s.can_send() && self.sent < self.data.len() {
+            self.sent += s.send_slice(&self.data[self.sent..]).unwrap();
+            if self.sent == self.data.len() {
+                s.close();
+            }
+        }
+    }
+}
+
+fn read_all(s: &mut Stream, got: &mut Vec<u8>) -> bool {
+    let mut b = [0u8; 16384];
+    loop {
+        match poll_read(s, &mut b) {
+            Some(Ok(0)) => return true,
+            Some(Ok(n)) => got.extend_from_slice(&b[..n]),
+            Some(Err(e)) => panic!("read failed: {e}"),
+            None => return false,
+        }
+    }
+}
+
+#[test]
+fn large_window_download_keeps_all_out_of_order_data() {
+    // A 1 MiB window holds ~700 segments past a hole; all of them must be
+    // kept and SACKed rather than dropped for the peer to resend.
+    let mut sim = Sim::client(cfg(1 << 20, 64 << 10), 1500);
+    sim.imp_up = Impair {
+        loss: 0.01,
+        reorder: 0.02,
+        dup: 0.0,
+    };
+    let data = pattern(8 << 20, 7);
+    let mut src = Source {
+        h: sim.listen(80, 4096, 1 << 20, true),
+        data: data.clone(),
+        sent: 0,
+    };
+    let mut f = Some(sim.dial(false, 80));
+    let mut s = None;
+    let mut got = Vec::new();
+    sim.run(Duration::from_secs(600), |sim| {
+        if let Some(r) = f.as_mut().and_then(poll_connect) {
+            s = Some(r.unwrap());
+            f = None;
+        }
+        src.step(sim);
+        s.as_mut().is_some_and(|s| read_all(s, &mut got))
+    });
+    assert!(got == data, "download corrupted");
+    assert!(sim.up.dropped > 0, "the test must lose the server's packets");
+    assert_eq!(sim.tcp.stats.ooo_dropped, 0, "{:?}", sim.tcp.stats);
+}
+
+#[test]
+fn refused_connect_reports_connection_refused() {
+    let mut sim = Sim::client(cfg(64 << 10, 64 << 10), 1500);
+    let mut f = sim.dial(false, 81);
+    let mut res = None;
+    sim.run(Duration::from_secs(5), |_| {
+        res = poll_connect(&mut f);
+        res.is_some()
+    });
+    assert_eq!(res.unwrap().err().unwrap().kind(), io::ErrorKind::ConnectionRefused);
+    assert_eq!(sim.tcp.live(), 0);
+}
+
+#[test]
+fn unanswered_syn_times_out() {
+    let mut sim = Sim::client(cfg(64 << 10, 64 << 10), 1500);
+    sim.imp_down.loss = 1.0;
+    let mut f = sim.dial(false, 80);
+    let mut res = None;
+    sim.run(Duration::from_secs(120), |_| {
+        res = poll_connect(&mut f);
+        res.is_some()
+    });
+    assert_eq!(res.unwrap().err().unwrap().kind(), io::ErrorKind::TimedOut);
+    assert_eq!(sim.down.sent, 6, "one SYN and five retransmissions");
+    assert!(sim.now > Duration::from_secs(30), "gave up after {:?}", sim.now);
+    assert_eq!(sim.tcp.live(), 0);
+    assert_eq!(sim.tcp.next_deadline(), None);
+}
+
+#[test]
+fn connect_dropped_before_the_loop_runs_sends_nothing() {
+    let mut sim = Sim::client(cfg(64 << 10, 64 << 10), 1500);
+    let mut f = sim.dial(false, 80);
+    assert!(poll_connect(&mut f).is_none());
+    drop(f);
+    sim.round();
+    assert_eq!((sim.down.sent, sim.tcp.live()), (0, 0));
+}
+
+#[test]
+fn connect_abandoned_with_the_syn_in_flight_resets_the_syn_ack() {
+    let mut sim = Sim::client(cfg(64 << 10, 64 << 10), 1500);
+    let h = sim.listen(80, 4096, 4096, true);
+    let mut f = sim.dial(false, 80);
+    assert!(poll_connect(&mut f).is_none());
+    sim.round();
+    assert_eq!(sim.down.sent, 1, "the SYN is on the wire");
+    drop(f);
+    sim.run(Duration::from_secs(5), |sim| {
+        sim.up.sent >= 1 && sim.sock(h).state() == stcp::State::Listen && sim.down.q.is_empty()
+    });
+    assert_eq!(sim.down.sent, 2, "nothing but the SYN and the reset of the SYN-ACK");
+    assert_eq!(sim.tcp.live(), 0);
+}
+
+#[test]
+fn client_stack_resets_inbound_syns() {
+    let mut sim = Sim::client(cfg(64 << 10, 64 << 10), 1500);
+    let mut s = stcp::Socket::new(
+        stcp::SocketBuffer::new(vec![0; 4096]),
+        stcp::SocketBuffer::new(vec![0; 4096]),
+    );
+    let ours: IpAddr = CLIENT4.parse().unwrap();
+    s.connect(sim.iface.context(), (IpAddress::from(ours), 40000), 1234)
+        .unwrap();
+    let h = sim.sockets.add(s);
+    sim.run(Duration::from_secs(5), |sim| sim.sock(h).state() == stcp::State::Closed);
+    assert_eq!(sim.tcp.live(), 0);
+}
+
+#[test]
+fn stack_drop_fails_queued_connects() {
+    let t0 = Instant::now();
+    let tcp = Tcp::client(cfg(64 << 10, 64 << 10), 1500, t0);
+    let c = tcp.connector();
+    let remote = SocketAddr::new(SERVER4.parse().unwrap(), 80);
+    let local: IpAddr = CLIENT4.parse().unwrap();
+    let c2 = c.clone();
+    let mut f: Connecting = Box::pin(async move { c2.connect(local, remote).await });
+    assert!(poll_connect(&mut f).is_none());
+    drop(tcp);
+    let e = poll_connect(&mut f).expect("failed at once").err().unwrap();
+    assert_eq!(e.kind(), io::ErrorKind::BrokenPipe);
+    let mut late: Connecting = Box::pin(async move { c.connect(local, remote).await });
+    let e = poll_connect(&mut late).expect("failed at once").err().unwrap();
+    assert_eq!(e.kind(), io::ErrorKind::BrokenPipe);
+}
+
+#[test]
+fn retransmitted_syn_ack_after_established_is_acked_again() {
+    let mut sim = Sim::client(cfg(64 << 10, 64 << 10), 1500);
+    let h = sim.listen(80, 4096, 4096, true);
+    let mut f = sim.dial(false, 80);
+    let mut s = None;
+    // Lose our ACK of the SYN-ACK, so smoltcp resends the SYN-ACK.
+    sim.run(Duration::from_secs(5), |sim| {
+        if sim.up.sent >= 1 {
+            sim.imp_down.loss = 1.0;
+        }
+        if let Some(r) = poll_connect(&mut f) {
+            s = Some(r.unwrap());
+        }
+        s.is_some()
+    });
+    let lost = sim.down.dropped;
+    assert!(lost >= 1);
+    sim.imp_down.loss = 0.0;
+    sim.run(Duration::from_secs(10), |sim| {
+        sim.sock(h).state() == stcp::State::Established
+    });
+    assert_eq!(sim.down.dropped, lost);
+    let mut s = s.unwrap();
+    assert_eq!(poll_write(&mut s, b"hi").unwrap().unwrap(), 2);
+    sim.run(Duration::from_secs(5), |sim| sim.sock(h).recv_queue() == 2);
+}
+
+#[test]
+fn stalled_readers_at_the_memory_limit_leave_room_for_an_active_flow() {
+    // The WireGuard outbound's iOS shape: 256 KiB windows under an 8 MiB
+    // cap, over a 50 ms round trip. 40 connections whose reader stopped
+    // would hold 10 MiB; the cap holds them to 8 MiB plus the
+    // per-connection floor. A 41st connection still downloads, but only at
+    // that floor: one chunk of window per round trip.
+    let stalled = 40;
+    let limit = 8 << 20;
+    let mut c = cfg(256 << 10, 256 << 10);
+    c.memory_limit = limit;
+    let mut sim = Sim::client(c, 1500);
+    sim.delay = Duration::from_millis(25);
+    let len = 256 << 10;
+    let mut srcs: Vec<Source> = (0..=stalled)
+        .map(|i| Source {
+            h: sim.listen(80, 4096, 256 << 10, true),
+            data: pattern(if i < stalled { 256 << 10 } else { len }, i as u32),
+            sent: 0,
+        })
+        .collect();
+    let mut fs: Vec<Option<Connecting>> = (0..=stalled).map(|_| Some(sim.dial(false, 80))).collect();
+    let mut ss: Vec<Option<Stream>> = (0..=stalled).map(|_| None).collect();
+    // Connect everything and let the stalled ones fill up to the cap; the
+    // active one's server starts sending only once it is reached.
+    sim.run(Duration::from_secs(60), |sim| {
+        for (f, s) in fs.iter_mut().zip(ss.iter_mut()) {
+            if let Some(r) = f.as_mut().and_then(poll_connect) {
+                *s = Some(r.unwrap());
+                *f = None;
+            }
+        }
+        for src in &mut srcs[..stalled] {
+            src.step(sim);
+        }
+        ss.iter().all(Option::is_some) && sim.tcp.env().pool.headroom() == 0
+    });
+    let floor = 4 * buf::CHUNK * (stalled + 1);
+    let mut peak = 0;
+    let mut got = Vec::new();
+    let mut active = ss.pop().unwrap().unwrap();
+    let start = sim.now;
+    sim.run(Duration::from_secs(120), |sim| {
+        for src in &mut srcs {
+            src.step(sim);
+        }
+        peak = peak.max(sim.tcp.env().pool.used());
+        read_all(&mut active, &mut got)
+    });
+    assert!(got == srcs[stalled].data, "active download corrupted");
+    assert!(peak <= limit + floor, "peak {peak} over {limit} + {floor}");
+    // What was buffered before reading started, then a chunk per RTT. The
+    // bound is at this build's `CHUNK` (16 KiB here, 4 KiB on iOS).
+    let rtt = 2 * sim.delay;
+    let took = sim.now - start;
+    let bound = rtt * (len / buf::CHUNK + 4) as u32;
+    eprintln!("active flow: {len} bytes in {took:?} at the limit (bound {bound:?})");
+    assert!(took <= bound, "{took:?} over {bound:?}");
+}
+
+#[test]
+fn a_burst_of_connects_offers_no_more_window_than_the_limit() {
+    let n = 200;
+    let limit = 1 << 20;
+    let mut c = cfg(256 << 10, 256 << 10);
+    c.memory_limit = limit;
+    let mut sim = Sim::client(c, 1500);
+    sim.imp_down.loss = 1.0;
+    let mut fs: Vec<Connecting> = (0..n).map(|_| sim.dial(false, 80)).collect();
+    for f in &mut fs {
+        assert!(poll_connect(f).is_none());
+    }
+    sim.round();
+    assert_eq!(sim.down.sent, n, "every SYN went out");
+    let promised = sim.tcp.env().pool.promised();
+    assert!(promised <= limit + n * buf::CHUNK, "{promised} offered against {limit}");
+    drop(fs);
+    sim.round();
+    assert_eq!((sim.tcp.live(), sim.tcp.env().pool.promised()), (0, 0));
+}
+
+#[test]
+fn user_timeout_aborts_a_dead_path() {
+    let mut c = cfg(64 << 10, 64 << 10);
+    c.user_timeout = Some(Duration::from_secs(120));
+    let mut sim = Sim::client(c, 1500);
+    let h = sim.listen(80, 4096, 4096, true);
+    let mut f = sim.dial(false, 80);
+    let mut s = None;
+    sim.run(Duration::from_secs(5), |_| {
+        if let Some(r) = poll_connect(&mut f) {
+            s = Some(r.unwrap());
+        }
+        s.is_some()
+    });
+    let mut s = s.unwrap();
+    sim.run(Duration::from_secs(5), |sim| {
+        sim.sock(h).state() == stcp::State::Established
+    });
+    // The path dies with data in flight.
+    sim.imp_down.loss = 1.0;
+    let sent_at = sim.now;
+    assert_eq!(poll_write(&mut s, b"hello").unwrap().unwrap(), 5);
+    let mut b = [0u8; 8];
+    let mut err = None;
+    sim.run(Duration::from_secs(300), |_| {
+        if let Some(Err(e)) = poll_read(&mut s, &mut b) {
+            err = Some(e.kind());
+        }
+        err.is_some()
+    });
+    assert_eq!(err, Some(io::ErrorKind::TimedOut));
+    let took = sim.now - sent_at;
+    assert!(
+        took >= Duration::from_secs(120) && took < Duration::from_secs(122),
+        "gave up after {took:?}"
+    );
+    assert_eq!(sim.tcp.live(), 0);
 }

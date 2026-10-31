@@ -1,9 +1,9 @@
 //! The `wireguard` endpoint as an outbound: a userspace WireGuard device
-//! (boringtun for Noise) with a smoltcp stack terminating TCP and UDP flows
-//! inside the tunnel.
+//! (boringtun for Noise) terminating TCP (sbr-tun's userspace TCP) and UDP
+//! (smoltcp) flows inside the tunnel.
 //!
 //! Flows the peer opens towards us are not routed (sing-box would hand them
-//! to its router as an inbound); smoltcp answers them with a reset.
+//! to its router as an inbound); TCP ones are answered with a reset.
 //!
 //! The device starts on first use, so a configured-but-unused endpoint costs
 //! no socket and no wakeups.
@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use self::conn::{WgPacketConn, WgTcp, WgUdp};
+use self::conn::{WgPacketConn, WgUdp};
 use self::device::{Device, PeerSetup, Transport};
 use self::stack::Shared;
 use super::Upstream;
@@ -82,17 +82,14 @@ impl Drop for Running {
     }
 }
 
-/// Nothing drives this stack any more: fail the connections on it rather
-/// than leave them waiting for a device that is gone. Aborting and closing
-/// wake their readers and writers.
+/// Nothing drives the UDP stack any more: fail its sockets rather than leave
+/// them waiting for a device that is gone. Closing wakes their readers and
+/// writers. (TCP connections fail when the device drops its `Tcp`.)
 fn fail_sockets(shared: &Shared) {
     let mut st = shared.stack.lock().unwrap_or_else(|e| e.into_inner());
     for (_, s) in st.sockets.iter_mut() {
-        match s {
-            smoltcp::socket::Socket::Tcp(t) => t.abort(),
-            smoltcp::socket::Socket::Udp(u) => u.close(),
-            #[allow(unreachable_patterns)]
-            _ => {}
+        if let smoltcp::socket::Socket::Udp(u) = s {
+            u.close();
         }
     }
 }
@@ -149,7 +146,13 @@ impl WireGuard {
         let public = PublicKey::from(&private);
         let mut seed = [0u8; 8];
         fill_random(&mut seed);
-        let shared = Arc::new(Shared::new(&cfg.address, cfg.mtu as usize, u64::from_le_bytes(seed)));
+        let tcp = sbr_tun::tcp::Tcp::client(stack::tcp_config(), cfg.mtu as usize, std::time::Instant::now());
+        let shared = Arc::new(Shared::new(
+            &cfg.address,
+            cfg.mtu as usize,
+            u64::from_le_bytes(seed),
+            tcp.connector(),
+        ));
 
         let mut peers = Vec::with_capacity(cfg.peers.len());
         for (i, p) in cfg.peers.iter().enumerate() {
@@ -234,6 +237,7 @@ impl WireGuard {
         };
         let dev = Device {
             shared: shared.clone(),
+            tcp,
             peers,
             transport,
             private,
@@ -347,7 +351,7 @@ impl Outbound for WireGuard {
             let mut last = None;
             // Serial, like sing-box's DialSerial.
             for ip in ips {
-                match tokio::time::timeout(timeout, WgTcp::connect(shared.clone(), ip, dest.port)).await {
+                match tokio::time::timeout(timeout, conn::tcp_connect(&shared, ip, dest.port)).await {
                     Ok(Ok(s)) => return Ok(Box::new(s) as Stream),
                     Ok(Err(e)) => last = Some(e),
                     Err(_) => {

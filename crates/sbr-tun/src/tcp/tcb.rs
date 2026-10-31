@@ -1,13 +1,15 @@
-//! One TCP connection: the passive-open half of RFC 9293 with window
-//! scaling and timestamps (RFC 7323), SACK (RFC 2018) and SACK-based loss
-//! recovery (RFC 6675), NewReno congestion control (RFC 5681, RFC 6582),
-//! RFC 6298 retransmission timing and RFC 5961 RST/SYN hardening.
+//! One TCP connection: RFC 9293 with window scaling and timestamps
+//! (RFC 7323), SACK (RFC 2018) and SACK-based loss recovery (RFC 6675),
+//! NewReno congestion control (RFC 5681, RFC 6582), RFC 6298 retransmission
+//! timing and RFC 5961 RST/SYN hardening.
 //!
-//! The stack only ever answers SYNs, so there is no SYN-SENT or LISTEN
-//! state. The peer is an app on the same host, so the link is short and
-//! nearly lossless; loss happens when an interface queue overflows, which
-//! is exactly when recovering without a timeout matters.
+//! Connections are opened either by answering a SYN (the TUN stack, where
+//! the peer is an app on the same host and loss happens when an interface
+//! queue overflows) or by sending one (the WireGuard outbound, where the
+//! peer is across the internet). There is no LISTEN state, and simultaneous
+//! open is refused.
 
+use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -18,18 +20,25 @@ use super::wire::{self, ACK, FIN, Opts, Out, PSH, RST, SYN, Seg};
 use super::{Ctx, Shared};
 
 const INITIAL_RTO: Duration = Duration::from_secs(1);
-/// Linux's floor. The path is local, so RTTs are far below this; the floor
-/// keeps scheduling stalls in a busy extension from firing spurious
+/// Linux's floor. On the TUN's local path RTTs are far below this, and the
+/// floor keeps scheduling stalls in a busy extension from firing spurious
 /// timeouts.
 const MIN_RTO: Duration = Duration::from_millis(200);
 const MAX_RTO: Duration = Duration::from_secs(60);
-const SYNACK_RETRIES: u32 = 5;
+/// SYN and SYN-ACK retransmissions: about a minute of backoff.
+const SYN_RETRIES: u32 = 5;
+/// RFC 6298 §5.7: the RTO once established when our SYN had to be
+/// retransmitted and no RTT sample was taken. (The passive side keeps the
+/// initial RTO after a lost SYN-ACK: on the TUN's local path the first data
+/// ACK gives a sample almost at once.)
+const SYN_LOSS_RTO: Duration = Duration::from_secs(3);
 /// About five minutes of backed-off retransmissions.
 const DATA_RETRIES: u32 = 12;
 /// RFC 6928.
 const INITIAL_WINDOW_SEGMENTS: u32 = 10;
-/// Kept short: TIME-WAIT only exists to re-ACK a retransmitted FIN, and a
-/// new SYN on the same 4-tuple replaces it anyway.
+/// Kept short: TIME-WAIT only exists to re-ACK a retransmitted FIN. On the
+/// passive side a new SYN on the same 4-tuple replaces it anyway; on the
+/// active side the port stays reserved until it ends.
 const TIME_WAIT: Duration = Duration::from_secs(5);
 /// How long a connection the engine has closed may keep draining its send
 /// buffer or waiting for the app's FIN.
@@ -39,12 +48,16 @@ const ORPHAN_LINGER: Duration = Duration::from_secs(60);
 /// (about as long as a kernel keeps retrying a connect).
 const HOLD_LIMIT: Duration = Duration::from_secs(75);
 /// Out-of-order segments held per connection; more are dropped and
-/// retransmitted by the peer.
-const MAX_OOO: usize = 64;
+/// retransmitted by the peer. The bytes held are already bounded by the
+/// advertised window (and reserved against the pool by `sync_promise`); this
+/// bounds the per-segment overhead of a peer sending tiny segments, while
+/// leaving room for a 1 MiB window of out-of-order data at a 1460-byte MSS.
+const MAX_OOO: usize = 1024;
 const MAX_SACK_SCOREBOARD: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
+    SynSent,
     SynReceived,
     Established,
     CloseWait,
@@ -122,7 +135,7 @@ pub struct Tcb {
     pool: Arc<Pool>,
     /// This connection's share of `Pool::promise`.
     promised: usize,
-    ooo: Vec<(u32, Vec<u8>)>,
+    ooo: VecDeque<(u32, Vec<u8>)>,
     last_ooo: Option<u32>,
     /// The peer's FIN, seen ahead of a gap.
     fin_at: Option<u32>,
@@ -149,6 +162,13 @@ pub struct Tcb {
     /// Karn's algorithm: the one segment being timed, unless retransmitted.
     rtt_seq: Option<(u32, Instant)>,
     retries: u32,
+    /// When the retransmission timer now firing was armed: the last ACK
+    /// that advanced `snd_una`, or the first send. A connection that keeps
+    /// making progress, however slowly, never reaches the user timeout.
+    stall_start: Option<Instant>,
+    /// Abort once data has gone unacknowledged this long (RFC 5482's user
+    /// timeout); `None` leaves it to `DATA_RETRIES`.
+    pub user_timeout: Option<Duration>,
 
     rto_at: Option<Instant>,
     persist: bool,
@@ -158,7 +178,11 @@ pub struct Tcb {
 
     ack_due: bool,
     ack_now: bool,
-    synack_due: bool,
+    /// Our SYN (active open) or SYN-ACK is to be sent.
+    syn_due: bool,
+    /// The receive window offered in our SYN (active open), which applies
+    /// from the peer's ISN once the SYN-ACK names it.
+    syn_wnd: u32,
     rst_due: bool,
     orphan: bool,
     pub wake_rd: bool,
@@ -174,6 +198,8 @@ pub struct Tcb {
 }
 
 impl Tcb {
+    /// `Tcb::connect` builds on this with a template SYN, relying on
+    /// `input_syn_sent` to re-derive every field taken from `seg`.
     #[allow(clippy::too_many_arguments)]
     pub fn from_syn(
         local: SocketAddr,
@@ -220,7 +246,7 @@ impl Tcb {
             tx_cap,
             pool,
             promised: 0,
-            ooo: Vec::new(),
+            ooo: VecDeque::new(),
             last_ooo: None,
             fin_at: None,
             ts_ok,
@@ -240,13 +266,16 @@ impl Tcb {
             rto: INITIAL_RTO,
             rtt_seq: None,
             retries: 0,
+            stall_start: None,
+            user_timeout: None,
             rto_at: None,
             persist: false,
             linger_at: defer.map(|now| now + HOLD_LIMIT),
             scheduled: None,
             ack_due: false,
             ack_now: false,
-            synack_due: defer.is_none(),
+            syn_due: defer.is_none(),
+            syn_wnd: 0,
             rst_due: false,
             orphan: false,
             wake_rd: false,
@@ -256,6 +285,37 @@ impl Tcb {
             accept_now: defer.is_some(),
             error: None,
         }
+    }
+
+    /// Active open: a connection in SYN-SENT whose SYN goes out on the next
+    /// `output`. Window scaling, SACK and timestamps are offered and used if
+    /// the SYN-ACK carries them too.
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect(
+        local: SocketAddr,
+        remote: SocketAddr,
+        iss: u32,
+        mtu: usize,
+        rx_cap: usize,
+        tx_cap: usize,
+        shared: Arc<Shared>,
+        pool: Arc<Pool>,
+    ) -> Self {
+        // Parameters as if the peer had offered everything; the SYN-ACK
+        // settles what is actually used.
+        let offer = Seg {
+            ws: Some(0),
+            sack_perm: true,
+            ts: Some((0, 0)),
+            ..Seg::default()
+        };
+        let mut t = Self::from_syn(local, remote, &offer, iss, mtu, rx_cap, tx_cap, shared, None, pool);
+        t.state = State::SynSent;
+        t.irs = 0;
+        t.rcv_nxt = 0;
+        t.rcv_adv = 0;
+        t.snd_wnd = 0;
+        t
     }
 
     pub fn irs(&self) -> u32 {
@@ -287,6 +347,9 @@ impl Tcb {
 
     pub fn input(&mut self, seg: &Seg, pkt: &[u8], cx: &mut Ctx<'_>) -> Result<(), Blocked> {
         let payload = &pkt[seg.payload.clone()];
+        if self.state == State::SynSent {
+            return self.input_syn_sent(seg, payload, cx);
+        }
         if self.state == State::SynReceived {
             if seg.has(RST) {
                 if seg.seq == self.rcv_nxt {
@@ -297,7 +360,7 @@ impl Tcb {
             if seg.has(SYN) {
                 // A retransmitted SYN: our SYN-ACK was lost (or is still
                 // waiting for the engine).
-                self.synack_due = !self.held;
+                self.syn_due = !self.held;
                 return Ok(());
             }
             if self.held {
@@ -379,6 +442,79 @@ impl Tcb {
             return Ok(());
         }
         self.on_data(seg, payload, cx);
+        self.flush_ack_now(cx)
+    }
+
+    /// RFC 9293 §3.10.7.3.
+    fn input_syn_sent(&mut self, seg: &Seg, payload: &[u8], cx: &mut Ctx<'_>) -> Result<(), Blocked> {
+        let ack_ok = seg.ack == self.iss.wrapping_add(1);
+        if seg.has(ACK) && !ack_ok {
+            return send_rst_for(self.local, self.remote, seg, cx);
+        }
+        if seg.has(RST) {
+            if seg.has(ACK) {
+                self.reset(io::ErrorKind::ConnectionRefused);
+            }
+            return Ok(());
+        }
+        if !seg.has(SYN) {
+            return Ok(());
+        }
+        if !seg.has(ACK) {
+            // Simultaneous open. Our ports are random and never listen, so
+            // only a confused peer gets here: refuse its SYN and give up.
+            self.reset(io::ErrorKind::ConnectionRefused);
+            return send_rst_for(self.local, self.remote, seg, cx);
+        }
+        let v6 = self.local.is_ipv6();
+        let link_mss = cx.mtu.saturating_sub(wire::ip_header_len(v6) + 20);
+        let peer_mss = seg.mss.map_or(if v6 { 1220 } else { 536 }, |m| m as usize);
+        self.ts_ok = seg.ts.is_some();
+        self.ts_recent = seg.ts.map_or(0, |t| t.0);
+        self.sack_ok = seg.sack_perm;
+        self.ws_ok = seg.ws.is_some();
+        self.snd_shift = seg.ws.unwrap_or(0);
+        if !self.ws_ok {
+            self.rcv_shift = 0;
+        }
+        self.seg_max = peer_mss.min(link_mss).max(64 + 12) as u32;
+        self.smss = (peer_mss.min(link_mss).saturating_sub(if self.ts_ok { 12 } else { 0 })).max(64) as u32;
+        self.cwnd = INITIAL_WINDOW_SEGMENTS * self.smss;
+        self.irs = seg.seq;
+        self.rcv_nxt = seg.seq.wrapping_add(1);
+        self.rcv_adv = self.rcv_nxt.wrapping_add(self.syn_wnd);
+        self.snd_una = seg.ack;
+        // Windows in a SYN are never scaled.
+        self.snd_wnd = seg.wnd as u32;
+        self.snd_wl1 = seg.seq;
+        self.snd_wl2 = seg.ack;
+        match self.rtt_seq.take() {
+            Some((_, t)) if self.retries == 0 => {
+                self.rtt_sample(cx.now - t);
+                self.rto = self.computed_rto();
+            }
+            _ => self.rto = SYN_LOSS_RTO,
+        }
+        self.retries = 0;
+        self.rto_at = None;
+        self.state = State::Established;
+        self.wake_wr = true;
+        {
+            let mut g = self.shared.m.lock().unwrap();
+            g.upd_thresh = (self.rx_cap / 2).min(self.smss as usize);
+            g.connected = true;
+        }
+        self.sync_promise();
+        self.ack_now = true;
+        if !payload.is_empty() || seg.has(FIN) {
+            // Data or a FIN on the SYN-ACK starts after the SYN.
+            let rest = Seg {
+                seq: seg.seq.wrapping_add(1),
+                flags: seg.flags & !SYN,
+                ..seg.clone()
+            };
+            self.on_data(&rest, payload, cx);
+        }
         self.flush_ack_now(cx)
     }
 
@@ -502,7 +638,10 @@ impl Tcb {
 
     /// Keep `Pool::promise` in step with the open window.
     fn sync_promise(&mut self) {
-        let open = if lt(self.rcv_adv, self.rcv_nxt) || self.rx_done() {
+        let open = if self.state == State::SynSent {
+            // The window our SYN offered, from wherever the peer starts.
+            self.syn_wnd as usize
+        } else if lt(self.rcv_adv, self.rcv_nxt) || self.rx_done() {
             0
         } else {
             self.rcv_adv.wrapping_sub(self.rcv_nxt) as usize
@@ -551,7 +690,7 @@ impl Tcb {
                     let mut g = self.shared.m.lock().unwrap();
                     g.rx.push(data);
                     self.rcv_nxt = self.rcv_nxt.wrapping_add(data.len() as u32);
-                    while let Some((s, d)) = self.ooo.first()
+                    while let Some((s, d)) = self.ooo.front()
                         && le(*s, self.rcv_nxt)
                     {
                         let end = s.wrapping_add(d.len() as u32);
@@ -560,7 +699,7 @@ impl Tcb {
                             g.rx.push(&d[skip..]);
                             self.rcv_nxt = end;
                         }
-                        self.ooo.remove(0);
+                        self.ooo.pop_front();
                     }
                 }
                 self.wake_rd = true;
@@ -570,7 +709,9 @@ impl Tcb {
                     self.ack_now = true;
                 }
             } else {
-                self.store_ooo(seq, data);
+                if !self.store_ooo(seq, data) {
+                    cx.stats.ooo_dropped += 1;
+                }
                 self.ack_now = true;
             }
         }
@@ -618,7 +759,21 @@ impl Tcb {
         self.linger_at = Some(now + TIME_WAIT);
     }
 
-    fn store_ooo(&mut self, seq: u32, data: &[u8]) {
+    /// False if the segment was dropped for want of room.
+    fn store_ooo(&mut self, seq: u32, data: &[u8]) -> bool {
+        // The common case past a hole: in order after everything held.
+        if self
+            .ooo
+            .back()
+            .is_some_and(|(es, ed)| le(es.wrapping_add(ed.len() as u32), seq))
+        {
+            if self.ooo.len() >= MAX_OOO {
+                return false;
+            }
+            self.ooo.push_back((seq, data.to_vec()));
+            self.last_ooo = Some(seq);
+            return true;
+        }
         let base = self.rcv_nxt;
         let key = |s: u32| s.wrapping_sub(base);
         let end = seq.wrapping_add(data.len() as u32);
@@ -643,13 +798,14 @@ impl Tcb {
             pieces.push((s, data[s.wrapping_sub(seq) as usize..].to_vec()));
         }
         if self.ooo.len() + pieces.len() > MAX_OOO {
-            return;
+            return false;
         }
         for p in pieces {
             let at = self.ooo.partition_point(|(es, _)| key(*es) < key(p.0));
             self.ooo.insert(at, p);
         }
         self.last_ooo = Some(seq);
+        true
     }
 
     /// Contiguous runs of out-of-order data: the one holding the most
@@ -827,7 +983,7 @@ impl Tcb {
                 // would, rather than routing each one again.
                 self.held = true;
                 self.blackhole = true;
-                self.synack_due = false;
+                self.syn_due = false;
                 self.rto_at = None;
                 self.linger_at = Some(now + HOLD_LIMIT);
             } else {
@@ -837,10 +993,10 @@ impl Tcb {
         }
         if g.accept && self.held && !self.blackhole {
             self.held = false;
-            self.synack_due = true;
+            self.syn_due = true;
             self.linger_at = None;
         }
-        if g.dropped && self.state == State::SynReceived && !self.blackhole {
+        if g.dropped && matches!(self.state, State::SynSent | State::SynReceived) && !self.blackhole {
             drop(g);
             self.abort(io::ErrorKind::ConnectionAborted);
             return;
@@ -880,15 +1036,19 @@ impl Tcb {
             return;
         }
         self.rto_at = None;
-        if self.state == State::SynReceived {
+        if matches!(self.state, State::SynSent | State::SynReceived) {
             self.retries += 1;
-            if self.retries > SYNACK_RETRIES {
-                self.state = State::Closed;
+            if self.retries > SYN_RETRIES {
+                if self.state == State::SynSent {
+                    self.reset(io::ErrorKind::TimedOut);
+                } else {
+                    self.state = State::Closed;
+                }
                 return;
             }
             self.rto = (self.rto * 2).min(MAX_RTO);
             self.rtt_seq = None;
-            self.synack_due = true;
+            self.syn_due = true;
             return;
         }
         if self.persist {
@@ -904,7 +1064,15 @@ impl Tcb {
             return;
         }
         self.retries += 1;
-        if self.retries > DATA_RETRIES {
+        if self.retries == 1 {
+            // The data has been waiting since the RTO that just expired.
+            self.stall_start = Some(now.checked_sub(self.rto).unwrap_or(now));
+        }
+        let gave_up = self
+            .user_timeout
+            .zip(self.stall_start)
+            .is_some_and(|(limit, since)| now.duration_since(since) >= limit);
+        if self.retries > DATA_RETRIES || gave_up {
             self.abort(io::ErrorKind::TimedOut);
             return;
         }
@@ -920,6 +1088,11 @@ impl Tcb {
         self.dupacks = 0;
         self.rtt_seq = None;
         self.rto = (self.rto * 2).min(MAX_RTO);
+        if let (Some(limit), Some(since)) = (self.user_timeout, self.stall_start) {
+            // Wake when the user timeout runs out, not a backed-off RTO later.
+            let left = (since + limit).saturating_duration_since(now);
+            self.rto = self.rto.min(left.max(MIN_RTO));
+        }
     }
 
     fn reset(&mut self, e: io::ErrorKind) {
@@ -928,6 +1101,12 @@ impl Tcb {
     }
 
     pub fn abort(&mut self, e: io::ErrorKind) {
+        if self.state == State::SynSent {
+            // RFC 9293 §3.10.4: nothing to reset before the peer answered;
+            // a late SYN-ACK finds no connection and is reset then.
+            self.reset(e);
+            return;
+        }
         self.rst_due = true;
         self.error.get_or_insert(e);
     }
@@ -944,10 +1123,10 @@ impl Tcb {
         }
         match self.state {
             State::Closed => return Ok(()),
-            State::SynReceived => {
-                if self.synack_due {
-                    self.send_synack(cx)?;
-                    self.synack_due = false;
+            State::SynSent | State::SynReceived => {
+                if self.syn_due {
+                    self.send_syn(cx)?;
+                    self.syn_due = false;
                     if self.rto_at.is_none() {
                         self.rto_at = Some(cx.now + self.rto);
                     }
@@ -1084,7 +1263,10 @@ impl Tcb {
         (seq, len, len < want && self.fin_seq == Some(seq.wrapping_add(len)))
     }
 
-    fn send_synack(&mut self, cx: &mut Ctx<'_>) -> Result<(), Blocked> {
+    /// Our SYN (SYN-SENT) or SYN-ACK (SYN-RECEIVED). An active open offers
+    /// every option; a passive one echoes those the app's SYN carried.
+    fn send_syn(&mut self, cx: &mut Ctx<'_>) -> Result<(), Blocked> {
+        let active = self.state == State::SynSent;
         let mut o = Opts::default();
         let v6 = self.local.is_ipv6();
         let link_mss = cx.mtu.saturating_sub(wire::ip_header_len(v6) + 20).min(65535);
@@ -1100,7 +1282,11 @@ impl Tcb {
         }
         // Windows in a SYN are never scaled.
         let wnd = self.rx_cap.min(65535).min(cx.pool.headroom().max(CHUNK)) as u16;
-        self.rcv_adv = self.rcv_nxt.wrapping_add(wnd as u32);
+        if active {
+            self.syn_wnd = self.syn_wnd.max(wnd as u32);
+        } else {
+            self.rcv_adv = self.rcv_nxt.wrapping_add(wnd as u32);
+        }
         self.sync_promise();
         let off = wire::payload_offset(v6, &o);
         cx.buf.clear();
@@ -1112,7 +1298,7 @@ impl Tcb {
                 dst: self.remote,
                 seq: self.iss,
                 ack: self.rcv_nxt,
-                flags: SYN | ACK,
+                flags: if active { SYN } else { SYN | ACK },
                 wnd,
                 opts: &o,
             },

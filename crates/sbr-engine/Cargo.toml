@@ -55,7 +55,7 @@ quinn-udp = { version = "0.6", default-features = false }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 md-5 = "0.10"
 boringtun = { version = "0.7", default-features = false }
-smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "proto-ipv4-fragmentation", "socket-tcp", "socket-tcp-cubic", "socket-udp", "async"] }
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "proto-ipv4-fragmentation", "socket-udp", "async"] }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 libc = "0.2"
