@@ -143,20 +143,20 @@ struct MenuBarContent: View {
 
     var body: some View {
         if let error = tunnel.errorMessage {
-            Text("error: \(Self.brief(error))")
+            Text("Error: \(Self.brief(error))")
         }
         Text(statusLine)
         if tunnel.needsApproval {
-            Button("allow sbr in system settings…") {
+            Button("Allow sbr in System Settings…") {
                 NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!)
             }
         }
-        Button(tunnel.isOn ? "disconnect" : "connect") {
+        Button(tunnel.isOn ? "Disconnect" : "Connect") {
             Task { await act { await tunnel.setOn(!tunnel.isOn) } }
         }
         .disabled(!tunnel.isOn && profiles.active == nil)
         if !profiles.profiles.isEmpty {
-            Picker("profile", selection: Binding(
+            Picker("Profile", selection: Binding(
                 get: { profiles.activeID },
                 set: { id in
                     guard let p = profiles.profiles.first(where: { $0.id == id }) else { return }
@@ -167,11 +167,11 @@ struct MenuBarContent: View {
             }
         }
         Divider()
-        Button("open sbr") { open() }
+        Button("Open sbr") { open() }
             .keyboardShortcut("o")
         loginItem
         Divider()
-        Button("quit sbr") { NSApp.terminate(nil) }
+        Button("Quit sbr") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
     }
 
@@ -181,8 +181,10 @@ struct MenuBarContent: View {
         return line.count > 60 ? String(line.prefix(59)) + "…" : String(line)
     }
 
+    /// The status labels are lowercase for the app's own UI; a menu item
+    /// starts with a capital, as macOS menus do.
     private var statusLine: String {
-        let state = tunnel.status.label
+        let state = tunnel.status.label.prefix(1).uppercased() + tunnel.status.label.dropFirst()
         guard let name = profiles.active?.name else { return state }
         return "\(state) · \(name)"
     }
@@ -209,11 +211,11 @@ struct MenuBarContent: View {
         let _ = loginItemRevision
         let status = SMAppService.mainApp.status
         if let reason = loginItemUnavailable {
-            Toggle("launch at login (\(reason))", isOn: .constant(false)).disabled(true)
+            Toggle("Launch at Login (\(reason))", isOn: .constant(false)).disabled(true)
         } else if status == .requiresApproval {
-            Button("launch at login: allow in system settings…") { SMAppService.openSystemSettingsLoginItems() }
+            Button("Launch at Login: Allow in System Settings…") { SMAppService.openSystemSettingsLoginItems() }
         } else {
-            Toggle("launch at login", isOn: Binding(
+            Toggle("Launch at Login", isOn: Binding(
                 get: { status == .enabled },
                 set: { on in
                     Task {
@@ -240,7 +242,7 @@ struct MenuBarContent: View {
     private var loginItemUnavailable: String? {
         #if SBR_SYSTEM_EXTENSION
         let path = Bundle.main.bundleURL.resolvingSymlinksInPath().standardizedFileURL.path
-        return path.hasPrefix("/Applications/") ? nil : "move sbr to applications"
+        return path.hasPrefix("/Applications/") ? nil : "move sbr to Applications"
         #else
         return nil
         #endif
