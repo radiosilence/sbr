@@ -1,19 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 ### Added
 
-- `ssh` outbound: OpenSSH banner and algorithm order, pinned host keys, one connection per outbound with a channel per stream (README, "SSH and sing-mux").
-- `multiplex` (sing-mux: smux, yamux, h2mux, padding, Brutal speed exchange) on vless, vmess, trojan and shadowsocks.
-- `sbr_check_warnings` in the C API; the app lists the active profile's warnings.
-- Config warnings for DNS servers that resolve outside the tunnel with a `tun` inbound: `local`, and plain UDP/TCP without a detour.
+- **macOS menu bar app.** sbr runs from the menu bar on macOS: connect, switch profiles and launch at login without opening a window. macOS 15 or later is required.
+- **Signed macOS releases.** Each release publishes a notarised disk image of the Developer ID build, with its system extension, on GitHub.
 
-### Changed
+### Fixed
 
-- Opening a remote profile link asks first and names the host it downloads from; the download sends no User-Agent.
-- Deleting the active profile stops the tunnel and deletes the extension's cache, rule-sets, logs and its copy of the profile.
-- Erase everything also deletes the extension's files when the tunnel is off.
-- With leak protection on, an on-demand rule restarts a tunnel the system stopped.
-- urltest data probes send no User-Agent.
-- `SbrConfigStore` keeps `config.json` out of backups.
+- **Connecting the Developer ID macOS build no longer hangs while its system extension awaits approval.** It reports that approval is needed and links to the settings pane.
+- **A failed VPN configuration save no longer leaves the previous profile in place.** The next connect saves it again, and a running tunnel takes the new profile and rules either way.
+
+### Internal
+
+- **`just release` and `just changelog`.** The release and changelog commands run through just, as in kōan.
