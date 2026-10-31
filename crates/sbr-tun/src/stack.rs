@@ -361,6 +361,24 @@ fn listen(addr: SocketAddr, interface: &str) -> io::Result<TcpListener> {
         if unsafe { libc::setsockopt(fd, level, name, (&raw const index).cast(), int_len) } != 0 {
             return Err(io::Error::last_os_error());
         }
+        // std and mio set this on the sockets they create, but this one is
+        // created here, and accepted connections inherit it from the
+        // listener. Without it, writing to a connection the app has reset
+        // raises SIGPIPE, which kills a process that has not ignored it.
+        let one: libc::c_int = 1;
+        // SAFETY: setsockopt with a c_int option value.
+        if unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                (&raw const one).cast(),
+                int_len,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
         let (storage, len) = sockaddr(addr);
         // SAFETY: `storage` holds a sockaddr of `len` bytes for this family.
         if unsafe { libc::bind(fd, (&raw const storage).cast(), len) } != 0 {

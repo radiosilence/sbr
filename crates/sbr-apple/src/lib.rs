@@ -248,6 +248,22 @@ impl Drop for Reply {
     }
 }
 
+/// What a Rust `main` does at startup and a library linked into the host
+/// never gets: without it, a write to a socket the peer has reset kills the
+/// process unless that socket has `SO_NOSIGPIPE`. A handler the host
+/// installed is left alone.
+fn ignore_sigpipe() {
+    #[cfg(unix)]
+    // SAFETY: sigaction with a zeroed out-parameter, then with a plain
+    // ignore disposition.
+    unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(libc::SIGPIPE, ptr::null(), &mut old) == 0 && old.sa_sigaction == libc::SIG_DFL {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        }
+    }
+}
+
 /// Run `f`, turning a panic into `default` so nothing unwinds across the ABI.
 fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
@@ -336,6 +352,7 @@ pub unsafe extern "C" fn sbr_start_ex(
 ) -> *mut SbrInstance {
     let r = guard(Err("internal error (panic)".to_owned()), || {
         log::install();
+        ignore_sigpipe();
         // SAFETY: NULL or valid per the contract.
         let o = unsafe { options.as_ref() }
             .copied()
