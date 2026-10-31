@@ -37,8 +37,8 @@ const MOBILE: bool = cfg!(any(
 /// sizes cost only what a flow actually has buffered. The receive buffer is
 /// the window advertised: 1 MiB covers about 80 Mbit/s at 100 ms. The send
 /// buffer also caps bytes in flight; against a sing-box peer on loopback,
-/// 1 MiB lifts single-stream upload by about a third over 256 KiB with no
-/// loss at four streams. iOS keeps 256 KiB each way (about 20 Mbit/s per
+/// 1 MiB lifts single-stream upload by about a third over 256 KiB and is
+/// about the same at four streams. iOS keeps 256 KiB each way (about 20 Mbit/s per
 /// flow at 100 ms) and caps all buffers together at 8 MiB, inside the Network
 /// Extension's ~50 MB alongside the TUN stack's own 8 MiB. At that cap
 /// windows stop opening and writes wait, with one buffer chunk (4 KiB) per
