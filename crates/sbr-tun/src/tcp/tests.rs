@@ -1534,7 +1534,7 @@ fn stalled_readers_at_the_memory_limit_leave_room_for_an_active_flow() {
     c.memory_limit = limit;
     let mut sim = Sim::client(c, 1500);
     sim.delay = Duration::from_millis(25);
-    let len = 128 << 10;
+    let len = 256 << 10;
     let mut srcs: Vec<Source> = (0..=stalled)
         .map(|i| Source {
             h: sim.listen(80, 4096, 256 << 10, true),
@@ -1544,8 +1544,8 @@ fn stalled_readers_at_the_memory_limit_leave_room_for_an_active_flow() {
         .collect();
     let mut fs: Vec<Option<Connecting>> = (0..=stalled).map(|_| Some(sim.dial(false, 80))).collect();
     let mut ss: Vec<Option<Stream>> = (0..=stalled).map(|_| None).collect();
-    // Connect everything (the active one too, unread) and let the stalled
-    // ones fill up to the cap.
+    // Connect everything and let the stalled ones fill up to the cap; the
+    // active one's server starts sending only once it is reached.
     sim.run(Duration::from_secs(60), |sim| {
         for (f, s) in fs.iter_mut().zip(ss.iter_mut()) {
             if let Some(r) = f.as_mut().and_then(poll_connect) {
@@ -1553,7 +1553,7 @@ fn stalled_readers_at_the_memory_limit_leave_room_for_an_active_flow() {
                 *f = None;
             }
         }
-        for src in &mut srcs {
+        for src in &mut srcs[..stalled] {
             src.step(sim);
         }
         ss.iter().all(Option::is_some) && sim.tcp.env().pool.headroom() == 0
@@ -1572,7 +1572,8 @@ fn stalled_readers_at_the_memory_limit_leave_room_for_an_active_flow() {
     });
     assert!(got == srcs[stalled].data, "active download corrupted");
     assert!(peak <= limit + floor, "peak {peak} over {limit} + {floor}");
-    // What was buffered before reading started, then a chunk per RTT.
+    // What was buffered before reading started, then a chunk per RTT. The
+    // bound is at this build's `CHUNK` (16 KiB here, 4 KiB on iOS).
     let rtt = 2 * sim.delay;
     let took = sim.now - start;
     let bound = rtt * (len / buf::CHUNK + 4) as u32;

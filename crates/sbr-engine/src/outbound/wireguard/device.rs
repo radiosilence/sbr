@@ -568,6 +568,9 @@ impl Device {
 
 /// Where the TCP stack sends: a pooled buffer in `tx_out`, at most
 /// `TX_BATCH` per round so the device gets to encrypt and send them.
+/// Refusing only at a full batch is what keeps `Blocked` from stalling a
+/// connection: a full batch makes the loop go round again without sleeping,
+/// and `Tcp::unblock` after egress lets that round flush.
 fn link<'a>(
     tx_out: &'a mut Vec<Vec<u8>>,
     pool: &'a mut Vec<Vec<u8>>,

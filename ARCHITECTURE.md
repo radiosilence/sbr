@@ -68,7 +68,7 @@ Tests: `tcp/tests.rs` runs the stack against smoltcp on a simulated link with a 
 
 The WireGuard outbound runs its TCP on the same stack (`Tcp::client`), adding the active-open half: SYN-SENT, offering window scale, SACK and timestamps and using whichever the peer echoes. It was on smoltcp sockets, which brought the fixed-ring problem above into the extension: 512 KiB per connection on iOS once a flow had cycled its rings, with no overall cap. On the elastic stack a connection costs only what it has buffered, and `stack::tcp_config` caps the outbound's buffers at 8 MiB on iOS, separate from the TUN stack's 8 MiB.
 
-The trade-off is at the cap. Each connection may always buffer one chunk (4 KiB on iOS) each way, so a WireGuard connection that finds the cap taken by stalled readers (relayed downloads whose app stopped reading) proceeds at about one chunk per round trip, about 40 KB/s at 100 ms. smoltcp never throttled: it kept allocating instead. With 256 KiB windows it takes 32 stalled connections to reach the cap.
+The trade-off is at the cap. Each connection may always buffer one chunk (4 KiB on iOS) each way, so a WireGuard connection that finds the cap taken by stalled readers (relayed downloads whose app stopped reading) proceeds no slower than about one chunk per round trip, about 40 KB/s at 100 ms, plus whatever window it was offered before the cap filled. smoltcp never throttled: it kept allocating instead. With 256 KiB windows it takes 32 stalled connections to reach the cap.
 
 smoltcp still carries the tunnel's UDP; IP fragments are reassembled before either stack sees them.
 

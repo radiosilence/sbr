@@ -167,6 +167,7 @@ pub struct Shared {
     pub tcp: Connector,
     pub v4: Option<Ipv4Address>,
     pub v6: Option<Ipv6Address>,
+    addrs: Vec<IpAddr>,
     /// Kicks the device task: a UDP datagram to send, a socket added, a
     /// rebind or handshake requested. (TCP streams wake it through `tcp`.)
     pub kick: Notify,
@@ -220,6 +221,7 @@ impl Shared {
             tcp,
             v4,
             v6,
+            addrs: addresses.iter().map(IpNet::addr).collect(),
             kick: Notify::new(),
             want_handshake: AtomicBool::new(false),
             rebind: AtomicBool::new(false),
@@ -248,10 +250,7 @@ impl Shared {
 
     /// One of our tunnel addresses.
     pub fn is_local(&self, ip: IpAddr) -> bool {
-        match ip {
-            IpAddr::V4(ip) => self.v4 == Some(ip),
-            IpAddr::V6(ip) => self.v6 == Some(ip),
-        }
+        self.addrs.contains(&ip)
     }
 }
 

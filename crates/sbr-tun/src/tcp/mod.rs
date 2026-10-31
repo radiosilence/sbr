@@ -461,12 +461,7 @@ impl Tcp {
         Self::with(cfg, mtu, None, now)
     }
 
-    fn with(
-        cfg: TcpConfig,
-        mtu: usize,
-        on_accept: Option<OnAccept>,
-        now: Instant,
-    ) -> Self {
+    fn with(cfg: TcpConfig, mtu: usize, on_accept: Option<OnAccept>, now: Instant) -> Self {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as u64);
