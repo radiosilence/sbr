@@ -72,6 +72,7 @@ impl Running {
             // pages actually touched count against the extension's memory.
             .stack_size(ENGINE_STACK)
             .spawn(move || {
+                crate::crash::alt_stack();
                 let mut b = match flavor {
                     Flavor::CurrentThread => tokio::runtime::Builder::new_current_thread(),
                     Flavor::MultiThread(n) => {
@@ -82,7 +83,12 @@ impl Running {
                         b
                     }
                 };
-                let rt = match b.max_blocking_threads(MAX_BLOCKING_THREADS).enable_all().build() {
+                let rt = match b
+                    .max_blocking_threads(MAX_BLOCKING_THREADS)
+                    .on_thread_start(crate::crash::alt_stack)
+                    .enable_all()
+                    .build()
+                {
                     Ok(rt) => rt,
                     Err(e) => {
                         let _ = ready_tx.send(Err(format!("runtime: {e}")));
