@@ -6,7 +6,7 @@ name: CI/CD
 # CD runs after `Checks` has passed on main: every push uploads the iOS app to
 # TestFlight, built from the xcframework the `Apple` job built and checked. A
 # push that changes the workspace version to one not yet released (a merged
-# `mise run release` pull request) also releases: the notarised macOS disk
+# `just release` pull request) also releases: the notarised macOS disk
 # image and the GitHub release, whose tag CI creates.
 on:
   push:
@@ -318,7 +318,7 @@ jobs:
               exit 1
             fi
             if ! grep -qxF "## $version" CHANGELOG.md; then
-              echo "::error::CHANGELOG.md has no section for $version: release with mise run release"
+              echo "::error::CHANGELOG.md has no section for $version: release with just release"
               exit 1
             fi
           fi
