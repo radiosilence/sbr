@@ -58,9 +58,9 @@ On macOS sbr is a menu bar app. It has no Dock icon until its window is open,
 and the window opens only when asked (from the menu, by opening the app again,
 or when a profile link arrives), never at launch or login. The status item is
 the arch, with its light while the tunnel is connected. The menu connects and
-disconnects, switches profiles and shows errors from the background. Its items
-use macOS title case rather than the window's lowercase, since the menu is
-system chrome and sits beside other apps' menus.
+disconnects, switches profiles and shows errors from the background. Its commands
+use macOS title case, since the menu is system chrome and sits beside other
+apps' menus; the status line is the app's own label and stays lowercase.
 
 The app delegate owns the tunnel and profile models, so launching at login
 loads them and keeps the VPN configuration pointed at the active profile with

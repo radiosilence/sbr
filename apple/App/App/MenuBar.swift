@@ -181,10 +181,8 @@ struct MenuBarContent: View {
         return line.count > 60 ? String(line.prefix(59)) + "…" : String(line)
     }
 
-    /// The status labels are lowercase for the app's own UI; a menu item
-    /// starts with a capital, as macOS menus do.
     private var statusLine: String {
-        let state = tunnel.status.label.prefix(1).uppercased() + tunnel.status.label.dropFirst()
+        let state = tunnel.status.label
         guard let name = profiles.active?.name else { return state }
         return "\(state) · \(name)"
     }
