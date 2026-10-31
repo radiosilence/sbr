@@ -296,12 +296,12 @@ impl Stack {
         UDP_BUF.with(|b| {
             let mut b = b.borrow_mut();
             let (pkt, frag) = &mut *b;
-            packet::build_udp(pkt, from, to, payload);
-            let len = pkt.len();
-            if len > self.mtu {
+            // Built after the headroom; the buffer is reused per thread.
+            packet::build_udp_at(pkt, HEADROOM, from, to, payload);
+            if pkt.len() - HEADROOM > self.mtu {
                 let mut r = Ok(());
                 let id = self.ids.fetch_add(1, Ordering::Relaxed);
-                if packet::fragment(pkt, self.mtu, id, HEADROOM, frag, |f| {
+                if packet::fragment(&pkt[HEADROOM..], self.mtu, id, HEADROOM, frag, |f| {
                     if r.is_ok() {
                         r = try_send(&self.device, f);
                     }
@@ -309,8 +309,6 @@ impl Stack {
                     return r;
                 }
             }
-            // Shift right to make headroom; the buffer is reused per thread.
-            pkt.splice(0..0, [0u8; HEADROOM]);
             try_send(&self.device, pkt)
         })
     }
