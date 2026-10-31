@@ -115,6 +115,11 @@ impl Pool {
     pub fn used(&self) -> usize {
         self.used.load(Ordering::Relaxed)
     }
+
+    #[cfg(test)]
+    pub fn promised(&self) -> usize {
+        self.promised.load(Ordering::Relaxed)
+    }
 }
 
 /// A FIFO of bytes stored in pooled chunks.

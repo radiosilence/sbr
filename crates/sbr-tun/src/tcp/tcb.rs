@@ -27,8 +27,10 @@ const MIN_RTO: Duration = Duration::from_millis(200);
 const MAX_RTO: Duration = Duration::from_secs(60);
 /// SYN and SYN-ACK retransmissions: about a minute of backoff.
 const SYN_RETRIES: u32 = 5;
-/// RFC 6298 §5.7: the RTO once established when the SYN or SYN-ACK had to
-/// be retransmitted and no RTT sample was taken.
+/// RFC 6298 §5.7: the RTO once established when our SYN had to be
+/// retransmitted and no RTT sample was taken. (The passive side keeps the
+/// initial RTO after a lost SYN-ACK: on the TUN's local path the first data
+/// ACK gives a sample almost at once.)
 const SYN_LOSS_RTO: Duration = Duration::from_secs(3);
 /// About five minutes of backed-off retransmissions.
 const DATA_RETRIES: u32 = 12;
@@ -49,7 +51,7 @@ const HOLD_LIMIT: Duration = Duration::from_secs(75);
 /// retransmitted by the peer. The bytes held are already bounded by the
 /// advertised window (and reserved against the pool by `sync_promise`); this
 /// bounds the per-segment overhead of a peer sending tiny segments, while
-/// leaving room for a full window of out-of-order data at the 1 MiB maximum.
+/// leaving room for a 1 MiB window of out-of-order data at a 1460-byte MSS.
 const MAX_OOO: usize = 1024;
 const MAX_SACK_SCOREBOARD: usize = 32;
 
@@ -189,6 +191,8 @@ pub struct Tcb {
 }
 
 impl Tcb {
+    /// `Tcb::connect` builds on this with a template SYN, relying on
+    /// `input_syn_sent` to re-derive every field taken from `seg`.
     #[allow(clippy::too_many_arguments)]
     pub fn from_syn(
         local: SocketAddr,
@@ -625,7 +629,10 @@ impl Tcb {
 
     /// Keep `Pool::promise` in step with the open window.
     fn sync_promise(&mut self) {
-        let open = if lt(self.rcv_adv, self.rcv_nxt) || self.rx_done() {
+        let open = if self.state == State::SynSent {
+            // The window our SYN offered, from wherever the peer starts.
+            self.syn_wnd as usize
+        } else if lt(self.rcv_adv, self.rcv_nxt) || self.rx_done() {
             0
         } else {
             self.rcv_adv.wrapping_sub(self.rcv_nxt) as usize
@@ -693,7 +700,9 @@ impl Tcb {
                     self.ack_now = true;
                 }
             } else {
-                self.store_ooo(seq, data);
+                if !self.store_ooo(seq, data) {
+                    cx.stats.ooo_dropped += 1;
+                }
                 self.ack_now = true;
             }
         }
@@ -741,7 +750,8 @@ impl Tcb {
         self.linger_at = Some(now + TIME_WAIT);
     }
 
-    fn store_ooo(&mut self, seq: u32, data: &[u8]) {
+    /// False if the segment was dropped for want of room.
+    fn store_ooo(&mut self, seq: u32, data: &[u8]) -> bool {
         let base = self.rcv_nxt;
         let key = |s: u32| s.wrapping_sub(base);
         let end = seq.wrapping_add(data.len() as u32);
@@ -766,13 +776,14 @@ impl Tcb {
             pieces.push((s, data[s.wrapping_sub(seq) as usize..].to_vec()));
         }
         if self.ooo.len() + pieces.len() > MAX_OOO {
-            return;
+            return false;
         }
         for p in pieces {
             let at = self.ooo.partition_point(|(es, _)| key(*es) < key(p.0));
             self.ooo.insert(at, p);
         }
         self.last_ooo = Some(seq);
+        true
     }
 
     /// Contiguous runs of out-of-order data: the one holding the most
@@ -1237,12 +1248,11 @@ impl Tcb {
         // Windows in a SYN are never scaled.
         let wnd = self.rx_cap.min(65535).min(cx.pool.headroom().max(CHUNK)) as u16;
         if active {
-            // Reserved against the pool once the SYN-ACK fixes where it starts.
             self.syn_wnd = self.syn_wnd.max(wnd as u32);
         } else {
             self.rcv_adv = self.rcv_nxt.wrapping_add(wnd as u32);
-            self.sync_promise();
         }
+        self.sync_promise();
         let off = wire::payload_offset(v6, &o);
         cx.buf.clear();
         cx.buf.resize(off, 0);

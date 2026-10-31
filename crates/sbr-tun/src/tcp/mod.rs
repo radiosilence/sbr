@@ -404,6 +404,8 @@ pub struct Stats {
     /// Retransmission timeouts (each resends from the first unacked byte).
     pub timeouts: u64,
     pub resets_out: u64,
+    /// Out-of-order segments dropped because the queue was full.
+    pub ooo_dropped: u64,
 }
 
 /// A packet sink for the stack: `buf` holds the packet at `[HEADROOM..]`.
