@@ -26,7 +26,15 @@ open Sbr.xcodeproj
 
 The App Store and TestFlight route uses the app extension on every platform.
 Developer ID distribution outside the store needs the system extension, which
-the user approves once in System Settings › Privacy & Security.
+the user approves once in System Settings › General › Login Items &
+Extensions. `apple/macos-release.sh` archives `SbrMac` and packages it as a
+disk image (`--notarise` also notarises and staples it); CI runs it for each
+release. Its Release configuration signs manually with the "sbr mac Developer
+ID" and "sbr mac tunnel Developer ID" profiles (bundle IDs `cc.blit.sbr.mac`
+and `cc.blit.sbr.mac.tunnel`), so archiving it locally needs them installed:
+`uv run apple/tools/fetch-profiles.py "sbr mac Developer ID" "sbr mac tunnel
+Developer ID"`. Each build gets a new build number, because macOS replaces an
+active system extension only when its version changes.
 
 Both bundle IDs need the **Network Extensions** and **App Groups**
 capabilities. The group is `group.cc.blit.sbr` on iOS and tvOS, and
