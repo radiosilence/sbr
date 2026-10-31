@@ -1,7 +1,7 @@
 # XcodeGen spec: `xcodegen generate` (see README.md).
 #
 # Targets
-#   Sbr                        iOS 17+, macOS 14+, tvOS 17+ app (SwiftUI)
+#   Sbr                        iOS 17+, macOS 15+, tvOS 17+ app (SwiftUI)
 #   SbrTunnel                  its packet tunnel, as an app extension
 #                              (iOS, tvOS, and Mac App Store style on macOS)
 #   SbrMac                     macOS Developer ID flavour of the same app ...
@@ -41,7 +41,7 @@ targets:
     supportedDestinations: [iOS, macOS, tvOS]
     deploymentTarget:
       iOS: "17.0"
-      macOS: "14.0"
+      macOS: "15.0"
       tvOS: "17.0"
     sources:
       - path: App
@@ -108,7 +108,7 @@ targets:
     supportedDestinations: [iOS, macOS, tvOS]
     deploymentTarget:
       iOS: "17.0"
-      macOS: "14.0"
+      macOS: "15.0"
       tvOS: "17.0"
     sources:
       - path: Tunnel
@@ -171,7 +171,7 @@ targets:
   SbrMac:
     type: application
     platform: macOS
-    deploymentTarget: "14.0"
+    deploymentTarget: "15.0"
     sources:
       - path: App
         excludes: ["*.entitlements"]
@@ -183,6 +183,9 @@ targets:
     info:
       path: Support/AppMac-Info.plist
       properties:
+        # The product is SbrMac.app, shipped as sbr.app; this names the app
+        # in its menus.
+        CFBundleName: sbr
         CFBundleDisplayName: sbr
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
@@ -199,11 +202,18 @@ targets:
         OTHER_LDFLAGS: $(inherited) -lresolv
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) SBR_SYSTEM_EXTENSION
         ENABLE_HARDENED_RUNTIME: YES
+      configs:
+        # Developer ID distribution (apple/macos-release.sh) signs with the
+        # API-provisioned profiles.
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Developer ID Application
+          PROVISIONING_PROFILE_SPECIFIER: sbr mac Developer ID
 
   SbrTunnelSystemExtension:
     type: system-extension
     platform: macOS
-    deploymentTarget: "14.0"
+    deploymentTarget: "15.0"
     sources:
       - Tunnel/PacketTunnelProvider.swift
       - SystemExtension/main.swift
@@ -221,5 +231,13 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID).mac.tunnel
+        # A system extension's bundle is named for its identifier, which is
+        # where the system looks for it inside the app.
+        PRODUCT_NAME: $(PRODUCT_BUNDLE_IDENTIFIER)
         CODE_SIGN_ENTITLEMENTS: SystemExtension/SystemExtension.entitlements
         ENABLE_HARDENED_RUNTIME: YES
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Developer ID Application
+          PROVISIONING_PROFILE_SPECIFIER: sbr mac tunnel Developer ID

@@ -1,15 +1,63 @@
 // Renders the sbr app icon: a brush-drawn archway on near-black with a mint
-// light at its threshold, in kōan's palette.
+// light at its threshold, in kōan's palette. With --glyph, it instead writes
+// the macOS menu bar glyphs into an asset catalog: the same arch as
+// black-on-clear template PDFs, with the light (MenuBarOn) and without it
+// (MenuBarOff).
+//
 // Usage: swift apple/tools/make-icon.swift <out.png> [size]
+//        swift apple/tools/make-icon.swift --glyph <Assets.xcassets>
 import CoreGraphics
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
 let args = CommandLine.arguments
-guard args.count >= 2 else {
-    FileHandle.standardError.write(Data("usage: make-icon.swift <out.png> [size]\n".utf8))
+guard args.count >= 2, args[1] != "--glyph" || args.count == 3 else {
+    FileHandle.standardError.write(Data("usage: make-icon.swift <out.png> [size] | --glyph <Assets.xcassets>\n".utf8))
     exit(2)
+}
+
+if args[1] == "--glyph" {
+    // 18pt square, the menu bar's usual glyph size. The arch spans 0.215–0.775
+    // of the icon, so it is drawn from a crop of that box with a thicker
+    // stroke, which keeps it legible at this size.
+    let pt: CGFloat = 18
+    let crop = CGRect(x: 0.19, y: 0.19, width: 0.62, height: 0.62)
+    for (name, lit) in [("MenuBarOn", true), ("MenuBarOff", false)] {
+        let dir = URL(fileURLWithPath: args[2]).appendingPathComponent("\(name).imageset")
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var box = CGRect(x: 0, y: 0, width: pt, height: pt)
+        let g = CGContext(dir.appendingPathComponent("\(name).pdf") as CFURL, mediaBox: &box, nil)!
+        g.beginPDFPage(nil)
+        g.translateBy(x: 0, y: pt)
+        g.scaleBy(x: pt / crop.width, y: -pt / crop.height)
+        g.translateBy(x: -crop.minX, y: -crop.minY)
+        let arch = CGMutablePath()
+        arch.addLines(between: archPoints())
+        g.addPath(arch)
+        g.setLineCap(.round)
+        g.setLineJoin(.round)
+        g.setStrokeColor(CGColor(gray: 0, alpha: 1))
+        g.setLineWidth(0.075)
+        g.strokePath()
+        if lit {
+            g.setFillColor(CGColor(gray: 0, alpha: 1))
+            let r = 0.065
+            g.fillEllipse(in: CGRect(x: 0.5 - r, y: 0.64 - r, width: r * 2, height: r * 2))
+        }
+        g.endPDFPage()
+        g.closePDF()
+        let contents = """
+        {
+          "images" : [ { "filename" : "\(name).pdf", "idiom" : "universal" } ],
+          "info" : { "author" : "xcode", "version" : 1 },
+          "properties" : { "preserves-vector-representation" : true, "template-rendering-intent" : "template" }
+        }
+
+        """
+        try! contents.write(to: dir.appendingPathComponent("Contents.json"), atomically: true, encoding: .utf8)
+    }
+    exit(0)
 }
 let size = args.count > 2 ? Int(args[2]) ?? 1024 : 1024
 let s = CGFloat(size)

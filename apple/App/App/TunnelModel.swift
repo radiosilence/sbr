@@ -1,6 +1,9 @@
 import Foundation
 import NetworkExtension
 import SbrKit
+#if os(macOS)
+import ServiceManagement
+#endif
 
 @MainActor
 final class TunnelModel: ObservableObject {
@@ -15,6 +18,9 @@ final class TunnelModel: ObservableObject {
     @Published var errorMessage: String?
     /// Why the tunnel last stopped without being asked to, from the system.
     @Published private(set) var lastStop: String?
+    /// The system extension is waiting for the user to allow it in System
+    /// Settings. Always false outside the Developer ID build.
+    @Published private(set) var needsApproval = false
     /// "Block traffic outside the tunnel": `Sbr.applyLeakProtection`. Follows
     /// the profile's `strict_route` until the user sets it. Applied the next
     /// time the tunnel connects.
@@ -115,10 +121,21 @@ final class TunnelModel: ObservableObject {
         rules = next
         UserDefaults.standard.set(SbrPersonalRules.encode(next), forKey: "personalRules")
         guard manager != nil, config != nil else { return }
+        await saveAndReload()
+    }
+
+    /// Save the VPN configuration and hand a running tunnel the profile and
+    /// rules. The running tunnel takes them even when saving failed; the
+    /// next connect saves again (installFailed).
+    private func saveAndReload() async {
         do {
             try await install()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        do {
             if isConnected, let session {
-                groups = try await session.send(.reload(config: config, remote: remote, logLevel: logLevel, rules: next))
+                groups = try await session.send(.reload(config: config, remote: remote, logLevel: logLevel, rules: rules))
                     .groups ?? groups
             }
         } catch {
@@ -127,6 +144,10 @@ final class TunnelModel: ObservableObject {
     }
 
     private var manager: NETunnelProviderManager?
+    /// The last install failed part-way, for example while the system
+    /// extension awaited approval, so the saved VPN configuration may name an
+    /// older profile and the next connect saves it again.
+    private var installFailed = false
     /// The active profile's config, carried in the VPN configuration.
     private var config: String?
     /// Where it came from, for the tunnel to refresh it itself.
@@ -139,6 +160,20 @@ final class TunnelModel: ObservableObject {
 
     var isOn: Bool { [.connected, .connecting, .reasserting].contains(status) }
     var isConnected: Bool { status == .connected }
+
+    #if SBR_SYSTEM_EXTENSION
+    init() {
+        SystemExtensionActivator.approvalChanged = { [weak self] error in
+            guard let self else { return }
+            needsApproval = SystemExtensionActivator.awaitingApproval
+            if let error {
+                errorMessage = error.localizedDescription
+            } else if !needsApproval, errorMessage == SystemExtensionActivator.approvalNeeded.description {
+                errorMessage = nil
+            }
+        }
+    }
+    #endif
 
     func load() async {
         do {
@@ -155,7 +190,7 @@ final class TunnelModel: ObservableObject {
 
     func setOn(_ on: Bool) async {
         do {
-            if manager == nil { try await install() }
+            if manager == nil || (on && installFailed) { try await install() }
             guard let manager else { return }
             try await TunnelControl.setOn(on, manager)
         } catch {
@@ -172,15 +207,7 @@ final class TunnelModel: ObservableObject {
         self.stored = stored
         profileStrict = config.map(Sbr.strictRoute) ?? false
         guard manager != nil, config != nil else { return }
-        do {
-            try await install()
-            if isConnected, let session {
-                groups = try await session.send(.reload(config: config, remote: remote, logLevel: logLevel, rules: rules))
-                    .groups ?? groups
-            }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        await saveAndReload()
     }
 
     func select(group: String, member: String) async {
@@ -340,6 +367,7 @@ final class TunnelModel: ObservableObject {
     /// nil keeps whatever a manual connect or disconnect last left it as.
     private func install(onDemand: Bool? = nil) async throws {
         guard config != nil else { throw SbrError("no profile selected") }
+        installFailed = true
         #if SBR_SYSTEM_EXTENSION
         try await SystemExtensionActivator.activate(identifier: AppConfig.tunnelBundleIdentifier)
         #endif
@@ -371,6 +399,7 @@ final class TunnelModel: ObservableObject {
         // A freshly saved manager must be reloaded before it can start.
         try await m.loadFromPreferences()
         manager = m
+        installFailed = false
         observeStatus()
     }
 
@@ -390,9 +419,19 @@ final class TunnelModel: ObservableObject {
                 errorMessage = error.localizedDescription
             }
         }
+        #if os(macOS)
+        if [.enabled, .requiresApproval].contains(SMAppService.mainApp.status) {
+            do {
+                try await SMAppService.mainApp.unregister()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+        #endif
         if let statusObserver { NotificationCenter.default.removeObserver(statusObserver) }
         statusObserver = nil
         manager = nil
+        installFailed = false
         status = .invalid
         groups = []
         stats = nil
