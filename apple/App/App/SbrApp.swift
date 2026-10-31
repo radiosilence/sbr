@@ -111,7 +111,7 @@ enum AppFlow {
     static let confirmTitle = "download this profile?"
 
     static func confirmMessage(_ link: ProfileLink) -> String {
-        "sbr will connect to \(link.url.host ?? "an unknown host") directly, outside any tunnel. Only continue if you trust this link."
+        "sbr will download it from \(link.url.host ?? "an unknown host"). Only continue if you trust this link."
     }
 
     static func importLink(_ link: ProfileLink, tunnel: TunnelModel, profiles: ProfileStore) async {

@@ -380,6 +380,19 @@ impl Inner {
         dial.await.map_err(|e| copy_err(&e))
     }
 
+    /// Stop handing out `conn`, leaving it to its channels: it closes when
+    /// the last one ends.
+    fn retire(&self, conn: &Arc<Conn>) {
+        let mut st = self.state.lock().unwrap();
+        if matches!(&*st, State::Up(c) if Arc::ptr_eq(c, conn)) {
+            *st = State::Down;
+        }
+    }
+
+    fn is_current(&self, conn: &Arc<Conn>) -> bool {
+        matches!(&*self.state.lock().unwrap(), State::Up(c) if Arc::ptr_eq(c, conn))
+    }
+
     /// Drop `conn` if it is still the current one.
     fn discard(&self, conn: &Arc<Conn>) {
         let mut st = self.state.lock().unwrap();
@@ -425,11 +438,14 @@ impl Inner {
                     ));
                 }
                 Ok(Err(e)) if attempt == 1 => return Err(ssh_err(e)),
+                // Unanswered keepalive: dead, or wedged by a full channel
+                // queue. Its channels keep it; new ones go to a fresh one.
                 Err(_) if attempt == 1 => {
-                    self.discard(&conn);
+                    self.retire(&conn);
                     return Err(io::Error::new(io::ErrorKind::TimedOut, "ssh: channel open timed out"));
                 }
-                Ok(Err(_)) | Err(_) => self.discard(&conn),
+                Err(_) => self.retire(&conn),
+                Ok(Err(_)) => self.discard(&conn),
             }
         }
         unreachable!("the second attempt returns")
@@ -445,8 +461,10 @@ impl Inner {
 }
 
 /// Open a channel. The server answers only once its own connect to the
-/// destination finishes, so a slow open is told from a dead connection by
-/// a keepalive: `Err(Elapsed)` only when that goes unanswered too.
+/// destination finishes, so a slow open is told from a stuck connection by
+/// a keepalive: `Err(Elapsed)` only when that goes unanswered too. (A
+/// keepalive also "returns" when the session has ended; the open then fails
+/// at once.)
 async fn open_channel(
     conn: &Conn,
     host: &str,
@@ -492,7 +510,8 @@ impl Drop for ChannelGuard {
         if !self.conn.idle.release() {
             return;
         }
-        if self.inner.strong_count() == 0 {
+        // Gone, or retired: nothing will hand this connection out again.
+        if !self.inner.upgrade().is_some_and(|i| i.is_current(&self.conn)) {
             close(&self.conn);
             return;
         }

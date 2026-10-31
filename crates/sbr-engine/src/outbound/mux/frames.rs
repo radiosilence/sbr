@@ -294,8 +294,12 @@ impl Session {
             write: Some((Box::pin(fut), 0)),
             wbuf: None,
             fin_sent: false,
+            opened: true,
         };
-        std::future::poll_fn(|cx| stream.poll_done(cx)).await?;
+        if let Err(e) = std::future::poll_fn(|cx| stream.poll_done(cx)).await {
+            stream.opened = false;
+            return Err(e);
+        }
         if self.proto == Proto::Yamux {
             let me = Arc::downgrade(self);
             tokio::spawn(async move {
@@ -457,6 +461,8 @@ pub struct FrameStream {
     write: Option<(WriteFut, usize)>,
     wbuf: Option<Vec<u8>>,
     fin_sent: bool,
+    /// The SYN is out (or in flight): closing it means telling the peer.
+    opened: bool,
 }
 
 impl FrameStream {
@@ -598,7 +604,7 @@ impl Drop for FrameStream {
         if self.session.proto == Proto::Smux {
             self.session.budget.add_permits(unread);
         }
-        if !removed || self.session.is_closed() {
+        if !removed || self.session.is_closed() || !self.opened {
             return;
         }
         // yamux: a stream dropped before the peer finished is reset, so the
@@ -613,8 +619,10 @@ impl Drop for FrameStream {
         let (session, id) = (self.session.clone(), self.id);
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(async move {
-                if let Some((f, _)) = in_flight {
-                    let _ = f.await;
+                if let Some((f, _)) = in_flight
+                    && f.await.0.is_err()
+                {
+                    return;
                 }
                 if let Some((kind, flags)) = frame {
                     let _ = session.control(kind, flags, id, 0).await;
