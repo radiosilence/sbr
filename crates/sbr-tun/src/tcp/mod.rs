@@ -417,6 +417,8 @@ struct Slot {
     tcb: Option<Box<Tcb>>,
 }
 
+type OnAccept = Box<dyn FnMut(SocketAddr, SocketAddr, Stream) + Send>;
+
 /// Every connection on one interface: the TUN (answering SYNs) or a
 /// WireGuard tunnel (sending them).
 pub struct Tcp {
@@ -424,7 +426,7 @@ pub struct Tcp {
     mtu: usize,
     env: Arc<Env>,
     /// None for a client stack, which resets every SYN it did not ask for.
-    on_accept: Option<Box<dyn FnMut(SocketAddr, SocketAddr, Stream) + Send>>,
+    on_accept: Option<OnAccept>,
     table: FxHashMap<(SocketAddr, SocketAddr), u32>,
     slots: Vec<Slot>,
     free: Vec<u32>,
@@ -459,11 +461,10 @@ impl Tcp {
         Self::with(cfg, mtu, None, now)
     }
 
-    #[allow(clippy::type_complexity)]
     fn with(
         cfg: TcpConfig,
         mtu: usize,
-        on_accept: Option<Box<dyn FnMut(SocketAddr, SocketAddr, Stream) + Send>>,
+        on_accept: Option<OnAccept>,
         now: Instant,
     ) -> Self {
         let seed = std::time::SystemTime::now()
