@@ -67,7 +67,6 @@ impl Pool {
         }
     }
 
-    /// Wake `w` when memory is freed.
     /// Wake `w` on the next `put`. Callers check `headroom` again after
     /// this: a `put` between their first check and this call sees no waiter.
     /// `waiting` and `used` are sequentially consistent so that either the

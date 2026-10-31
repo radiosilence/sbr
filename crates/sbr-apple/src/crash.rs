@@ -50,7 +50,7 @@ pub fn install(path: &str) -> io::Result<()> {
             unsafe {
                 let mut action: libc::sigaction = std::mem::zeroed();
                 action.sa_sigaction = on_signal as *const () as libc::sighandler_t;
-                action.sa_flags = libc::SA_ONSTACK;
+                action.sa_flags = libc::SA_ONSTACK | libc::SA_SIGINFO;
                 libc::sigemptyset(&mut action.sa_mask);
                 let mut previous: libc::sigaction = std::mem::zeroed();
                 if libc::sigaction(sig, &action, &mut previous) == 0 {
@@ -70,7 +70,7 @@ fn write_all(bytes: &[u8]) {
     }
 }
 
-extern "C" fn on_signal(sig: c_int) {
+extern "C" fn on_signal(sig: c_int, info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
     let msg: &[u8] = match sig {
         libc::SIGSEGV => b"fatal signal SIGSEGV (bad memory access or stack overflow)\n",
         libc::SIGBUS => b"fatal signal SIGBUS\n",
@@ -80,16 +80,24 @@ extern "C" fn on_signal(sig: c_int) {
         _ => b"fatal signal\n",
     };
     write_all(msg);
-    let previous = SIGNALS.iter().position(|&s| s == sig).and_then(|i| PREVIOUS[i].get());
-    // SAFETY: sigaction, signal and raise are async-signal-safe.
+    let previous = SIGNALS
+        .iter()
+        .position(|&s| s == sig)
+        .and_then(|i| PREVIOUS[i].get())
+        // Ignoring a fault would only loop on it: those die as by default.
+        .filter(|p| p.sa_sigaction != libc::SIG_DFL && p.sa_sigaction != libc::SIG_IGN);
+    // SAFETY: `info` is the kernel's for this signal; sigaction, signal and
+    // raise are async-signal-safe.
     unsafe {
+        let sent = !info.is_null() && matches!((*info).si_code, libc::SI_USER | libc::SI_QUEUE);
         match previous {
             Some(previous) => {
                 libc::sigaction(sig, previous, std::ptr::null_mut());
                 // A hardware fault recurs when the faulting instruction runs
                 // again on return, and reaches the previous handler with its
                 // real siginfo and context, which a raised copy would lack.
-                if sig != libc::SIGABRT {
+                // One sent by kill() or raise() would not recur.
+                if sig != libc::SIGABRT && !sent {
                     return;
                 }
             }

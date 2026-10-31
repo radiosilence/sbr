@@ -208,7 +208,13 @@ impl Reply {
             error,
         };
         deliver(call, |f| {
-            std::thread::Builder::new().name("sbr-reply".into()).spawn(f).map(drop)
+            std::thread::Builder::new()
+                .name("sbr-reply".into())
+                .spawn(move || {
+                    sbr_engine::signal_stack::install();
+                    f()
+                })
+                .map(drop)
         });
     }
 }

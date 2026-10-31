@@ -703,6 +703,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for VmessStream<S> {
                     out.put_slice(&this.rbuf[s..s + n]);
                     this.rstate = if s + n == e || this.datagrams {
                         if this.rbuf.len() > RBUF && this.rpos == this.rend {
+                            (this.rpos, this.rend) = (0, 0);
                             this.rbuf.truncate(RBUF);
                             this.rbuf.shrink_to_fit();
                         }

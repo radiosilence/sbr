@@ -46,7 +46,7 @@ impl DomainSet {
             // rule-set's load; a set whose lazy DFA outgrows its cache falls
             // back to slower engines per search instead.
             let (size, dfa) = if MOBILE {
-                (1 << 20, 256 << 10)
+                (4 << 20, 512 << 10)
             } else {
                 (10 << 20, 2 << 20)
             };

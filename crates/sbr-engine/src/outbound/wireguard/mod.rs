@@ -54,7 +54,20 @@ struct Running {
     started: std::time::Instant,
     /// Detour receive tasks: they end only when a datagram finds the device
     /// gone, so they are stopped with it.
-    readers: Vec<JoinHandle<()>>,
+    readers: Readers,
+}
+
+/// Detour receive tasks, aborted when dropped: with the device, or when
+/// `start` fails after spawning some of them.
+#[derive(Default)]
+struct Readers(Vec<JoinHandle<()>>);
+
+impl Drop for Readers {
+    fn drop(&mut self) {
+        for r in &self.0 {
+            r.abort();
+        }
+    }
 }
 
 /// A device that stopped this soon after starting is not restarted until
@@ -65,9 +78,6 @@ const RESTART_AFTER: Duration = Duration::from_secs(5);
 impl Drop for Running {
     fn drop(&mut self) {
         self.task.abort();
-        for r in &self.readers {
-            r.abort();
-        }
         fail_sockets(&self.shared);
     }
 }
@@ -162,7 +172,7 @@ impl WireGuard {
         }
 
         let mut rebind = None;
-        let mut readers = Vec::new();
+        let mut readers = Readers::default();
         let transport = match &self.upstream {
             Upstream::System(opts, dns) => {
                 for (peer, p) in peers.iter_mut().zip(&cfg.peers) {
@@ -205,7 +215,7 @@ impl WireGuard {
                     let dest = Destination::from_host_port(host, p.port);
                     let conn: Arc<dyn PacketConn> = Arc::from(out.connect_udp(&dest).await?);
                     let (c, tx) = (conn.clone(), tx.clone());
-                    readers.push(tokio::spawn(async move {
+                    readers.0.push(tokio::spawn(async move {
                         let mut buf = vec![0u8; 65535];
                         while let Ok((n, _)) = c.recv_from(&mut buf).await {
                             if tx.send((i, buf[..n].to_vec())).await.is_err() {

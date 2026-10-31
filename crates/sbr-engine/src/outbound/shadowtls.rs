@@ -522,9 +522,10 @@ struct Framed {
 
 /// Longest record body a v3 server sends: its own frames are a TLS
 /// plaintext record plus the tag, and the records it forwards from the
-/// cover server are TLS 1.3 ciphertext (RFC 8446 §5.2). v2 relays whatever
-/// the server wraps, so it keeps the full 16-bit length.
-const V3_MAX_RECORD: usize = MAX_PLAINTEXT + 256;
+/// cover server are TLS ciphertext, at most 2^14 + 2048 bytes even under
+/// TLS 1.2 (RFC 5246 §6.2.3). v2 relays whatever the server wraps, so it
+/// keeps the full 16-bit length.
+const V3_MAX_RECORD: usize = MAX_PLAINTEXT + 2048;
 
 impl Framed {
     fn new(inner: Stream, mode: Mode) -> Self {

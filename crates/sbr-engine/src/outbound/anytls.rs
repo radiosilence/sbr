@@ -61,7 +61,10 @@ const STREAM_QUEUE: usize = 32;
 /// Bytes buffered per stream before the session reader waits. Frames are up
 /// to 64 KiB, so the frame count alone would let one slow reader hold 2 MiB.
 const STREAM_BUFFER: u32 = 256 * 1024;
-/// A session write that makes no progress for this long closes the session.
+/// A session write (at most one frame, with its padding) that has not
+/// finished in this long closes the session. Frames are as large as the
+/// relay's writes, 16 KiB on iOS, so only a link below about 600 B/s hits it
+/// without the server having stopped reading.
 /// The writer is shared, so a server that stops reading would otherwise hold
 /// every stream's writes, and the tasks that finish dropped streams, forever.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
