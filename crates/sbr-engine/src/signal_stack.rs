@@ -1,81 +1,92 @@
-//! Alternate signal stacks for the threads sbr starts.
+//! Alternate signal stacks for the threads sbr starts. tvOS and watchOS
+//! prohibit `sigaltstack`, so there `install` does nothing and a stack
+//! overflow dies without breadcrumbs.
 
-use std::cell::RefCell;
+#[cfg(any(target_os = "tvos", target_os = "watchos"))]
+pub fn install() {}
 
-/// Signal stack size: the handler formats nothing and only
-/// calls write(2).
-const ALT_STACK: usize = 64 * 1024;
+#[cfg(not(any(target_os = "tvos", target_os = "watchos")))]
+pub use imp::install;
 
-thread_local! {
-    static ALT: RefCell<Option<AltStack>> = const { RefCell::new(None) };
-}
+#[cfg(not(any(target_os = "tvos", target_os = "watchos")))]
+mod imp {
+    use std::cell::RefCell;
 
-/// Owns the memory registered with `sigaltstack`.
-struct AltStack(Option<Box<[u8]>>);
+    /// Signal stack size: the handler formats nothing and only
+    /// calls write(2).
+    const ALT_STACK: usize = 64 * 1024;
 
-impl Drop for AltStack {
-    fn drop(&mut self) {
-        if !disable() {
-            // Still registered: freeing it would leave signals a stack in
-            // freed memory. Leak it instead.
-            std::mem::forget(self.0.take());
+    thread_local! {
+        static ALT: RefCell<Option<AltStack>> = const { RefCell::new(None) };
+    }
+
+    /// Owns the memory registered with `sigaltstack`.
+    struct AltStack(Option<Box<[u8]>>);
+
+    impl Drop for AltStack {
+        fn drop(&mut self) {
+            if !disable() {
+                // Still registered: freeing it would leave signals a stack in
+                // freed memory. Leak it instead.
+                std::mem::forget(self.0.take());
+            }
         }
     }
-}
 
-/// Turn off this thread's alternate stack. Darwin refuses `SS_DISABLE`
-/// with a zeroed stack, so the current one is passed back with the flag.
-/// False if it may still be registered.
-fn disable() -> bool {
-    // SAFETY: querying and then disabling this thread's alternate stack.
-    unsafe {
-        let mut ss: libc::stack_t = std::mem::zeroed();
-        if libc::sigaltstack(std::ptr::null(), &mut ss) != 0 {
-            return false;
-        }
-        ss.ss_flags = libc::SS_DISABLE;
-        libc::sigaltstack(&ss, std::ptr::null_mut()) == 0
-    }
-}
-
-/// Give the calling thread an alternate signal stack, freed when it exits.
-/// Rust sets these up only when it owns `main`, which a library linked into
-/// a host app does not; without one a stack overflow cannot run a fault
-/// handler (sbr-apple's crash breadcrumbs), and the process dies without a
-/// trace. Call it on every thread sbr starts.
-pub fn install() {
-    ALT.with(|a| {
-        let mut a = a.borrow_mut();
-        if a.is_some() {
-            return;
-        }
-        // SAFETY: querying this thread's alternate stack.
-        let existing = unsafe {
+    /// Turn off this thread's alternate stack. Darwin refuses `SS_DISABLE`
+    /// with a zeroed stack, so the current one is passed back with the flag.
+    /// False if it may still be registered.
+    fn disable() -> bool {
+        // SAFETY: querying and then disabling this thread's alternate stack.
+        unsafe {
             let mut ss: libc::stack_t = std::mem::zeroed();
-            libc::sigaltstack(std::ptr::null(), &mut ss) == 0 && ss.ss_flags & libc::SS_DISABLE == 0
-        };
-        if existing {
-            // Rust's own, when it owns `main`, or the host's.
-            return;
-        }
-        let mut mem = vec![0u8; ALT_STACK].into_boxed_slice();
-        // SAFETY: `mem` outlives the registration: `AltStack::drop` disables
-        // it first.
-        let ok = unsafe {
-            let ss = libc::stack_t {
-                ss_sp: mem.as_mut_ptr().cast(),
-                ss_size: mem.len(),
-                ss_flags: 0,
-            };
+            if libc::sigaltstack(std::ptr::null(), &mut ss) != 0 {
+                return false;
+            }
+            ss.ss_flags = libc::SS_DISABLE;
             libc::sigaltstack(&ss, std::ptr::null_mut()) == 0
-        };
-        if ok {
-            *a = Some(AltStack(Some(mem)));
         }
-    });
+    }
+
+    /// Give the calling thread an alternate signal stack, freed when it exits.
+    /// Rust sets these up only when it owns `main`, which a library linked into
+    /// a host app does not; without one a stack overflow cannot run a fault
+    /// handler (sbr-apple's crash breadcrumbs), and the process dies without a
+    /// trace. Call it on every thread sbr starts.
+    pub fn install() {
+        ALT.with(|a| {
+            let mut a = a.borrow_mut();
+            if a.is_some() {
+                return;
+            }
+            // SAFETY: querying this thread's alternate stack.
+            let existing = unsafe {
+                let mut ss: libc::stack_t = std::mem::zeroed();
+                libc::sigaltstack(std::ptr::null(), &mut ss) == 0 && ss.ss_flags & libc::SS_DISABLE == 0
+            };
+            if existing {
+                // Rust's own, when it owns `main`, or the host's.
+                return;
+            }
+            let mut mem = vec![0u8; ALT_STACK].into_boxed_slice();
+            // SAFETY: `mem` outlives the registration: `AltStack::drop` disables
+            // it first.
+            let ok = unsafe {
+                let ss = libc::stack_t {
+                    ss_sp: mem.as_mut_ptr().cast(),
+                    ss_size: mem.len(),
+                    ss_flags: 0,
+                };
+                libc::sigaltstack(&ss, std::ptr::null_mut()) == 0
+            };
+            if ok {
+                *a = Some(AltStack(Some(mem)));
+            }
+        });
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(any(target_os = "tvos", target_os = "watchos"))))]
 mod tests {
     #[test]
     fn threads_get_an_alt_stack() {

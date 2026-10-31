@@ -1,0 +1,1 @@
+- **tvOS builds again.** tvOS prohibits `sigaltstack`, which the alternate signal stacks from #27 called unconditionally; there they are skipped.
