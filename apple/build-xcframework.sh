@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Build apple/SbrCore.xcframework (static library + sbr.h module) for:
-#   iOS, iOS Simulator (arm64 + x86_64), macOS (arm64 + x86_64),
-#   Mac Catalyst (arm64 + x86_64), tvOS and tvOS Simulator (arm64 + x86_64).
+#   iOS, iOS Simulator (arm64), macOS (arm64 + x86_64),
+#   Mac Catalyst (arm64 + x86_64), tvOS and tvOS Simulator (arm64).
 #
-# Run on macOS with Xcode and rustup. tvOS targets are Rust tier 3 (no
-# prebuilt std): they build with nightly + -Zbuild-std, so install
-#   rustup toolchain install nightly --component rust-src
-# or skip them with SBR_SKIP_TVOS=1. SBR_SKIP_CATALYST=1 skips Catalyst.
+# Run on macOS with Xcode and rustup. SBR_SKIP_TVOS=1 skips tvOS and
+# SBR_SKIP_CATALYST=1 skips Catalyst. The simulators are arm64 only: Intel
+# simulators would need an Intel Mac, and x86_64 tvOS has no prebuilt std.
+#
+# Every target builds in one cargo invocation, so their final LTO passes,
+# each single-threaded, run side by side rather than one after another.
 #
 # Release profile: fat LTO, one codegen unit (workspace Cargo.toml), no debug
 # info. The archives are deliberately not run through strip(1): it corrupts
@@ -19,24 +21,18 @@ export IPHONEOS_DEPLOYMENT_TARGET=15.0 MACOSX_DEPLOYMENT_TARGET=12.0 TVOS_DEPLOY
 export CARGO_PROFILE_RELEASE_DEBUG=0
 
 IOS=(aarch64-apple-ios)
-IOS_SIM=(aarch64-apple-ios-sim x86_64-apple-ios)
+IOS_SIM=(aarch64-apple-ios-sim)
 MACOS=(aarch64-apple-darwin x86_64-apple-darwin)
 CATALYST=(aarch64-apple-ios-macabi x86_64-apple-ios-macabi)
 TVOS=(aarch64-apple-tvos)
-TVOS_SIM=(aarch64-apple-tvos-sim x86_64-apple-tvos)
+TVOS_SIM=(aarch64-apple-tvos-sim)
 
-STABLE=("${IOS[@]}" "${IOS_SIM[@]}" "${MACOS[@]}")
-[ "${SBR_SKIP_CATALYST:-0}" = 1 ] || STABLE+=("${CATALYST[@]}")
+TARGETS=("${IOS[@]}" "${IOS_SIM[@]}" "${MACOS[@]}")
+[ "${SBR_SKIP_CATALYST:-0}" = 1 ] || TARGETS+=("${CATALYST[@]}")
+[ "${SBR_SKIP_TVOS:-0}" = 1 ] || TARGETS+=("${TVOS[@]}" "${TVOS_SIM[@]}")
 
-rustup target add "${STABLE[@]}"
-for t in "${STABLE[@]}"; do
-  cargo build --release -p sbr-apple --target "$t"
-done
-if [ "${SBR_SKIP_TVOS:-0}" != 1 ]; then
-  for t in "${TVOS[@]}" "${TVOS_SIM[@]}"; do
-    cargo +nightly build --release -p sbr-apple --target "$t" -Zbuild-std=std,panic_unwind
-  done
-fi
+rustup target add "${TARGETS[@]}"
+cargo build --release -p sbr-apple "${TARGETS[@]/#/--target=}"
 
 lib=libsbr_apple.a
 OUT=apple/build
