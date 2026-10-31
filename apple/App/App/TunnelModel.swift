@@ -133,6 +133,10 @@ final class TunnelModel: ObservableObject {
     }
 
     private var manager: NETunnelProviderManager?
+    /// The last install failed part-way, for example while the system
+    /// extension awaited approval, so the saved VPN configuration may name an
+    /// older profile and the next connect saves it again.
+    private var installFailed = false
     /// The active profile's config, carried in the VPN configuration.
     private var config: String?
     /// Where it came from, for the tunnel to refresh it itself.
@@ -146,12 +150,15 @@ final class TunnelModel: ObservableObject {
     var isOn: Bool { [.connected, .connecting, .reasserting].contains(status) }
     var isConnected: Bool { status == .connected }
 
-    func load() async {
-        #if SBR_SYSTEM_EXTENSION
+    #if SBR_SYSTEM_EXTENSION
+    init() {
         SystemExtensionActivator.approvalChanged = { [weak self] in
             self?.needsApproval = SystemExtensionActivator.awaitingApproval
         }
-        #endif
+    }
+    #endif
+
+    func load() async {
         do {
             let all = try await NETunnelProviderManager.loadAllFromPreferences()
             manager = all.first {
@@ -166,7 +173,7 @@ final class TunnelModel: ObservableObject {
 
     func setOn(_ on: Bool) async {
         do {
-            if manager == nil { try await install() }
+            if manager == nil || installFailed { try await install() }
             guard let manager else { return }
             try await TunnelControl.setOn(on, manager)
         } catch {
@@ -351,6 +358,7 @@ final class TunnelModel: ObservableObject {
     /// nil keeps whatever a manual connect or disconnect last left it as.
     private func install(onDemand: Bool? = nil) async throws {
         guard config != nil else { throw SbrError("no profile selected") }
+        installFailed = true
         #if SBR_SYSTEM_EXTENSION
         try await SystemExtensionActivator.activate(identifier: AppConfig.tunnelBundleIdentifier)
         #endif
@@ -382,6 +390,7 @@ final class TunnelModel: ObservableObject {
         // A freshly saved manager must be reloaded before it can start.
         try await m.loadFromPreferences()
         manager = m
+        installFailed = false
         observeStatus()
     }
 
