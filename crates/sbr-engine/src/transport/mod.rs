@@ -2,7 +2,7 @@
 //! optional TLS, then an optional v2ray transport. Every layer takes a
 //! [`Stream`] and yields one.
 
-mod h2;
+pub(crate) mod h2;
 mod http;
 mod prefixed;
 mod ws;

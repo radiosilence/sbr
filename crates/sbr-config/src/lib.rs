@@ -269,6 +269,8 @@ pub struct ShadowsocksOutbound {
     /// `None`: TCP and UDP.
     pub network: Option<Network>,
     pub udp_over_tcp: Option<UdpOverTcp>,
+    /// `multiplex`, when enabled.
+    pub multiplex: Option<Multiplex>,
 }
 
 #[derive(Debug, Clone)]
@@ -958,11 +960,12 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
             let password = o.string("password")?.unwrap_or_default();
             let network = proxies::parse_network_list(&mut o, "network")?;
             let udp_over_tcp = proxies::parse_uot(&mut o, "udp_over_tcp")?;
-            for k in ["plugin", "plugin_opts", "multiplex"] {
+            for k in ["plugin", "plugin_opts"] {
                 if o.has(k) {
                     return Err(Error::at(&o.sub(k), "not supported by sbr yet"));
                 }
             }
+            let multiplex = tls::parse_multiplex(&mut o, "multiplex")?.filter(|m| m.enabled);
             OutboundKind::Shadowsocks(ShadowsocksOutbound {
                 server,
                 dial,
@@ -970,6 +973,7 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
                 password,
                 network,
                 udp_over_tcp,
+                multiplex,
             })
         }
         "trojan" => OutboundKind::Trojan(proxy::parse_trojan(&mut o, diag)?),

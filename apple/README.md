@@ -148,7 +148,7 @@ configuration there, or restart the device; then reconnect from the updated app.
 | Strict: own sockets | Strict on; REALITY, hysteria2 and WireGuard profiles; iOS and macOS | Each connects and carries traffic; the extension log shows outbound sockets bound to `en0` / `pdp_ip0` |
 | Strict: earlier connections | Start a long download or SSH session, then connect | It stops or moves into the tunnel; the exit IP of new connections is the proxy's |
 | Strict: roaming | Wi-Fi to cellular and back while streaming | Sockets re-pin to the new interface and traffic resumes |
-| Tunnel restart | Stop the extension (memory kill, crash, or reconnect) | Strict: nothing leaves while it is down; off: auto-connect brings it back |
+| Tunnel restart | Stop the extension (memory kill, crash, or reconnect) | Strict: nothing leaves while it is down, and an on-demand rule restarts it; off: auto-connect brings it back |
 | App update | TestFlight update with strict on | Record whether connectivity returns; check the recovery steps above |
 | DHCP option 121 | Test AP pushing a classless route for a public /24 via the AP | Strict: that range still goes through the tunnel; off: record |
 | LocalNet | Test AP whose LAN subnet is a public range | Strict: the range stays in the tunnel; "allow local network" on: record the leak |

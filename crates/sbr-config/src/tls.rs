@@ -366,9 +366,18 @@ pub struct Multiplex {
 pub(crate) fn parse_multiplex(parent: &mut Obj, key: &str) -> Result<Option<Multiplex>> {
     let Some(v) = parent.raw(key) else { return Ok(None) };
     let mut o = Obj::new(v, parent.sub(key))?;
+    let protocol = o.string("protocol")?;
+    if let Some(p) = &protocol
+        && !matches!(p.as_str(), "smux" | "yamux" | "h2mux")
+    {
+        return Err(Error::at(
+            &o.sub("protocol"),
+            format!("unknown multiplex protocol: {p}"),
+        ));
+    }
     let mut m = Multiplex {
         enabled: o.bool("enabled")?,
-        protocol: o.string("protocol")?,
+        protocol,
         max_connections: o.get("max_connections")?,
         min_streams: o.get("min_streams")?,
         max_streams: o.get("max_streams")?,
@@ -378,7 +387,13 @@ pub(crate) fn parse_multiplex(parent: &mut Obj, key: &str) -> Result<Option<Mult
     if let Some(v) = o.raw("brutal") {
         let mut b = Obj::new(v, o.sub("brutal"))?;
         if b.bool("enabled")? {
-            m.brutal = Some((b.get("up_mbps")?, b.get("down_mbps")?));
+            let (up, down): (u32, u32) = (b.get("up_mbps")?, b.get("down_mbps")?);
+            for (k, v) in [("up_mbps", up), ("down_mbps", down)] {
+                if v == 0 {
+                    return Err(Error::at(&b.sub(k), "brutal needs a speed of at least 1 Mbps"));
+                }
+            }
+            m.brutal = Some((up, down));
         } else {
             b.raw("up_mbps");
             b.raw("down_mbps");

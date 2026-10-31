@@ -9,13 +9,14 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-tokio = { version = "1", features = ["rt", "io-util"] }
+tokio = { version = "1", features = ["rt", "io-util", "time"] }
 flate2 = "1"
 sbr-config = { path = "../crates/sbr-config" }
 sbr-core = { path = "../crates/sbr-core" }
 sbr-dns = { path = "../crates/sbr-dns" }
 sbr-tun = { path = "../crates/sbr-tun" }
 sbr-reality = { path = "../crates/sbr-reality" }
+sbr-engine = { path = "../crates/sbr-engine" }
 
 # Not a member of the main workspace: fuzzing needs nightly and sanitizers.
 [workspace]
@@ -55,6 +56,13 @@ bench = false
 [[bin]]
 name = "reality_handshake"
 path = "fuzz_targets/reality_handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mux_session"
+path = "fuzz_targets/mux_session.rs"
 test = false
 doc = false
 bench = false
