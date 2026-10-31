@@ -1,9 +1,10 @@
 //! The WireGuard device task: UDP I/O, Noise (boringtun), and driving the
-//! smoltcp stack.
+//! tunnel's TCP stack (sbr-tun's) and UDP stack (smoltcp).
 //!
 //! One task per endpoint. Each wakeup it drains every datagram the socket
-//! has queued, decrypts them into the stack, runs one `Interface::poll`, then
-//! encrypts and sends everything the stack emitted. Socket I/O goes through
+//! has queued, decrypts them, hands TCP to our addresses to the TCP stack
+//! and the rest to smoltcp, runs one `Interface::poll` and one round of TCP
+//! output, then encrypts and sends everything the stacks emitted. Socket I/O goes through
 //! `quinn-udp`: on Linux that is `recvmmsg` + GRO in and GSO out (WireGuard
 //! data packets of a flow are all the same size, so a burst leaves in one
 //! syscall); elsewhere it degrades to one datagram per call.
@@ -20,7 +21,8 @@
 //! when the AEAD is that small a share.
 //!
 //! Power: the task only wakes for packets, a kick from a socket handle, a
-//! smoltcp deadline (retransmit, delayed ACK), or WireGuard timers. Timers
+//! TCP or smoltcp deadline (retransmit, persist, linger), or WireGuard
+//! timers. Timers
 //! tick once a second while traffic flowed in the last 30 s, at the
 //! persistent-keepalive interval when one is configured, and never otherwise.
 //! The egress thread sleeps in a channel receive between rounds, and small
@@ -39,6 +41,10 @@ use boringtun::x25519::{PublicKey, StaticSecret};
 use ipnet::IpNet;
 use quinn_udp::{RecvMeta, Transmit, UdpSocketState};
 use sbr_core::{Destination, PacketConn};
+use sbr_tun::device::HEADROOM;
+use sbr_tun::frag::{Limits, Reassembler};
+use sbr_tun::packet::{self, Ip, PROTO_TCP};
+use sbr_tun::tcp::{Blocked, Tcp};
 use tokio::io::Interest;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -198,6 +204,8 @@ impl Transport {
 
 pub struct Device {
     pub shared: Arc<Shared>,
+    /// The tunnel's TCP; dropping it fails every connection on it.
+    pub tcp: Tcp,
     pub peers: Vec<PeerSetup>,
     pub transport: Transport,
     pub private: StaticSecret,
@@ -361,6 +369,7 @@ impl Device {
     pub async fn run(self) {
         let Device {
             shared,
+            mut tcp,
             mut peers,
             mut transport,
             private,
@@ -394,7 +403,19 @@ impl Device {
         };
         let keepalive = peers.iter().map(|p| p.keepalive).filter(|k| *k > 0).min();
         let mut rx_batch: Vec<Vec<u8>> = Vec::with_capacity(RX_BATCH);
+        let mut smol_rx: Vec<Vec<u8>> = Vec::with_capacity(RX_BATCH);
         let mut tx_out: Vec<Vec<u8>> = Vec::with_capacity(TX_BATCH);
+        // Peers rarely fragment inside the tunnel (our MSS fits the MTU), so
+        // a small budget suffices.
+        let mut reasm = Reassembler::with_limits(
+            0,
+            Limits {
+                max_datagrams: 16,
+                max_bytes: 256 << 10,
+                ..Limits::default()
+            },
+        );
+        let tcp_env = tcp.env().clone();
         let mut last_traffic = Instant::now() - ACTIVE_WINDOW;
         let mut last_tick = Instant::now();
 
@@ -411,25 +432,50 @@ impl Device {
                 )
                 .await;
 
-            // 2. One stack poll.
+            // 2. The stacks: TCP to our addresses goes to the TCP stack
+            // (reassembled first if fragmented), everything else to smoltcp.
+            let now = Instant::now();
+            for pkt in rx_batch.drain(..) {
+                let (pkt, h) = match packet::classify(&pkt) {
+                    Some(Ip::Whole(h)) => (pkt, Some(h)),
+                    Some(Ip::Fragment(f)) => {
+                        let whole = reasm.push(&pkt, &f, now);
+                        io.pool.push(pkt);
+                        let Some(whole) = whole else { continue };
+                        let h = packet::parse(&whole);
+                        (whole, h)
+                    }
+                    None => (pkt, None),
+                };
+                match h {
+                    Some(h) if h.proto == PROTO_TCP && shared.is_local(h.dst.ip()) => {
+                        tcp.input(&pkt[..h.len], &h, now, &mut link(&mut tx_out, &mut io.pool));
+                        io.pool.push(pkt);
+                    }
+                    _ => smol_rx.push(pkt),
+                }
+            }
             let delay;
             {
                 let mut st = shared.stack.lock().unwrap();
                 let st = &mut *st;
-                st.dev.rx.extend(rx_batch.drain(..));
+                st.dev.rx.extend(smol_rx.drain(..));
                 io.pool.append(&mut st.dev.rx_free);
                 st.iface.poll(shared.now(), &mut st.dev, &mut st.sockets);
-                std::mem::swap(&mut tx_out, &mut st.dev.tx);
+                tx_out.append(&mut st.dev.tx);
                 // Hand back buffers sent last round for smoltcp to reuse.
                 if st.dev.tx_free.len() < TX_BATCH {
                     let take = io.pool.len().min(TX_BATCH - st.dev.tx_free.len());
                     let at = io.pool.len() - take;
                     st.dev.tx_free.extend(io.pool.drain(at..));
                 }
-                if st.has_closing() {
-                    st.reap();
-                }
                 delay = st.iface.poll_delay(shared.now(), &st.sockets);
+            }
+            {
+                let mut link = link(&mut tx_out, &mut io.pool);
+                tcp.drain_app(now);
+                tcp.run_timers(now, &mut link);
+                tcp.flush(now, &mut link);
             }
 
             // 3. Egress.
@@ -453,6 +499,8 @@ impl Device {
                 io.pool.push(pkt);
             }
             io.flush(&transport).await;
+            // `link` refuses only when `tx_out` is full; it is empty now.
+            tcp.unblock();
 
             if shared.rebind.swap(false, Ordering::Relaxed)
                 && let Some(rebind) = &rebind
@@ -493,6 +541,10 @@ impl Device {
 
             // 5. Sleep until something happens.
             let mut deadline: Option<Duration> = delay.map(|d| Duration::from_micros(d.total_micros()));
+            if let Some(at) = tcp.next_deadline() {
+                let d = at.saturating_duration_since(Instant::now());
+                deadline = Some(deadline.map_or(d, |x| x.min(d)));
+            }
             if let Some(every) = tick_every {
                 let until_tick = every.saturating_sub(last_tick.elapsed());
                 deadline = Some(deadline.map_or(until_tick, |d| d.min(until_tick)));
@@ -506,10 +558,29 @@ impl Device {
             tokio::select! {
                 biased;
                 _ = shared.kick.notified() => {}
+                _ = tcp_env.notify.notified() => {}
                 r = transport.ready() => if r.is_err() { return },
                 _ = sleep => {}
             }
         }
+    }
+}
+
+/// Where the TCP stack sends: a pooled buffer in `tx_out`, at most
+/// `TX_BATCH` per round so the device gets to encrypt and send them.
+fn link<'a>(
+    tx_out: &'a mut Vec<Vec<u8>>,
+    pool: &'a mut Vec<Vec<u8>>,
+) -> impl FnMut(&mut [u8]) -> Result<(), Blocked> + 'a {
+    move |b: &mut [u8]| {
+        if tx_out.len() >= TX_BATCH {
+            return Err(Blocked);
+        }
+        let mut v = pool.pop().unwrap_or_default();
+        v.clear();
+        v.extend_from_slice(&b[HEADROOM..]);
+        tx_out.push(v);
+        Ok(())
     }
 }
 

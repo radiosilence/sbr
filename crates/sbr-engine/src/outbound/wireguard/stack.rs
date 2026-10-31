@@ -1,11 +1,13 @@
-//! The userspace TCP/IP side of the WireGuard endpoint: a smoltcp interface
-//! plus the virtual device that hands IP packets to and from the tunnel.
+//! The userspace IP side of the WireGuard endpoint. TCP runs on sbr-tun's
+//! userspace TCP (`sbr_tun::tcp`), owned by the device task, whose buffers
+//! hold memory only for bytes in flight or unread and share a stack-wide
+//! cap. UDP runs on a smoltcp interface plus the virtual device that hands
+//! IP packets to and from the tunnel.
 //!
-//! The whole stack sits behind one `std::sync::Mutex` that is only ever held
-//! for synchronous work (a socket read/write, or one `Interface::poll`).
-//! Stream handles read and write socket buffers directly under that lock, so
-//! payload is copied exactly once on each side of the stack; the device task
-//! does the polling, encryption and UDP I/O.
+//! The smoltcp stack sits behind one `std::sync::Mutex` that is only ever
+//! held for synchronous work (a socket read/write, or one `Interface::poll`).
+//! UDP handles read and write socket buffers directly under that lock; the
+//! device task does the polling, encryption and UDP I/O.
 
 use std::collections::{HashSet, VecDeque};
 use std::io;
@@ -15,26 +17,39 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant as StdInstant};
 
 use ipnet::IpNet;
+use sbr_tun::TcpConfig;
+use sbr_tun::tcp::Connector;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Checksum, ChecksumCapabilities, DeviceCapabilities, Medium};
-use smoltcp::socket::{tcp, udp};
+use smoltcp::socket::udp;
 use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address};
 use tokio::sync::{Notify, watch};
 
-/// TCP receive buffer (the window we advertise). Allocated zeroed, so the OS
-/// commits pages only as the ring is used. A flow that moves more than the
-/// ring's size cycles through all of it, and the pages then stay committed
-/// until the socket closes, so a long-lived connection costs the full ring.
-#[cfg(any(target_os = "ios", target_os = "tvos", target_os = "watchos"))]
-pub const TCP_RX_BUFFER: usize = 256 * 1024;
-#[cfg(not(any(target_os = "ios", target_os = "tvos", target_os = "watchos")))]
-pub const TCP_RX_BUFFER: usize = 1024 * 1024;
-/// TCP send buffer, which also caps bytes in flight. Measured on loopback
-/// against a sing-box peer: 256 KiB doubles upload over 1 MiB, whose bursts
-/// overrun the peer (smoltcp has no SACK and a 1 s minimum RTO, so every
-/// loss costs dearly).
-pub const TCP_TX_BUFFER: usize = 256 * 1024;
+const MOBILE: bool = cfg!(any(
+    target_os = "ios",
+    target_os = "tvos",
+    target_os = "watchos",
+    target_os = "visionos"
+));
+
+/// Limits for the tunnel's TCP. Buffers are elastic, so the per-connection
+/// sizes cost only what a flow actually has buffered. The receive buffer is
+/// the window advertised: 1 MiB covers about 80 Mbit/s at 100 ms. The send
+/// buffer also caps bytes in flight. On iOS all buffers together stop at
+/// 8 MiB, inside the Network Extension's ~50 MB alongside the TUN stack's
+/// own 8 MiB; at that cap windows stop opening and writes wait, with one
+/// buffer chunk (4 KiB) per connection each way always allowed.
+pub fn tcp_config() -> TcpConfig {
+    TcpConfig {
+        rx_buffer: if MOBILE { 256 << 10 } else { 1 << 20 },
+        tx_buffer: 256 << 10,
+        max_connections: 0,
+        pool_keep: if MOBILE { 1 << 20 } else { 8 << 20 },
+        memory_limit: if MOBILE { 8 << 20 } else { 0 },
+        defer_handshake: false,
+    }
+}
 
 const UDP_PACKETS: usize = 64;
 const UDP_BUFFER: usize = 128 * 1024;
@@ -141,18 +156,19 @@ pub struct Stack {
     pub iface: Interface,
     pub sockets: SocketSet<'static>,
     pub dev: VirtDev,
-    pub v4: Option<Ipv4Address>,
-    pub v6: Option<Ipv6Address>,
-    used_ports: HashSet<(bool, u16)>,
-    /// TCP sockets whose handle was dropped; removed once fully closed.
-    closing: Vec<(SocketHandle, u16)>,
+    used_ports: HashSet<u16>,
     port_seed: u64,
 }
 
 /// What stream handles share with the device task.
 pub struct Shared {
     pub stack: Mutex<Stack>,
-    /// Kicks the device task: new data to send, window opened, socket added.
+    /// Opens TCP connections on the device task's stack.
+    pub tcp: Connector,
+    pub v4: Option<Ipv4Address>,
+    pub v6: Option<Ipv6Address>,
+    /// Kicks the device task: a UDP datagram to send, a socket added, a
+    /// rebind or handshake requested. (TCP streams wake it through `tcp`.)
     pub kick: Notify,
     /// Set by `probe_rtt`: initiate a handshake with every peer.
     pub want_handshake: AtomicBool,
@@ -164,7 +180,7 @@ pub struct Shared {
 }
 
 impl Shared {
-    pub fn new(addresses: &[IpNet], mtu: usize, seed: u64) -> Self {
+    pub fn new(addresses: &[IpNet], mtu: usize, seed: u64, tcp: Connector) -> Self {
         let mut dev = VirtDev::new(mtu);
         let mut cfg = Config::new(HardwareAddress::Ip);
         cfg.random_seed = seed;
@@ -198,12 +214,12 @@ impl Shared {
                 iface,
                 sockets: SocketSet::new(Vec::new()),
                 dev,
-                v4,
-                v6,
                 used_ports: HashSet::new(),
-                closing: Vec::new(),
                 port_seed: seed | 1,
             }),
+            tcp,
+            v4,
+            v6,
             kick: Notify::new(),
             want_handshake: AtomicBool::new(false),
             rebind: AtomicBool::new(false),
@@ -215,30 +231,12 @@ impl Shared {
     pub fn now(&self) -> Instant {
         Instant::from_micros(self.epoch.elapsed().as_micros() as i64)
     }
-}
 
-impl Stack {
-    fn local_port(&mut self, tcp: bool) -> io::Result<u16> {
-        for _ in 0..64 {
-            // xorshift: ports need to be unpredictable-ish, not secret.
-            self.port_seed ^= self.port_seed << 13;
-            self.port_seed ^= self.port_seed >> 7;
-            self.port_seed ^= self.port_seed << 17;
-            let port = 32768 + (self.port_seed % 28232) as u16;
-            if self.used_ports.insert((tcp, port)) {
-                return Ok(port);
-            }
-        }
-        Err(io::Error::new(
-            io::ErrorKind::AddrInUse,
-            "wireguard: no free local port",
-        ))
-    }
-
-    pub fn local_addr(&self, remote: IpAddr) -> io::Result<IpAddress> {
+    /// Our tunnel address in `remote`'s family.
+    pub fn local_ip(&self, remote: IpAddr) -> io::Result<IpAddr> {
         match remote {
-            IpAddr::V4(_) => self.v4.map(IpAddress::Ipv4),
-            IpAddr::V6(_) => self.v6.map(IpAddress::Ipv6),
+            IpAddr::V4(_) => self.v4.map(IpAddr::V4),
+            IpAddr::V6(_) => self.v6.map(IpAddr::V6),
         }
         .ok_or_else(|| {
             io::Error::new(
@@ -248,78 +246,47 @@ impl Stack {
         })
     }
 
-    /// Returns the socket and its local port.
-    pub fn tcp_connect(&mut self, remote: IpAddr, port: u16) -> io::Result<(SocketHandle, u16)> {
-        let local = self.local_addr(remote)?;
-        let lport = self.local_port(true)?;
-        let mut s = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0; TCP_RX_BUFFER]),
-            tcp::SocketBuffer::new(vec![0; TCP_TX_BUFFER]),
-        );
-        s.set_nagle_enabled(false);
-        // Real tunnels lose packets; without congestion control smoltcp
-        // would keep bursting the whole window into the loss.
-        s.set_congestion_control(tcp::CongestionControl::Cubic);
-        // Abort if the peer stops acknowledging (dead tunnel), instead of
-        // retransmitting forever.
-        s.set_timeout(Some(smoltcp::time::Duration::from_secs(120)));
-        let r = s.connect(self.iface.context(), (IpAddress::from(remote), port), (local, lport));
-        if let Err(e) = r {
-            self.used_ports.remove(&(true, lport));
-            return Err(io::Error::other(format!("wireguard: connect: {e}")));
+    /// One of our tunnel addresses.
+    pub fn is_local(&self, ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(ip) => self.v4 == Some(ip),
+            IpAddr::V6(ip) => self.v6 == Some(ip),
         }
-        Ok((self.sockets.add(s), lport))
+    }
+}
+
+impl Stack {
+    fn local_port(&mut self) -> io::Result<u16> {
+        for _ in 0..64 {
+            // xorshift: ports need to be unpredictable-ish, not secret.
+            self.port_seed ^= self.port_seed << 13;
+            self.port_seed ^= self.port_seed >> 7;
+            self.port_seed ^= self.port_seed << 17;
+            let port = 32768 + (self.port_seed % 28232) as u16;
+            if self.used_ports.insert(port) {
+                return Ok(port);
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "wireguard: no free local port",
+        ))
     }
 
-    pub fn udp_bind(&mut self, family: IpAddr) -> io::Result<SocketHandle> {
-        let local = self.local_addr(family)?;
-        let lport = self.local_port(false)?;
+    /// `local` is one of our addresses (`Shared::local_ip`).
+    pub fn udp_bind(&mut self, local: IpAddr) -> io::Result<SocketHandle> {
+        let lport = self.local_port()?;
         let buf = || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; UDP_PACKETS], vec![0u8; UDP_BUFFER]);
         let mut s = udp::Socket::new(buf(), buf());
-        s.bind((local, lport))
+        s.bind((IpAddress::from(local), lport))
             .map_err(|e| io::Error::other(format!("wireguard: bind: {e}")))?;
         Ok(self.sockets.add(s))
-    }
-
-    /// A stream handle went away: close gracefully and reap later.
-    pub fn release_tcp(&mut self, h: SocketHandle, port: u16) {
-        let s = self.sockets.get_mut::<tcp::Socket>(h);
-        s.close();
-        self.closing.push((h, port));
     }
 
     pub fn release_udp(&mut self, h: SocketHandle) {
         let s = self.sockets.remove(h);
         if let smoltcp::socket::Socket::Udp(s) = s {
-            self.used_ports.remove(&(false, s.endpoint().port));
+            self.used_ports.remove(&s.endpoint().port);
         }
-    }
-
-    /// Drop sockets that finished closing. TIME-WAIT is cut short: ports are
-    /// ours alone and randomised, so there is nothing to protect.
-    pub fn reap(&mut self) {
-        let mut i = 0;
-        while i < self.closing.len() {
-            let (h, port) = self.closing[i];
-            let s = self.sockets.get_mut::<tcp::Socket>(h);
-            if matches!(s.state(), tcp::State::Closed | tcp::State::TimeWait) {
-                self.sockets.remove(h);
-                self.used_ports.remove(&(true, port));
-                self.closing.swap_remove(i);
-            } else {
-                i += 1;
-            }
-        }
-    }
-
-    /// Reset instead of closing (connect failed or was cancelled).
-    pub fn abort_tcp(&mut self, h: SocketHandle, port: u16) {
-        let s = self.sockets.get_mut::<tcp::Socket>(h);
-        s.abort();
-        self.closing.push((h, port));
-    }
-
-    pub fn has_closing(&self) -> bool {
-        !self.closing.is_empty()
     }
 }

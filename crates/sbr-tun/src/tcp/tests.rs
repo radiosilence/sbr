@@ -153,6 +153,8 @@ struct Sim {
     imp_down: Impair,
     rng: Rng,
     next_port: u16,
+    /// Added to every packet's one-way trip (a WAN path).
+    delay: Duration,
 }
 
 impl Sim {
@@ -216,6 +218,7 @@ impl Sim {
             imp_down: Impair::default(),
             rng: Rng(0x9e37_79b9_7f4a_7c15),
             next_port: 40000,
+            delay: Duration::ZERO,
         }
     }
 
@@ -255,7 +258,7 @@ impl Sim {
         let snow = SInstant::from_micros(self.now.as_micros() as i64);
         self.iface.poll(snow, &mut self.dev, &mut self.sockets);
         for p in self.dev.tx.drain(..) {
-            self.up.push(self.now, p, self.imp_up, &mut self.rng);
+            self.up.push(self.now + self.delay, p, self.imp_up, &mut self.rng);
         }
         let now = self.t0 + self.now;
         let arrivals = self.up.due(self.now);
@@ -266,12 +269,13 @@ impl Sim {
             imp_down,
             rng,
             now: vnow,
+            delay,
             ..
         } = self;
         let mut link = |b: &mut [u8]| {
             let p = b[HEADROOM..].to_vec();
             assert!(packet::verify(&p), "bad checksum from the stack");
-            down.push(*vnow, p, *imp_down, rng);
+            down.push(*vnow + *delay, p, *imp_down, rng);
             Ok(())
         };
         for p in arrivals {
@@ -1519,25 +1523,30 @@ fn retransmitted_syn_ack_after_established_is_acked_again() {
 
 #[test]
 fn stalled_readers_at_the_memory_limit_leave_room_for_an_active_flow() {
-    // 40 connections whose reader stopped would hold 40 windows of 64 KiB
-    // (2.5 MiB); the limit holds them to 512 KiB plus the per-connection
-    // floor, and a 41st connection still downloads.
+    // The WireGuard outbound's iOS shape: 256 KiB windows under an 8 MiB
+    // cap, over a 50 ms round trip. 40 connections whose reader stopped
+    // would hold 10 MiB; the cap holds them to 8 MiB plus the
+    // per-connection floor. A 41st connection still downloads, but only at
+    // that floor: one chunk of window per round trip.
     let stalled = 40;
-    let limit = 512 << 10;
-    let mut c = cfg(64 << 10, 64 << 10);
+    let limit = 8 << 20;
+    let mut c = cfg(256 << 10, 256 << 10);
     c.memory_limit = limit;
     let mut sim = Sim::client(c, 1500);
+    sim.delay = Duration::from_millis(25);
+    let len = 128 << 10;
     let mut srcs: Vec<Source> = (0..=stalled)
         .map(|i| Source {
             h: sim.listen(80, 4096, 256 << 10, true),
-            data: pattern(256 << 10, i as u32),
+            data: pattern(if i < stalled { 256 << 10 } else { len }, i as u32),
             sent: 0,
         })
         .collect();
     let mut fs: Vec<Option<Connecting>> = (0..=stalled).map(|_| Some(sim.dial(false, 80))).collect();
     let mut ss: Vec<Option<Stream>> = (0..=stalled).map(|_| None).collect();
-    // Connect everything and let the stalled ones fill up.
-    sim.run(Duration::from_secs(10), |sim| {
+    // Connect everything (the active one too, unread) and let the stalled
+    // ones fill up to the cap.
+    sim.run(Duration::from_secs(60), |sim| {
         for (f, s) in fs.iter_mut().zip(ss.iter_mut()) {
             if let Some(r) = f.as_mut().and_then(poll_connect) {
                 *s = Some(r.unwrap());
@@ -1554,7 +1563,7 @@ fn stalled_readers_at_the_memory_limit_leave_room_for_an_active_flow() {
     let mut got = Vec::new();
     let mut active = ss.pop().unwrap().unwrap();
     let start = sim.now;
-    sim.run(Duration::from_secs(60), |sim| {
+    sim.run(Duration::from_secs(120), |sim| {
         for src in &mut srcs {
             src.step(sim);
         }
@@ -1563,7 +1572,12 @@ fn stalled_readers_at_the_memory_limit_leave_room_for_an_active_flow() {
     });
     assert!(got == srcs[stalled].data, "active download corrupted");
     assert!(peak <= limit + floor, "peak {peak} over {limit} + {floor}");
-    eprintln!("active flow took {:?} at the limit", sim.now - start);
+    // What was buffered before reading started, then a chunk per RTT.
+    let rtt = 2 * sim.delay;
+    let took = sim.now - start;
+    let bound = rtt * (len / buf::CHUNK + 4) as u32;
+    eprintln!("active flow: {len} bytes in {took:?} at the limit (bound {bound:?})");
+    assert!(took <= bound, "{took:?} over {bound:?}");
 }
 
 #[test]
