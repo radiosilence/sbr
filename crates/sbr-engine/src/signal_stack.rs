@@ -10,7 +10,8 @@ thread_local! {
     static ALT: RefCell<Option<AltStack>> = const { RefCell::new(None) };
 }
 
-struct AltStack(Box<[u8]>);
+/// Owns the memory registered with `sigaltstack`.
+struct AltStack(#[allow(dead_code)] Box<[u8]>);
 
 impl Drop for AltStack {
     fn drop(&mut self) {
