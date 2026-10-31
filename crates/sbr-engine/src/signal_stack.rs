@@ -15,10 +15,17 @@ struct AltStack(#[allow(dead_code)] Box<[u8]>);
 
 impl Drop for AltStack {
     fn drop(&mut self) {
-        // SAFETY: disabling this thread's alternate stack before its memory
-        // is freed.
-        unsafe {
-            let mut ss: libc::stack_t = std::mem::zeroed();
+        disable();
+    }
+}
+
+/// Turn off this thread's alternate stack. Darwin refuses `SS_DISABLE`
+/// with a zeroed stack, so the current one is passed back with the flag.
+fn disable() {
+    // SAFETY: querying and then disabling this thread's alternate stack.
+    unsafe {
+        let mut ss: libc::stack_t = std::mem::zeroed();
+        if libc::sigaltstack(std::ptr::null(), &mut ss) == 0 {
             ss.ss_flags = libc::SS_DISABLE;
             libc::sigaltstack(&ss, std::ptr::null_mut());
         }
@@ -69,21 +76,22 @@ mod tests {
         std::thread::spawn(|| {
             // The test harness has a Rust `main`, so std gave this thread a
             // stack already; remove it to exercise what a host thread gets.
-            // SAFETY: disabling this thread's alternate stack.
-            unsafe {
-                let mut ss: libc::stack_t = std::mem::zeroed();
-                ss.ss_flags = libc::SS_DISABLE;
-                libc::sigaltstack(&ss, std::ptr::null_mut());
-            }
-            super::install();
-            // SAFETY: querying this thread's alternate stack.
-            let ss = unsafe {
-                let mut ss: libc::stack_t = std::mem::zeroed();
-                assert_eq!(libc::sigaltstack(std::ptr::null(), &mut ss), 0);
-                ss
+            super::disable();
+            let flags = |()| {
+                // SAFETY: querying this thread's alternate stack.
+                unsafe {
+                    let mut ss: libc::stack_t = std::mem::zeroed();
+                    assert_eq!(libc::sigaltstack(std::ptr::null(), &mut ss), 0);
+                    ss
+                }
             };
+            assert_ne!(flags(()).ss_flags & libc::SS_DISABLE, 0, "disabled");
+            super::install();
+            let ss = flags(());
             assert_eq!(ss.ss_flags & libc::SS_DISABLE, 0);
             assert_eq!(ss.ss_size, super::ALT_STACK);
+            super::ALT.with(|a| a.borrow_mut().take());
+            assert_ne!(flags(()).ss_flags & libc::SS_DISABLE, 0, "disabled before it is freed");
         })
         .join()
         .unwrap();
