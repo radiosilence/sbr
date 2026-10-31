@@ -677,6 +677,8 @@ async fn urltest_picks_fastest_and_sleeps_when_idle() {
         }
     }
     assert!(stopped, "probing pauses after idle_timeout");
+    // A probe already in flight when the loop stopped may still land.
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let after = probe_hits.load(Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(900)).await;
     assert_eq!(probe_hits.load(Ordering::SeqCst), after, "no probes while idle");

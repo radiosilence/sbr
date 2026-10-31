@@ -128,7 +128,7 @@ impl AsyncWrite for SessionConn {
 impl AsyncRead for SessionConn {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if !this.padding {
+        if !this.padding || buf.remaining() == 0 {
             return Pin::new(&mut this.inner).poll_read(cx, buf);
         }
         loop {

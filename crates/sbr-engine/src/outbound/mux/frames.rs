@@ -259,38 +259,48 @@ impl Session {
             Proto::Smux => header(&mut syn, self.proto, SMUX_SYN, 0, id, 0),
             Proto::Yamux => header(&mut syn, self.proto, YAMUX_WINDOW_UPDATE, FLAG_SYN, id, 0),
         }
+        let me = self.clone();
         // Waiting for the writer is bounded (a dead connection holds it
         // forever); the write itself is not, since half a frame would
-        // corrupt the session.
-        let r = match tokio::time::timeout(OPEN_TIMEOUT, self.writer.lock()).await {
-            Err(_) => {
-                // Live streams keep it; new ones go elsewhere.
-                self.draining.store(true, Ordering::Release);
-                Err(io::Error::new(io::ErrorKind::TimedOut, "mux: session writer stalled"))
-            }
-            Ok(mut w) => {
-                let r = async {
-                    w.write_all(&syn).await?;
-                    w.flush().await
+        // corrupt the session. As the stream's in-flight write, it is
+        // finished by `Drop` if this caller is cancelled.
+        let fut = async move {
+            let r = match tokio::time::timeout(OPEN_TIMEOUT, me.writer.lock()).await {
+                Err(_) => {
+                    // Live streams keep the session; new ones go elsewhere.
+                    me.draining.store(true, Ordering::Release);
+                    Err(io::Error::new(io::ErrorKind::TimedOut, "mux: session writer stalled"))
                 }
-                .await;
-                drop(w);
-                if r.is_err() {
-                    self.close();
+                Ok(mut w) => {
+                    let r = async {
+                        w.write_all(&syn).await?;
+                        w.flush().await
+                    }
+                    .await;
+                    drop(w);
+                    if r.is_err() {
+                        me.close();
+                    }
+                    r
                 }
-                r
-            }
+            };
+            (r, syn)
         };
-        if let Err(e) = r {
-            self.streams.lock().unwrap().remove(&id);
-            return Err(e);
-        }
+        let mut stream = FrameStream {
+            session: self.clone(),
+            id,
+            state: state.clone(),
+            chunk: Bytes::new(),
+            write: Some((Box::pin(fut), 0)),
+            wbuf: None,
+            fin_sent: false,
+        };
+        std::future::poll_fn(|cx| stream.poll_done(cx)).await?;
         if self.proto == Proto::Yamux {
             let me = Arc::downgrade(self);
-            let st = state.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(OPEN_TIMEOUT).await;
-                if !st.lock().unwrap().acked
+                if !state.lock().unwrap().acked
                     && let Some(s) = me.upgrade()
                     && s.streams.lock().unwrap().contains_key(&id)
                 {
@@ -299,15 +309,7 @@ impl Session {
                 }
             });
         }
-        Ok(FrameStream {
-            session: self.clone(),
-            id,
-            state,
-            chunk: Bytes::new(),
-            write: None,
-            wbuf: None,
-            fin_sent: false,
-        })
+        Ok(stream)
     }
 
     async fn read_loop(self: Arc<Self>, r: ReadHalf<SessionConn>) {
@@ -589,6 +591,8 @@ impl Drop for FrameStream {
         let (eof, unread) = {
             let mut s = self.state.lock().unwrap();
             let unread: usize = s.queue.drain(..).map(|b| b.len()).sum::<usize>() + self.chunk.len();
+            // A reader waiting for budget on this stream gives its bytes back.
+            s.error.get_or_insert_with(|| "mux: stream closed".into());
             (s.eof, unread)
         };
         if self.session.proto == Proto::Smux {

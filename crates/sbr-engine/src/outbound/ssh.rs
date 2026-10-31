@@ -32,8 +32,9 @@ use super::{BuildContext, Upstream};
 const DEFAULT_CLIENT_VERSION: &str = "SSH-2.0-OpenSSH_9.9";
 /// TCP connect, key exchange and authentication together.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
-/// A channel open that gets no answer means the connection is dead (often a
-/// NAT mapping that expired while idle).
+/// After this long without an answer to a channel open, a keepalive asks
+/// whether the connection is dead (often a NAT mapping that expired while
+/// idle), with as long again to answer.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 /// A connection with no channels for this long is closed, so a stale one is
 /// never reused after a long idle period and idle costs no wakeups.
@@ -50,9 +51,9 @@ const MAX_PACKET: u32 = 32768;
 /// the iOS extension's memory budget (`CHANNEL_QUEUE * MAX_PACKET` each).
 fn max_channels() -> usize {
     if cfg!(any(target_os = "ios", target_os = "tvos")) {
-        32
+        128
     } else {
-        256
+        1024
     }
 }
 
@@ -407,12 +408,7 @@ impl Inner {
                 inner: Arc::downgrade(self),
                 _permit: None,
             };
-            let opened = tokio::time::timeout(
-                OPEN_TIMEOUT,
-                conn.handle
-                    .channel_open_direct_tcpip(host.as_str(), dest.port as u32, "127.0.0.1", 0),
-            )
-            .await;
+            let opened = open_channel(&conn, &host, dest.port).await;
             match opened {
                 Ok(Ok(ch)) => {
                     guard._permit = Some(permit);
@@ -446,6 +442,29 @@ impl Inner {
             close(&c);
         }
     }
+}
+
+/// Open a channel. The server answers only once its own connect to the
+/// destination finishes, so a slow open is told from a dead connection by
+/// a keepalive: `Err(Elapsed)` only when that goes unanswered too.
+async fn open_channel(
+    conn: &Conn,
+    host: &str,
+    port: u16,
+) -> Result<Result<russh::Channel<client::Msg>, russh::Error>, tokio::time::error::Elapsed> {
+    let open = conn.handle.channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0);
+    tokio::pin!(open);
+    if let Ok(r) = tokio::time::timeout(OPEN_TIMEOUT, &mut open).await {
+        return Ok(r);
+    }
+    let alive = tokio::time::timeout(OPEN_TIMEOUT, conn.handle.send_ping());
+    tokio::select! {
+        r = &mut open => return Ok(r),
+        alive = alive => {
+            let _ = alive?;
+        }
+    }
+    Ok(open.await)
 }
 
 /// On reload: an idle connection closes now, a busy one when its last

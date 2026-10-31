@@ -164,7 +164,7 @@ impl Client {
     /// sing-mux `selectSession`.
     fn select(&self, sessions: &[Arc<Entry>]) -> Option<Arc<Entry>> {
         if self.brutal.is_some() {
-            return sessions.first().cloned();
+            return sessions.iter().find(|e| e.can_take_new()).cloned();
         }
         let best = sessions
             .iter()
@@ -193,7 +193,13 @@ impl Client {
                 }
                 !closed
             });
-            self.select(&sessions)
+            let picked = self.select(&sessions);
+            // Counted under the lock the idle close takes, so a session is
+            // never closed between being picked and being used.
+            if let Some(e) = &picked {
+                e.idle.acquire();
+            }
+            picked
         };
         let entry = match picked {
             Some(e) => e,
@@ -216,11 +222,11 @@ impl Client {
                         return Err(e);
                     }
                 };
+                e.idle.acquire();
                 self.sessions.lock().unwrap().push(e.clone());
                 e
             }
         };
-        entry.idle.acquire();
         Ok(StreamGuard {
             entry,
             client: Arc::downgrade(self),
@@ -249,8 +255,10 @@ impl Client {
         Ok(entry)
     }
 
-    /// A raw stream on some session; a session that fails to open one is
-    /// dropped and another tried, as sing-mux's `openStream` does.
+    /// A raw stream on some session, trying once more if the session fails
+    /// to open one, as sing-mux's `openStream` does. A session that failed is
+    /// left to its own checks (closed, draining, unacknowledged SYN), which
+    /// keep the retry from picking it again.
     async fn open_stream(self: &Arc<Self>) -> io::Result<Stream> {
         let mut last = None;
         for _ in 0..2 {
@@ -317,9 +325,15 @@ async fn brutal_exchange(entry: &Entry, send: u64, receive: u64) -> io::Result<(
 /// sing `varbin` string: uvarint length, then bytes.
 async fn read_message<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<String> {
     let mut len = 0usize;
-    for shift in (0..).step_by(7).take(3) {
+    for i in 0.. {
+        if i == 3 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "mux: malformed message length",
+            ));
+        }
         let b = r.read_u8().await?;
-        len |= ((b & 0x7f) as usize) << shift;
+        len |= ((b & 0x7f) as usize) << (7 * i);
         if b & 0x80 == 0 {
             break;
         }
@@ -359,7 +373,11 @@ impl Drop for StreamGuard {
         self.entry.idle.arm(timeout, move || {
             let Some(e) = entry.upgrade() else { return };
             if let Some(c) = client.upgrade() {
-                c.sessions.lock().unwrap().retain(|x| !Arc::ptr_eq(x, &e));
+                let mut sessions = c.sessions.lock().unwrap();
+                if e.idle.users() > 0 {
+                    return;
+                }
+                sessions.retain(|x| !Arc::ptr_eq(x, &e));
             }
             e.close();
         });
