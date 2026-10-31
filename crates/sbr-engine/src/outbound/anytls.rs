@@ -185,15 +185,6 @@ fn parse_settings(b: &[u8]) -> HashMap<String, String> {
 
 type Tls = Stream;
 
-async fn bounded(f: impl Future<Output = io::Result<()>>) -> io::Result<()> {
-    tokio::time::timeout(WRITE_TIMEOUT, f).await.unwrap_or_else(|_| {
-        Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "anytls: session write timed out",
-        ))
-    })
-}
-
 struct Writer {
     w: WriteHalf<Tls>,
     /// The settings frame, sent in front of the first request.
@@ -331,8 +322,23 @@ impl Session {
         f.extend_from_slice(data);
         let padding = self.padding();
         let mut w = self.writer.lock().await;
-        let r = bounded(w.write(&f, &padding)).await;
-        drop(w);
+        self.bounded(w.write(&f, &padding)).await
+    }
+
+    /// Run a write with the writer locked. A failed or timed-out write may
+    /// have left part of a frame in the stream, so it closes the session
+    /// before the lock is released, and no later holder writes after it:
+    /// the server would read the next frame from inside the last one.
+    async fn bounded(&self, f: impl Future<Output = io::Result<()>>) -> io::Result<()> {
+        if self.is_closed() {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "anytls: session closed"));
+        }
+        let r = tokio::time::timeout(WRITE_TIMEOUT, f).await.unwrap_or_else(|_| {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "anytls: session write timed out",
+            ))
+        });
         if r.is_err() {
             self.close();
         }
@@ -719,34 +725,32 @@ impl AnyStream {
         let fut = async move {
             let padding = session.padding();
             let mut w = session.writer.lock().await;
-            let r = bounded(async {
-                let mut r = Ok(());
-                if let Some(addr) = request {
-                    let mut req = Vec::with_capacity(2 * FRAME_OVERHEAD + addr.len());
-                    frame_header(&mut req, CMD_SYN, id, 0);
-                    frame_header(&mut req, CMD_PSH, id, addr.len());
-                    req.extend_from_slice(&addr);
-                    session.arm_open_timeout(id);
-                    r = if w.pending.is_some() {
-                        // New session: settings + SYN + destination as one record.
-                        w.write(&req, &padding).await
-                    } else {
-                        match w.write_packet(&req[..FRAME_OVERHEAD], &padding).await {
-                            Ok(()) => w.write_packet(&req[FRAME_OVERHEAD..], &padding).await,
-                            e => e,
-                        }
-                    };
-                }
-                if r.is_ok() && !buf.is_empty() {
-                    r = w.write(&buf, &padding).await;
-                }
-                r
-            })
-            .await;
+            let r = session
+                .bounded(async {
+                    let mut r = Ok(());
+                    if let Some(addr) = request {
+                        let mut req = Vec::with_capacity(2 * FRAME_OVERHEAD + addr.len());
+                        frame_header(&mut req, CMD_SYN, id, 0);
+                        frame_header(&mut req, CMD_PSH, id, addr.len());
+                        req.extend_from_slice(&addr);
+                        session.arm_open_timeout(id);
+                        r = if w.pending.is_some() {
+                            // New session: settings + SYN + destination as one record.
+                            w.write(&req, &padding).await
+                        } else {
+                            match w.write_packet(&req[..FRAME_OVERHEAD], &padding).await {
+                                Ok(()) => w.write_packet(&req[FRAME_OVERHEAD..], &padding).await,
+                                e => e,
+                            }
+                        };
+                    }
+                    if r.is_ok() && !buf.is_empty() {
+                        r = w.write(&buf, &padding).await;
+                    }
+                    r
+                })
+                .await;
             drop(w);
-            if r.is_err() {
-                session.close();
-            }
             (r, buf)
         };
         self.write = Some((Box::pin(fut), n));
@@ -932,6 +936,45 @@ mod tests {
             .unwrap();
         assert!(got == data);
         drop(writer);
+    }
+
+    /// A server that stops reading: the first write times out and closes the
+    /// session, and writers queued behind it fail at once rather than each
+    /// waiting out its own deadline on the same socket, or writing after a
+    /// partial frame.
+    #[tokio::test(start_paused = true)]
+    async fn wedged_session_writes_time_out_once() {
+        let (c, _server) = tokio::io::duplex(64);
+        let (_r, w) = tokio::io::split(Box::new(c) as Tls);
+        let session = Arc::new(Session {
+            pool: Weak::new(),
+            writer: tokio::sync::Mutex::new(Writer {
+                w,
+                pending: None,
+                send_padding: false,
+                packet_count: 0,
+                record: Vec::new(),
+            }),
+            streams: Mutex::default(),
+            next_id: AtomicU32::new(1),
+            peer_version: AtomicU32::new(0),
+            frames: AtomicU64::new(0),
+            heart_pending: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            reader: Mutex::new(None),
+        });
+        let start = tokio::time::Instant::now();
+        let writes: Vec<_> = (0..3)
+            .map(|i| {
+                let s = session.clone();
+                tokio::spawn(async move { s.write_control(CMD_PSH, i, &[0u8; 1024]).await })
+            })
+            .collect();
+        for w in writes {
+            assert!(w.await.unwrap().is_err());
+        }
+        assert!(session.is_closed());
+        assert!(start.elapsed() < WRITE_TIMEOUT * 2, "{:?}", start.elapsed());
     }
 
     #[test]
