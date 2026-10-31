@@ -129,7 +129,7 @@ struct MenuBarContent: View {
 
     var body: some View {
         if let error = tunnel.errorMessage {
-            Text("error: \(error)")
+            Text("error: \(Self.brief(error))")
         }
         Text(statusLine)
         if tunnel.needsApproval {
@@ -140,7 +140,7 @@ struct MenuBarContent: View {
         Button(tunnel.isOn ? "disconnect" : "connect") {
             Task { await act { await tunnel.setOn(!tunnel.isOn) } }
         }
-        .disabled(profiles.active == nil)
+        .disabled(!tunnel.isOn && profiles.active == nil)
         if !profiles.profiles.isEmpty {
             Picker("profile", selection: Binding(
                 get: { profiles.activeID },
@@ -159,6 +159,12 @@ struct MenuBarContent: View {
         Divider()
         Button("quit sbr") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
+    }
+
+    /// The menu is as wide as its widest item; the window's alert has the rest.
+    private static func brief(_ message: String) -> String {
+        let line = message.prefix { !$0.isNewline }
+        return line.count > 60 ? String(line.prefix(59)) + "…" : String(line)
     }
 
     private var statusLine: String {

@@ -101,8 +101,8 @@ personal rules, trusted networks and saved logs, and, if the tunnel is
 connected, has it delete its own files (cache file, rule-set cache, session
 logs). On macOS it also removes the login item. The app stays installed, and so
 does `SbrMac`'s system extension, until the app is deleted. Keychain items
-outlive deleting the app on iOS, so erase before deleting it. What erasing leaves behind is listed in
-`docs/threat-model.md` under "Device seizure".
+outlive deleting the app on iOS, so erase before deleting it. What erasing
+leaves behind is listed in `docs/threat-model.md` under "Device seizure".
 
 ## Groups
 
