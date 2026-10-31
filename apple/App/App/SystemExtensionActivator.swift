@@ -16,6 +16,7 @@ final class SystemExtensionActivator: NSObject, OSSystemExtensionRequestDelegate
     private var continuation: CheckedContinuation<Void, Error>?
 
     static let approvalNeeded = SbrError("allow sbr's network extension in System Settings, then connect again")
+    static let rebootNeeded = SbrError("restart your Mac to finish installing sbr's network extension")
 
     /// Called whenever `awaitingApproval` changes, including when the user
     /// allows the extension long after the request that asked, with the
@@ -73,7 +74,9 @@ final class SystemExtensionActivator: NSObject, OSSystemExtensionRequestDelegate
     }
 
     nonisolated func request(_ request: OSSystemExtensionRequest, didFinishWithResult result: OSSystemExtensionRequest.Result) {
-        MainActor.assumeIsolated { finish(.success(())) }
+        MainActor.assumeIsolated {
+            finish(result == .willCompleteAfterReboot ? .failure(Self.rebootNeeded) : .success(()))
+        }
     }
 
     nonisolated func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {

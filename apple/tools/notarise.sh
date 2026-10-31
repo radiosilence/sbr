@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Notarise FILE with Apple, resumably, and wait for the outcome.
 #
-#   scripts/notarise.sh FILE [TIMEOUT]
+#   apple/tools/notarise.sh FILE [TIMEOUT]
 #
 # FILE's name is what the submission is known by, so give it one that names
 # its contents (a version and a hash): a run that finds a submission of that

@@ -11,10 +11,12 @@ name: CI/CD
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md"]
+    # Documentation alone runs nothing, but changelog fragments are linted.
+    paths: ["**", "!**.md", "changelog.d/**"]
   pull_request:
     branches: [main]
-    paths-ignore: ["**.md"]
+    # Documentation alone runs nothing, but changelog fragments are linted.
+    paths: ["**", "!**.md", "changelog.d/**"]
   workflow_dispatch:
     inputs:
       release:

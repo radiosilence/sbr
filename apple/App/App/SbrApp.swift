@@ -44,7 +44,10 @@ struct SbrApp: App {
                 .environmentObject(inbox)
                 .sheet(item: $inbox.invite) { SendToTVSheet(invite: $0).environmentObject(profiles) }
                 #endif
-                .task { await AppFlow.start(tunnel: tunnel, profiles: profiles) }
+                .task {
+                    await AppFlow.start(tunnel: tunnel, profiles: profiles)
+                    await AppFlow.sync(tunnel: tunnel, profiles: profiles)
+                }
                 .onChange(of: profiles.activeText) { _, _ in
                     Task { await AppFlow.applyActive(tunnel: tunnel, profiles: profiles) }
                 }
@@ -79,7 +82,6 @@ enum AppFlow {
         await profiles.restore()
         await tunnel.load()
         await applyActive(tunnel: tunnel, profiles: profiles)
-        await sync(tunnel: tunnel, profiles: profiles)
     }
 
     static func applyActive(tunnel: TunnelModel, profiles: ProfileStore) async {

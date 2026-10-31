@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [unowned self] _ in
                 Task { await AppFlow.applyActive(tunnel: tunnel, profiles: profiles) }
             }
+        // After the subscription, so a profile this refreshes is applied.
+        await AppFlow.sync(tunnel: tunnel, profiles: profiles)
     }
     private var tracking: AnyCancellable?
 
