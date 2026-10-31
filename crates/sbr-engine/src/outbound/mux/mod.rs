@@ -322,28 +322,39 @@ async fn brutal_exchange(entry: &Entry, send: u64, receive: u64) -> io::Result<(
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "timed out"))?
 }
 
+/// The length prefix of a sing `varbin` string at the start of `b`:
+/// `Ok(Some((length, prefix bytes)))`, `Ok(None)` while incomplete, or the
+/// reason it is refused (more than 3 bytes, or over `MAX_MESSAGE`).
+fn varbin_len(b: &[u8]) -> Result<Option<(usize, usize)>, &'static str> {
+    let mut len = 0usize;
+    for (i, &byte) in b.iter().enumerate().take(3) {
+        len |= ((byte & 0x7f) as usize) << (7 * i);
+        if byte & 0x80 == 0 {
+            return if len > MAX_MESSAGE {
+                Err("mux: error message too long")
+            } else {
+                Ok(Some((len, i + 1)))
+            };
+        }
+    }
+    if b.len() >= 3 {
+        Err("mux: malformed error response")
+    } else {
+        Ok(None)
+    }
+}
+
 /// sing `varbin` string: uvarint length, then bytes.
 async fn read_message<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<String> {
-    let mut len = 0usize;
-    for i in 0.. {
-        if i == 3 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "mux: malformed message length",
-            ));
+    let mut prefix = Vec::with_capacity(3);
+    let len = loop {
+        prefix.push(r.read_u8().await?);
+        match varbin_len(&prefix) {
+            Ok(Some((len, _))) => break len,
+            Ok(None) => continue,
+            Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
         }
-        let b = r.read_u8().await?;
-        len |= ((b & 0x7f) as usize) << (7 * i);
-        if b & 0x80 == 0 {
-            break;
-        }
-    }
-    if len > MAX_MESSAGE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "mux: error message too long",
-        ));
-    }
+    };
     let mut b = vec![0u8; len];
     r.read_exact(&mut b).await?;
     Ok(String::from_utf8_lossy(&b).into_owned())
@@ -434,26 +445,14 @@ fn parse_response(b: &[u8]) -> Result<Option<String>, ()> {
     match b.first() {
         None => Err(()),
         Some(0) => Ok(None),
-        Some(_) => {
-            let mut len = 0usize;
-            let mut i = 1;
-            loop {
-                let byte = *b.get(i).ok_or(())?;
-                len |= ((byte & 0x7f) as usize) << (7 * (i - 1));
-                i += 1;
-                if byte & 0x80 == 0 {
-                    break;
-                }
-                if i > 3 {
-                    return Ok(Some("mux: malformed error response".into()));
-                }
+        Some(_) => match varbin_len(&b[1..]) {
+            Err(e) => Ok(Some(e.into())),
+            Ok(None) => Err(()),
+            Ok(Some((len, n))) => {
+                let msg = b.get(1 + n..1 + n + len).ok_or(())?;
+                Ok(Some(String::from_utf8_lossy(msg).into_owned()))
             }
-            if len > MAX_MESSAGE {
-                return Ok(Some("mux: error message too long".into()));
-            }
-            let msg = b.get(i..i + len).ok_or(())?;
-            Ok(Some(String::from_utf8_lossy(msg).into_owned()))
-        }
+        },
     }
 }
 

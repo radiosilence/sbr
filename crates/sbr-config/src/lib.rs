@@ -385,16 +385,24 @@ impl Options {
                     .into(),
             );
         }
-        for (i, s) in dns.iter().flat_map(|d| d.servers.iter().enumerate()) {
-            let direct = s.dial.detour.is_none() && !s.legacy.as_ref().is_some_and(|l| l.default_outbound);
+        let direct_tags: std::collections::HashSet<&str> = outbounds
+            .iter()
+            .filter(|o| matches!(o.kind, OutboundKind::Direct(_)))
+            .map(|o| o.tag.as_str())
+            .collect();
+        for (i, s) in dns.iter().filter(|_| tun).flat_map(|d| d.servers.iter().enumerate()) {
+            let direct = match s.dial.detour.as_deref() {
+                Some(t) => direct_tags.contains(t),
+                None => !s.legacy.as_ref().is_some_and(|l| l.default_outbound),
+            };
             let leak = match &s.kind {
                 dns::DnsServerKind::Local => Some("asks the system resolver, which is the physical network's"),
                 dns::DnsServerKind::Udp(_) | dns::DnsServerKind::Tcp(_) if direct => {
-                    Some("sends queries in cleartext outside the tunnel (no detour)")
+                    Some("sends queries in cleartext outside the tunnel (no detour, or a direct one)")
                 }
                 _ => None,
             };
-            if let (true, Some(leak)) = (tun, leak) {
+            if let Some(leak) = leak {
                 diag.warnings.push(format!("dns.servers[{i}] ({}): {leak}", s.tag));
             }
         }

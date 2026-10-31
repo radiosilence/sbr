@@ -1,0 +1,1 @@
+- **Leak protection no longer starts the tunnel by itself.** Changing a setting before the first connect could arm the on-demand rule; it now arms only while the tunnel is on. A failed erase of the tunnel's files is reported instead of passing silently.

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- **Deleting the active profile clears it from the VPN configuration.** The macOS system extension build kept the deleted profile there inline, credentials included, and anything that started the tunnel connected with it.
+
+### Fixed
+
+- **DNS servers detoured through a `direct` outbound get the cleartext warning.** They leave the tunnel exactly as servers without a detour do.
+- **SSH connections no longer leak channels or fail after a cancelled connect.** A channel the server confirms after its connect was cancelled is closed; a dial carries on, and keeps its timeout, when the connect that started it is cancelled; a dial overtaken by a network change hands its connects to a fresh one; the idle close no longer closes a connection a new channel has just picked.
+- **Leak protection no longer starts the tunnel by itself.** Changing a setting before the first connect could arm the on-demand rule; it now arms only while the tunnel is on. A failed erase of the tunnel's files is reported instead of passing silently.
+
 ## 0.2.0
 
 ### Added

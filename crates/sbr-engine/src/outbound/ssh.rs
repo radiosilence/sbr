@@ -50,11 +50,7 @@ const MAX_PACKET: u32 = 32768;
 /// Concurrent channels per outbound, sized so that full queues stay within
 /// the iOS extension's memory budget (`CHANNEL_QUEUE * MAX_PACKET` each).
 fn max_channels() -> usize {
-    if cfg!(any(target_os = "ios", target_os = "tvos")) {
-        128
-    } else {
-        1024
-    }
+    if crate::MOBILE { 128 } else { 1024 }
 }
 
 /// OpenSSH 9.9's client proposal, limited to what russh implements, so the
@@ -329,6 +325,23 @@ impl Inner {
     /// The live connection, dialing one if there is none. Concurrent callers
     /// share one dial and its outcome.
     async fn conn(self: &Arc<Self>) -> io::Result<Arc<Conn>> {
+        // A dial overtaken by a network change hands its waiters on to the
+        // next one.
+        for _ in 0..2 {
+            match self.conn_once().await {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                r => return r,
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "ssh: network changed while dialing",
+        ))
+    }
+
+    /// The dial runs as its own task, so it finishes, and its timeout
+    /// holds, even when every caller waiting on it is cancelled.
+    async fn conn_once(self: &Arc<Self>) -> io::Result<Arc<Conn>> {
         let dial = {
             let mut st = self.state.lock().unwrap();
             match &*st {
@@ -339,7 +352,7 @@ impl Inner {
                     let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
                     let dialer = self.dialer.clone();
                     let me = Arc::downgrade(self);
-                    let f = async move {
+                    let task = tokio::spawn(async move {
                         let r = tokio::time::timeout(DIAL_TIMEOUT, dialer.dial())
                             .await
                             .unwrap_or_else(|_| {
@@ -350,7 +363,7 @@ impl Inner {
                             });
                         let refused = matches!(r, Err((_, true)));
                         let r = r.map(Arc::new).map_err(|(e, _)| Arc::new(e));
-                        let current = me.upgrade().map(|me| {
+                        let current = me.upgrade().is_some_and(|me| {
                             let mut st = me.state.lock().unwrap();
                             let current = matches!(&*st, State::Dialing(g, _) if *g == generation);
                             if current {
@@ -362,16 +375,21 @@ impl Inner {
                             }
                             current
                         });
-                        // Superseded (network change) or the outbound is gone.
-                        if current != Some(true)
-                            && let Ok(c) = &r
-                        {
-                            close(c);
+                        match r {
+                            // Superseded (network change) or the outbound is gone.
+                            Ok(c) if !current => {
+                                close(&c);
+                                Err(Arc::new(io::Error::new(
+                                    io::ErrorKind::Interrupted,
+                                    "ssh: superseded dial",
+                                )))
+                            }
+                            r => r,
                         }
-                        r
-                    }
-                    .boxed()
-                    .shared();
+                    });
+                    let f = async move { task.await.unwrap_or_else(|e| Err(Arc::new(io::Error::other(e)))) }
+                        .boxed()
+                        .shared();
                     *st = State::Dialing(generation, f.clone());
                     f
                 }
@@ -391,6 +409,20 @@ impl Inner {
 
     fn is_current(&self, conn: &Arc<Conn>) -> bool {
         matches!(&*self.state.lock().unwrap(), State::Up(c) if Arc::ptr_eq(c, conn))
+    }
+
+    /// The idle close: drop `conn` unless a channel started on it, checked
+    /// under the lock `open` checks currency under.
+    fn discard_if_idle(&self, conn: &Arc<Conn>) {
+        let mut st = self.state.lock().unwrap();
+        if conn.idle.users() > 0 {
+            return;
+        }
+        if matches!(&*st, State::Up(c) if Arc::ptr_eq(c, conn)) {
+            *st = State::Down;
+        }
+        drop(st);
+        close(conn);
     }
 
     /// Drop `conn` if it is still the current one.
@@ -421,7 +453,11 @@ impl Inner {
                 inner: Arc::downgrade(self),
                 _permit: None,
             };
-            let opened = open_channel(&conn, &host, dest.port).await;
+            // The idle close may have taken it between conn() and acquire().
+            if !self.is_current(&conn) {
+                continue;
+            }
+            let opened = open_channel(&conn, host.clone(), dest.port).await;
             match opened {
                 Ok(Ok(ch)) => {
                     guard._permit = Some(permit);
@@ -464,25 +500,37 @@ impl Inner {
 /// destination finishes, so a slow open is told from a stuck connection by
 /// a keepalive: `Err(Elapsed)` only when that goes unanswered too. (A
 /// keepalive also "returns" when the session has ended; the open then fails
-/// at once.)
+/// at once.) The open runs as its own task: a channel the server confirms
+/// after the caller gave up, or was cancelled, is closed rather than left
+/// holding the server's socket to the destination.
 async fn open_channel(
-    conn: &Conn,
-    host: &str,
+    conn: &Arc<Conn>,
+    host: String,
     port: u16,
 ) -> Result<Result<russh::Channel<client::Msg>, russh::Error>, tokio::time::error::Elapsed> {
-    let open = conn.handle.channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0);
-    tokio::pin!(open);
-    if let Ok(r) = tokio::time::timeout(OPEN_TIMEOUT, &mut open).await {
-        return Ok(r);
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    let c = conn.clone();
+    tokio::spawn(async move {
+        let r = c
+            .handle
+            .channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0)
+            .await;
+        if let Err(Ok(ch)) = tx.send(r) {
+            let _ = ch.close().await;
+        }
+    });
+    let gone = |_| Err(russh::Error::Disconnect);
+    if let Ok(r) = tokio::time::timeout(OPEN_TIMEOUT, &mut rx).await {
+        return Ok(r.unwrap_or_else(gone));
     }
     let alive = tokio::time::timeout(OPEN_TIMEOUT, conn.handle.send_ping());
     tokio::select! {
-        r = &mut open => return Ok(r),
+        r = &mut rx => return Ok(r.unwrap_or_else(gone)),
         alive = alive => {
             let _ = alive?;
         }
     }
-    Ok(open.await)
+    Ok(rx.await.unwrap_or_else(gone))
 }
 
 /// On reload: an idle connection closes now, a busy one when its last
@@ -520,7 +568,7 @@ impl Drop for ChannelGuard {
         self.conn.idle.arm(IDLE_TIMEOUT, move || {
             let Some(c) = conn.upgrade() else { return };
             match inner.upgrade() {
-                Some(inner) => inner.discard(&c),
+                Some(inner) => inner.discard_if_idle(&c),
                 None => close(&c),
             }
         });

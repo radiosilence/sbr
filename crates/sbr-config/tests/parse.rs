@@ -242,7 +242,8 @@ fn tun_dns_in_cleartext_outside_the_tunnel_warns() {
         "dns":{"servers":[
             {"type":"udp","tag":"plain","server":"1.1.1.1"},
             {"type":"udp","tag":"via","server":"1.1.1.1","detour":"p"},
-            {"type":"https","tag":"doh","server":"1.1.1.1"}]}}"#,
+            {"type":"https","tag":"doh","server":"1.1.1.1"},
+            {"type":"tcp","tag":"via-direct","server":"1.1.1.1","detour":"d"}]}}"#,
     )
     .unwrap();
     let w: Vec<_> = o.warnings.iter().filter(|w| w.starts_with("dns.servers")).collect();
