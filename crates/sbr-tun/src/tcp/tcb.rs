@@ -162,6 +162,12 @@ pub struct Tcb {
     /// Karn's algorithm: the one segment being timed, unless retransmitted.
     rtt_seq: Option<(u32, Instant)>,
     retries: u32,
+    /// When the oldest unacknowledged data was last sent before the
+    /// retransmissions now under way.
+    stall_start: Option<Instant>,
+    /// Abort once data has gone unacknowledged this long (RFC 5482's user
+    /// timeout); `None` leaves it to `DATA_RETRIES`.
+    pub user_timeout: Option<Duration>,
 
     rto_at: Option<Instant>,
     persist: bool,
@@ -259,6 +265,8 @@ impl Tcb {
             rto: INITIAL_RTO,
             rtt_seq: None,
             retries: 0,
+            stall_start: None,
+            user_timeout: None,
             rto_at: None,
             persist: false,
             linger_at: defer.map(|now| now + HOLD_LIMIT),
@@ -752,6 +760,19 @@ impl Tcb {
 
     /// False if the segment was dropped for want of room.
     fn store_ooo(&mut self, seq: u32, data: &[u8]) -> bool {
+        // The common case past a hole: in order after everything held.
+        if self
+            .ooo
+            .back()
+            .is_some_and(|(es, ed)| le(es.wrapping_add(ed.len() as u32), seq))
+        {
+            if self.ooo.len() >= MAX_OOO {
+                return false;
+            }
+            self.ooo.push_back((seq, data.to_vec()));
+            self.last_ooo = Some(seq);
+            return true;
+        }
         let base = self.rcv_nxt;
         let key = |s: u32| s.wrapping_sub(base);
         let end = seq.wrapping_add(data.len() as u32);
@@ -1042,7 +1063,15 @@ impl Tcb {
             return;
         }
         self.retries += 1;
-        if self.retries > DATA_RETRIES {
+        if self.retries == 1 {
+            // The data has been waiting since the RTO that just expired.
+            self.stall_start = Some(now.checked_sub(self.rto).unwrap_or(now));
+        }
+        let gave_up = self
+            .user_timeout
+            .zip(self.stall_start)
+            .is_some_and(|(limit, since)| now.duration_since(since) >= limit);
+        if self.retries > DATA_RETRIES || gave_up {
             self.abort(io::ErrorKind::TimedOut);
             return;
         }
@@ -1058,6 +1087,11 @@ impl Tcb {
         self.dupacks = 0;
         self.rtt_seq = None;
         self.rto = (self.rto * 2).min(MAX_RTO);
+        if let (Some(limit), Some(since)) = (self.user_timeout, self.stall_start) {
+            // Wake when the user timeout runs out, not a backed-off RTO later.
+            let left = (since + limit).saturating_duration_since(now);
+            self.rto = self.rto.min(left.max(MIN_RTO));
+        }
     }
 
     fn reset(&mut self, e: io::ErrorKind) {

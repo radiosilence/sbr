@@ -435,6 +435,7 @@ impl Device {
             // 2. The stacks: TCP to our addresses goes to the TCP stack
             // (reassembled first if fragmented), everything else to smoltcp.
             let now = Instant::now();
+            let mut budget = TX_BATCH;
             for pkt in rx_batch.drain(..) {
                 let (pkt, h) = match packet::classify(&pkt) {
                     Some(Ip::Whole(h)) => (pkt, Some(h)),
@@ -449,7 +450,12 @@ impl Device {
                 };
                 match h {
                     Some(h) if h.proto == PROTO_TCP && shared.is_local(h.dst.ip()) => {
-                        tcp.input(&pkt[..h.len], &h, now, &mut link(&mut tx_out, &mut io.pool));
+                        tcp.input(
+                            &pkt[..h.len],
+                            &h,
+                            now,
+                            &mut link(&mut tx_out, &mut io.pool, &mut budget),
+                        );
                         io.pool.push(pkt);
                     }
                     _ => smol_rx.push(pkt),
@@ -472,7 +478,7 @@ impl Device {
                 delay = st.iface.poll_delay(shared.now(), &st.sockets);
             }
             {
-                let mut link = link(&mut tx_out, &mut io.pool);
+                let mut link = link(&mut tx_out, &mut io.pool, &mut budget);
                 tcp.drain_app(now);
                 tcp.run_timers(now, &mut link);
                 tcp.flush(now, &mut link);
@@ -567,18 +573,21 @@ impl Device {
 }
 
 /// Where the TCP stack sends: a pooled buffer in `tx_out`, at most
-/// `TX_BATCH` per round so the device gets to encrypt and send them.
-/// Refusing only at a full batch is what keeps `Blocked` from stalling a
+/// `TX_BATCH` per round (`budget`, its own, so UDP output cannot crowd it
+/// out) so the device gets to encrypt and send them. Refusing only once
+/// TCP alone has filled a batch is what keeps `Blocked` from stalling a
 /// connection: a full batch makes the loop go round again without sleeping,
 /// and `Tcp::unblock` after egress lets that round flush.
 fn link<'a>(
     tx_out: &'a mut Vec<Vec<u8>>,
     pool: &'a mut Vec<Vec<u8>>,
+    budget: &'a mut usize,
 ) -> impl FnMut(&mut [u8]) -> Result<(), Blocked> + 'a {
     move |b: &mut [u8]| {
-        if tx_out.len() >= TX_BATCH {
+        if *budget == 0 {
             return Err(Blocked);
         }
+        *budget -= 1;
         let mut v = pool.pop().unwrap_or_default();
         v.clear();
         v.extend_from_slice(&b[HEADROOM..]);

@@ -26,13 +26,6 @@ use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address};
 use tokio::sync::{Notify, watch};
 
-const MOBILE: bool = cfg!(any(
-    target_os = "ios",
-    target_os = "tvos",
-    target_os = "watchos",
-    target_os = "visionos"
-));
-
 /// Limits for the tunnel's TCP. Buffers are elastic, so the per-connection
 /// sizes cost only what a flow actually has buffered. The receive buffer is
 /// the window advertised: 1 MiB covers about 80 Mbit/s at 100 ms. The send
@@ -42,15 +35,18 @@ const MOBILE: bool = cfg!(any(
 /// flow at 100 ms) and caps all buffers together at 8 MiB, inside the Network
 /// Extension's ~50 MB alongside the TUN stack's own 8 MiB. At that cap
 /// windows stop opening and writes wait, with one buffer chunk (4 KiB) per
-/// connection each way always allowed.
+/// connection each way always allowed. A connection whose data goes
+/// unacknowledged for two minutes (a dead tunnel) is aborted, freeing its
+/// buffers.
 pub fn tcp_config() -> TcpConfig {
     TcpConfig {
-        rx_buffer: if MOBILE { 256 << 10 } else { 1 << 20 },
-        tx_buffer: if MOBILE { 256 << 10 } else { 1 << 20 },
+        rx_buffer: if crate::MOBILE { 256 << 10 } else { 1 << 20 },
+        tx_buffer: if crate::MOBILE { 256 << 10 } else { 1 << 20 },
         max_connections: 0,
-        pool_keep: if MOBILE { 1 << 20 } else { 8 << 20 },
-        memory_limit: if MOBILE { 8 << 20 } else { 0 },
+        pool_keep: if crate::MOBILE { 1 << 20 } else { 8 << 20 },
+        memory_limit: if crate::MOBILE { 8 << 20 } else { 0 },
         defer_handshake: false,
+        user_timeout: Some(Duration::from_secs(120)),
     }
 }
 

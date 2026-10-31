@@ -487,6 +487,7 @@ fn cfg(rx: usize, tx: usize) -> TcpConfig {
         pool_keep: 1 << 20,
         memory_limit: 0,
         defer_handshake: false,
+        user_timeout: None,
     }
 }
 
@@ -1600,4 +1601,43 @@ fn a_burst_of_connects_offers_no_more_window_than_the_limit() {
     drop(fs);
     sim.round();
     assert_eq!((sim.tcp.live(), sim.tcp.env().pool.promised()), (0, 0));
+}
+
+#[test]
+fn user_timeout_aborts_a_dead_path() {
+    let mut c = cfg(64 << 10, 64 << 10);
+    c.user_timeout = Some(Duration::from_secs(120));
+    let mut sim = Sim::client(c, 1500);
+    let h = sim.listen(80, 4096, 4096, true);
+    let mut f = sim.dial(false, 80);
+    let mut s = None;
+    sim.run(Duration::from_secs(5), |_| {
+        if let Some(r) = poll_connect(&mut f) {
+            s = Some(r.unwrap());
+        }
+        s.is_some()
+    });
+    let mut s = s.unwrap();
+    sim.run(Duration::from_secs(5), |sim| {
+        sim.sock(h).state() == stcp::State::Established
+    });
+    // The path dies with data in flight.
+    sim.imp_down.loss = 1.0;
+    let sent_at = sim.now;
+    assert_eq!(poll_write(&mut s, b"hello").unwrap().unwrap(), 5);
+    let mut b = [0u8; 8];
+    let mut err = None;
+    sim.run(Duration::from_secs(300), |_| {
+        if let Some(Err(e)) = poll_read(&mut s, &mut b) {
+            err = Some(e.kind());
+        }
+        err.is_some()
+    });
+    assert_eq!(err, Some(io::ErrorKind::TimedOut));
+    let took = sim.now - sent_at;
+    assert!(
+        took >= Duration::from_secs(120) && took < Duration::from_secs(122),
+        "gave up after {took:?}"
+    );
+    assert_eq!(sim.tcp.live(), 0);
 }

@@ -63,6 +63,10 @@ pub struct TcpConfig {
     /// die. A config that sniffs before routing still completes the
     /// handshake first, since sniffing needs the app's first bytes.
     pub defer_handshake: bool,
+    /// Abort a connection whose sent data has gone unacknowledged this long
+    /// (a dead path). `None` gives up after about five minutes of
+    /// backed-off retransmissions.
+    pub user_timeout: Option<Duration>,
     /// Cap on what all connections' buffers hold together (0: none). At the
     /// cap, receive windows stop opening and writes wait, except that each
     /// connection may always buffer one chunk (`buf::CHUNK`: 4 KiB on mobile,
@@ -92,6 +96,7 @@ impl Default for TcpConfig {
                 pool_keep: 1 << 20,
                 memory_limit: 8 << 20,
                 defer_handshake: true,
+                user_timeout: None,
             }
         } else {
             Self {
@@ -101,6 +106,7 @@ impl Default for TcpConfig {
                 pool_keep: 8 << 20,
                 memory_limit: 0,
                 defer_handshake: true,
+                user_timeout: None,
             }
         }
     }
@@ -602,7 +608,7 @@ impl Tcp {
     fn open(&mut self, local: SocketAddr, remote: SocketAddr, seg: &wire::Seg, now: Instant) -> u32 {
         let (i, shared) = self.alloc();
         let iss = self.iss(local, remote, now);
-        let t = Tcb::from_syn(
+        let mut t = Tcb::from_syn(
             local,
             remote,
             seg,
@@ -614,6 +620,7 @@ impl Tcp {
             self.cfg.defer_handshake.then_some(now),
             self.env.pool.clone(),
         );
+        t.user_timeout = self.cfg.user_timeout;
         self.slots[i as usize].tcb = Some(Box::new(t));
         self.table.insert((remote, local), i);
         self.live += 1;
@@ -661,7 +668,7 @@ impl Tcp {
             };
             let (i, shared) = self.alloc();
             let iss = self.iss(local, r.remote, now);
-            let t = Tcb::connect(
+            let mut t = Tcb::connect(
                 local,
                 r.remote,
                 iss,
@@ -671,6 +678,7 @@ impl Tcp {
                 shared.clone(),
                 self.env.pool.clone(),
             );
+            t.user_timeout = self.cfg.user_timeout;
             self.slots[i as usize].tcb = Some(Box::new(t));
             self.table.insert((r.remote, local), i);
             self.live += 1;
