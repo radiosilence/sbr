@@ -82,6 +82,7 @@ jobs:
           name: sbr-macos-app
           path: apple/build/macos/sbr.app.zip
           if-no-files-found: error
+          overwrite: true
           retention-days: 7
       - if: always()
         run: |
@@ -122,6 +123,7 @@ jobs:
           name: ${{ inputs.notarise && 'sbr-macos-dmg' || 'sbr-macos' }}
           path: apple/build/macos/sbr-*.dmg
           if-no-files-found: error
+          overwrite: true
           retention-days: 7
       - if: always()
         run: |
@@ -156,5 +158,7 @@ jobs:
           name: sbr-macos
           path: apple/build/macos/sbr-*.dmg
           if-no-files-found: error
+          overwrite: true
+          retention-days: 7
       - if: always()
         run: rm -f "$RUNNER_TEMP/AuthKey.p8"

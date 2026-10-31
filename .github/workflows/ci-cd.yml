@@ -317,7 +317,7 @@ jobs:
               echo "::error::apple/App/project.yml's MARKETING_VERSION ($marketing) differs from Cargo.toml's version ($version)"
               exit 1
             fi
-            if ! grep -qx "## $version" CHANGELOG.md; then
+            if ! grep -qxF "## $version" CHANGELOG.md; then
               echo "::error::CHANGELOG.md has no section for $version: release with mise run release"
               exit 1
             fi
