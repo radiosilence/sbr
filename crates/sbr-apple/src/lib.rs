@@ -207,17 +207,26 @@ impl Reply {
             profile,
             error,
         };
-        let mut call = Some(call);
-        let spawned = std::thread::Builder::new().name("sbr-reply".into()).spawn({
-            let call = call.take();
-            move || call.map(Call::run)
+        deliver(call, |f| {
+            std::thread::Builder::new().name("sbr-reply".into()).spawn(f).map(drop)
         });
-        if let Err(e) = spawned {
-            // Could not spawn: calling inline is better than never.
-            tracing::warn!(error = %e, "profile callback thread");
+    }
+}
+
+/// Run `call` on a thread from `spawn`, or inline if none can be started:
+/// the host is owed exactly one call.
+fn deliver(call: Call, spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>) {
+    let slot = Arc::new(Mutex::new(Some(call)));
+    let take = |s: &Mutex<Option<Call>>| s.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let theirs = slot.clone();
+    if let Err(e) = spawn(Box::new(move || {
+        if let Some(c) = take(&theirs) {
+            c.run();
         }
-        if let Some(call) = call {
-            call.run();
+    })) {
+        tracing::warn!(error = %e, "profile callback thread");
+        if let Some(c) = take(&slot) {
+            c.run();
         }
     }
 }

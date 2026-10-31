@@ -401,6 +401,21 @@ fn fetch_abi(i: *mut SbrInstance, url: &str) -> (i32, std::sync::mpsc::Receiver<
 }
 
 #[test]
+fn reply_runs_inline_when_no_thread_can_start() {
+    let (tx, rx) = std::sync::mpsc::channel::<Outcome>();
+    let call = Call {
+        callback: fetched,
+        context: Box::into_raw(Box::new(tx)).cast(),
+        profile: None,
+        error: Some(c("cancelled")),
+    };
+    deliver(call, |_| Err(std::io::Error::other("no threads")));
+    let (p, e) = rx.try_recv().expect("called inline");
+    assert_eq!((p, e.as_deref()), (None, Some("cancelled")));
+    assert!(rx.try_recv().is_err(), "exactly once");
+}
+
+#[test]
 fn profile_fetch_abi_calls_back_exactly_once() {
     let i = start(CFG, sbr_start_options_default());
     let (addr, _) = profile_server("{}");

@@ -31,7 +31,7 @@ const MAX_CACHED_RECORDS: usize = 64;
 const MAX_CACHED_BYTES: usize = if cfg!(any(target_os = "ios", target_os = "tvos", target_os = "visionos")) {
     1 << 20
 } else {
-    8 << 20
+    4 << 20
 };
 /// Larger answers are not cached at all, so one cannot evict a large part
 /// of the cache.

@@ -11,6 +11,8 @@ mod httpx;
 pub mod inbound;
 pub mod outbound;
 mod ruleset;
+#[cfg(unix)]
+pub mod signal_stack;
 mod socks5;
 pub mod tls;
 pub mod track;

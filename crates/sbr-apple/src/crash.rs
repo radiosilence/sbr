@@ -2,7 +2,6 @@
 //! with it, and the system only reports "plugin failed". Panics and fatal
 //! signals are appended to a file the host reads on the next start.
 
-use std::cell::RefCell;
 use std::ffi::c_int;
 use std::fs::OpenOptions;
 use std::io;
@@ -46,7 +45,7 @@ pub fn install(path: &str) -> io::Result<()> {
         }));
         for (i, sig) in SIGNALS.into_iter().enumerate() {
             // SA_ONSTACK: a stack overflow can only be reported from an
-            // alternate signal stack ([`alt_stack`]).
+            // alternate signal stack (`sbr_engine::signal_stack`).
             // SAFETY: the handler only calls async-signal-safe functions.
             unsafe {
                 let mut action: libc::sigaction = std::mem::zeroed();
@@ -81,91 +80,31 @@ extern "C" fn on_signal(sig: c_int) {
         _ => b"fatal signal\n",
     };
     write_all(msg);
-    // SAFETY: sigaction and raise are async-signal-safe. The signal is
-    // blocked while this handler runs, so the handler that was there before
-    // ours (or the default action, which kills the process) takes it once
-    // this one returns.
+    let previous = SIGNALS.iter().position(|&s| s == sig).and_then(|i| PREVIOUS[i].get());
+    // SAFETY: sigaction, signal and raise are async-signal-safe.
     unsafe {
-        match SIGNALS.iter().position(|&s| s == sig).and_then(|i| PREVIOUS[i].get()) {
-            Some(previous) => libc::sigaction(sig, previous, std::ptr::null_mut()),
+        match previous {
+            Some(previous) => {
+                libc::sigaction(sig, previous, std::ptr::null_mut());
+                // A hardware fault recurs when the faulting instruction runs
+                // again on return, and reaches the previous handler with its
+                // real siginfo and context, which a raised copy would lack.
+                if sig != libc::SIGABRT {
+                    return;
+                }
+            }
             None => {
                 libc::signal(sig, libc::SIG_DFL);
-                0
             }
-        };
+        }
+        // Blocked while this handler runs: the restored action takes it once
+        // this one returns.
         libc::raise(sig);
     }
 }
 
-/// Signal stack size for [`alt_stack`]: the handler only formats nothing and
-/// calls write(2).
-const ALT_STACK: usize = 64 * 1024;
-
-thread_local! {
-    static ALT: RefCell<Option<AltStack>> = const { RefCell::new(None) };
-}
-
-struct AltStack(Box<[u8]>);
-
-impl Drop for AltStack {
-    fn drop(&mut self) {
-        // SAFETY: disabling this thread's alternate stack before its memory
-        // is freed.
-        unsafe {
-            let mut ss: libc::stack_t = std::mem::zeroed();
-            ss.ss_flags = libc::SS_DISABLE;
-            libc::sigaltstack(&ss, std::ptr::null_mut());
-        }
-    }
-}
-
-/// Give the calling thread an alternate signal stack, freed when it exits.
-/// Rust sets these up only when it owns `main`, which a library linked into
-/// the host does not; without one a stack overflow cannot run the handler,
-/// and the process dies with no breadcrumb. Call it on every thread sbr
-/// starts.
-pub fn alt_stack() {
-    ALT.with(|a| {
-        let mut a = a.borrow_mut();
-        if a.is_some() {
-            return;
-        }
-        let mut mem = vec![0u8; ALT_STACK].into_boxed_slice();
-        // SAFETY: `mem` outlives the registration: `AltStack::drop` disables
-        // it first.
-        let ok = unsafe {
-            let ss = libc::stack_t {
-                ss_sp: mem.as_mut_ptr().cast(),
-                ss_size: mem.len(),
-                ss_flags: 0,
-            };
-            libc::sigaltstack(&ss, std::ptr::null_mut()) == 0
-        };
-        if ok {
-            *a = Some(AltStack(mem));
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn threads_get_an_alt_stack() {
-        std::thread::spawn(|| {
-            super::alt_stack();
-            // SAFETY: querying this thread's alternate stack.
-            let ss = unsafe {
-                let mut ss: libc::stack_t = std::mem::zeroed();
-                assert_eq!(libc::sigaltstack(std::ptr::null(), &mut ss), 0);
-                ss
-            };
-            assert_eq!(ss.ss_flags & libc::SS_DISABLE, 0);
-            assert_eq!(ss.ss_size, super::ALT_STACK);
-        })
-        .join()
-        .unwrap();
-    }
-
     #[test]
     fn panics_leave_a_breadcrumb() {
         let path = std::env::temp_dir().join(format!("sbr-crash-{}.log", std::process::id()));
