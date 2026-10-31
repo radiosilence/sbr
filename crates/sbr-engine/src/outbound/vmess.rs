@@ -39,6 +39,10 @@ const TAG: usize = 16;
 const MAX_CHUNK: usize = 15000;
 /// Chunks per direction before the 16-bit nonce counter repeats.
 const MAX_CHUNKS: u32 = 1 << 16;
+/// Read buffer size. A server may send chunks up to 64 KiB; the buffer grows
+/// for one and returns to this size once it is consumed, so one large chunk
+/// does not pin 64 KiB for the life of the connection.
+const RBUF: usize = 32 * 1024;
 
 pub struct Vmess {
     tag: String,
@@ -208,10 +212,10 @@ fn gcm(key16: &[u8]) -> LessSafeKey {
 }
 
 fn seal(key: &LessSafeKey, nonce: [u8; 12], aad: &[u8], buf: &mut Vec<u8>, start: usize) {
-    let mut tail = buf.split_off(start);
-    key.seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::from(aad), &mut tail)
+    let tag = key
+        .seal_in_place_separate_tag(Nonce::assume_unique_for_key(nonce), Aad::from(aad), &mut buf[start..])
         .expect("seal");
-    buf.extend_from_slice(&tail);
+    buf.extend_from_slice(tag.as_ref());
 }
 
 fn shake(seed: &[u8]) -> sha3::Shake128Reader {
@@ -444,6 +448,9 @@ pub struct VmessStream<S> {
     rend: usize,
     /// Max plaintext per chunk.
     chunk: usize,
+    /// UDP: each chunk is one datagram, so a read never returns part of one
+    /// (the rest of a chunk longer than the caller's buffer is dropped).
+    datagrams: bool,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> VmessStream<S> {
@@ -540,7 +547,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> VmessStream<S> {
             resp_key,
             read_flushes: false,
             resp_nonce,
-            rbuf: vec![0; 32 * 1024],
+            rbuf: vec![0; RBUF],
             rpos: 0,
             rend: 0,
             chunk: if command == CMD_UDP {
@@ -548,6 +555,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> VmessStream<S> {
             } else {
                 MAX_CHUNK
             },
+            datagrams: command == CMD_UDP,
         }
     }
 
@@ -693,7 +701,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for VmessStream<S> {
                 ReadState::Plain(s, e) => {
                     let n = (e - s).min(out.remaining());
                     out.put_slice(&this.rbuf[s..s + n]);
-                    this.rstate = if s + n == e {
+                    this.rstate = if s + n == e || this.datagrams {
+                        if this.rbuf.len() > RBUF && this.rpos == this.rend {
+                            this.rbuf.truncate(RBUF);
+                            this.rbuf.shrink_to_fit();
+                        }
                         ReadState::Len
                     } else {
                         ReadState::Plain(s + n, e)

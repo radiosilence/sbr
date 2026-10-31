@@ -586,42 +586,53 @@ impl PacketConn for Uot {
     fn recv_from<'a>(&'a self, buf: &'a mut [u8]) -> BoxFuture<'a, io::Result<(usize, Destination)>> {
         Box::pin(async move {
             let mut r = self.recv.lock().await;
-            let mut ty = [0u8; 1];
-            read_exact(&mut r, &mut ty).await?;
-            let host = match ty[0] {
-                0 => {
-                    let mut a = [0u8; 4];
-                    read_exact(&mut r, &mut a).await?;
-                    Host::Ip(a.into())
+            loop {
+                let mut ty = [0u8; 1];
+                read_exact(&mut r, &mut ty).await?;
+                let host = match ty[0] {
+                    0 => {
+                        let mut a = [0u8; 4];
+                        read_exact(&mut r, &mut a).await?;
+                        Host::Ip(a.into())
+                    }
+                    1 => {
+                        let mut a = [0u8; 16];
+                        read_exact(&mut r, &mut a).await?;
+                        Host::Ip(a.into())
+                    }
+                    2 => {
+                        let mut l = [0u8; 1];
+                        read_exact(&mut r, &mut l).await?;
+                        let mut name = vec![0u8; usize::from(l[0])];
+                        read_exact(&mut r, &mut name).await?;
+                        Destination::from_host_port(&String::from_utf8_lossy(&name), 0).host
+                    }
+                    t => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("UoT: address type {t}"),
+                        ));
+                    }
+                };
+                let mut pl = [0u8; 4];
+                read_exact(&mut r, &mut pl).await?;
+                let port = u16::from_be_bytes([pl[0], pl[1]]);
+                let len = usize::from(u16::from_be_bytes([pl[2], pl[3]]));
+                if len > buf.len() {
+                    // Too big for the caller: drop it and keep the session.
+                    let mut left = len;
+                    while left > 0 {
+                        let n = left.min(buf.len()).max(1).min(len);
+                        let mut scratch = [0u8; 512];
+                        let n = n.min(scratch.len());
+                        read_exact(&mut r, &mut scratch[..n]).await?;
+                        left -= n;
+                    }
+                    continue;
                 }
-                1 => {
-                    let mut a = [0u8; 16];
-                    read_exact(&mut r, &mut a).await?;
-                    Host::Ip(a.into())
-                }
-                2 => {
-                    let mut l = [0u8; 1];
-                    read_exact(&mut r, &mut l).await?;
-                    let mut name = vec![0u8; usize::from(l[0])];
-                    read_exact(&mut r, &mut name).await?;
-                    Destination::from_host_port(&String::from_utf8_lossy(&name), 0).host
-                }
-                t => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("UoT: address type {t}"),
-                    ));
-                }
-            };
-            let mut pl = [0u8; 4];
-            read_exact(&mut r, &mut pl).await?;
-            let port = u16::from_be_bytes([pl[0], pl[1]]);
-            let len = usize::from(u16::from_be_bytes([pl[2], pl[3]]));
-            if len > buf.len() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "UoT: short buffer"));
+                read_exact(&mut r, &mut buf[..len]).await?;
+                return Ok((len, Destination::new(host, port)));
             }
-            read_exact(&mut r, &mut buf[..len]).await?;
-            Ok((len, Destination::new(host, port)))
         })
     }
 }
