@@ -1,0 +1,1 @@
+- **One macOS runner per run.** The macOS tests and the Apple build share one job instead of holding two macOS runners, and a release push skips that job, since its pull request ran it, leaving the release build as its only macOS job while the checks run.

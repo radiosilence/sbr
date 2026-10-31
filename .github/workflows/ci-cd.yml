@@ -4,7 +4,8 @@ name: CI/CD
 # require: a skipped job passes it, a failed or cancelled one fails it.
 #
 # CD runs after `Checks` has passed on main: every push uploads the iOS app to
-# TestFlight, built from the xcframework the `Apple` job built and checked. A
+# TestFlight, built from the xcframework CI built: the `Apple` job's, or on a
+# release push `Release (macOS)`'s. A
 # push that changes the workspace version to one not yet released (a merged
 # `just release` pull request) also releases: the Developer ID macOS disk
 # image and the GitHub release, whose tag CI creates. The Mac app's release
@@ -173,25 +174,52 @@ jobs:
       - if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
         run: cargo test --workspace --no-fail-fast
 
-  # The same on macOS, where the code behind `target_vendor = "apple"` compiles,
-  # and with sing-box, Xray and apernet hysteria2 installed so the interop
-  # tests run against them rather than skipping.
-  macos:
-    name: macOS
+  # Everything that needs a Mac, on one runner, since the account's macOS
+  # runners are few: clippy and the tests, where the code behind
+  # `target_vendor = "apple"` compiles and the interop tests run against
+  # sing-box, Xray and apernet hysteria2 rather than skipping; then the
+  # xcframework for every Apple platform the app ships on, and the app against
+  # it, unsigned. Each check runs however an earlier one went, so one push
+  # reports every failure. Main keeps the xcframework for TestFlight, so CD
+  # ships what CI built.
+  #
+  # A release push skips it: its pull request ran it on the same tree, and
+  # `Release (macOS)` builds the xcframework TestFlight takes, so the release
+  # holds one macOS runner while the checks run rather than two.
+  apple:
+    name: Apple
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 150
+    needs: changes
+    if: ${{ !(github.event_name != 'pull_request' && needs.changes.outputs.release == 'true') }}
+    env:
+      # The app has no Catalyst target; the slices build for nothing.
+      SBR_SKIP_CATALYST: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # tvOS is tier 3: nightly builds its std from source. Stable last, so it
+      # is the default toolchain everything else builds with.
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+        with:
+          toolchain: nightly
+          components: rust-src
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
         with:
           toolchain: stable
           components: clippy
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin
+      # The tests' debug build and the xcframework's seven release builds
+      # with fat LTO, the slowest part of the run. Saved even when a check
+      # fails, since what built is still worth keeping.
       - id: cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          shared-key: macos
+          shared-key: apple
           cache-on-failure: true
+      - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
+        with:
+          install_args: xcodegen
       - name: Install the interop servers
         env:
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
@@ -219,43 +247,14 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
         run: cargo test --workspace --no-fail-fast
-
-  # The xcframework for every Apple platform the app ships on, then the app
-  # against it, unsigned. Main keeps the xcframework for TestFlight, so CD
-  # ships what CI built.
-  apple:
-    name: Apple
-    runs-on: macos-latest
-    timeout-minutes: 120
-    env:
-      # The app has no Catalyst target; the slices build for nothing.
-      SBR_SKIP_CATALYST: "1"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # tvOS is tier 3: nightly builds its std from source. Stable last, so it
-      # is the default toolchain the script's other builds use.
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
-        with:
-          toolchain: nightly
-          components: rust-src
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
-        with:
-          toolchain: stable
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin
-      # Seven release builds with fat LTO: the slowest part of the run.
-      # Saved even when the app fails to build, since the Rust built fine.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          shared-key: apple
-          cache-on-failure: true
-      - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
-        with:
-          install_args: xcodegen
-      - run: apple/build-xcframework.sh
-      - run: mise exec -- xcodegen generate
+      - id: xcframework
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        run: apple/build-xcframework.sh
+      - if: ${{ !cancelled() && steps.xcframework.outcome == 'success' }}
+        run: mise exec -- xcodegen generate
         working-directory: apple/App
       - name: Build the app
+        if: ${{ !cancelled() && steps.xcframework.outcome == 'success' }}
         working-directory: apple/App
         run: |
           for spec in Sbr:iOS Sbr:tvOS Sbr:macOS SbrMac:macOS; do
@@ -275,9 +274,9 @@ jobs:
             fi
           done
       # Tarred: an artifact keeps neither symlinks nor modes.
-      - if: github.event_name != 'pull_request'
+      - if: ${{ github.event_name != 'pull_request' && steps.xcframework.outcome == 'success' }}
         run: tar czf "$RUNNER_TEMP/SbrCore.xcframework.tar.gz" -C apple SbrCore.xcframework
-      - if: github.event_name != 'pull_request'
+      - if: ${{ github.event_name != 'pull_request' && steps.xcframework.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: SbrCore.xcframework
@@ -319,7 +318,7 @@ jobs:
     name: Checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [changes, actionlint, fmt, linux, macos, apple, changelog]
+    needs: [changes, actionlint, fmt, linux, apple, changelog]
     if: always()
     steps:
       - env:
@@ -335,12 +334,14 @@ jobs:
   # ── CD ──────────────────────────────────────────────────────────────────
 
   # Every push to main that passes uploads an iOS build: the version stays and
-  # the build number (the time) rises, so testers always have main. A failed
-  # upload is retried alone from ios.yml's manual dispatch.
+  # the build number (the time) rises, so testers always have main. On a
+  # release push it waits for `Release (macOS)`, whose xcframework it takes.
+  # Nothing waits on it; a failed upload is retried alone from ios.yml's
+  # manual dispatch.
   testflight:
     name: TestFlight
-    needs: checks
-    if: ${{ !cancelled() && needs.checks.result == 'success' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+    needs: [checks, macos-release]
+    if: ${{ !cancelled() && needs.checks.result == 'success' && needs.macos-release.result != 'failure' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
     uses: ./.github/workflows/ios.yml
     secrets: inherit
 
@@ -349,8 +350,9 @@ jobs:
   # notarised by `notarise` once the release is out. Started by `make-room`
   # rather than after `Checks`: it is the longest job in a release and
   # publishes nothing, so it builds while the checks run, and the publishing
-  # waits for both. It builds the macOS slice of the xcframework itself, from
-  # the `Apple` job's cache.
+  # waits for both. It builds the xcframework itself, from the `Apple` job's
+  # cache, with the iOS slices TestFlight needs, since a release push skips
+  # that job.
   macos-release:
     name: Release (macOS)
     runs-on: macos-latest
@@ -362,16 +364,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
         with:
           toolchain: stable
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: apple
           save-if: false
       - run: apple/build-xcframework.sh
         env:
-          SBR_SKIP_IOS: "1"
           SBR_SKIP_TVOS: "1"
           SBR_SKIP_CATALYST: "1"
+      - run: tar czf "$RUNNER_TEMP/SbrCore.xcframework.tar.gz" -C apple SbrCore.xcframework
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: SbrCore.xcframework
+          path: ${{ runner.temp }}/SbrCore.xcframework.tar.gz
+          retention-days: 1
       - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
         with:
           install_args: xcodegen
