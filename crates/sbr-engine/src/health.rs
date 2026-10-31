@@ -131,6 +131,9 @@ pub struct Degraded {
 }
 
 #[derive(Debug, Clone)]
+/// Events kept per leaf: far more distinct destinations than a burst needs.
+const MAX_EVENTS: usize = 64;
+
 struct Event {
     at: Instant,
     signal: Signal,
@@ -187,8 +190,18 @@ impl Record {
             return out;
         }
         if signal.hard() {
-            self.events
-                .retain(|e| now.duration_since(e.at) < WINDOW && (conn.is_none() || e.conn != conn));
+            // Only distinct destinations count, so one destination keeps one
+            // event per kind: an app retrying a dead host in a loop would
+            // otherwise add one per attempt, each counted under the lock.
+            let closed = signal == Signal::Closed;
+            self.events.retain(|e| {
+                now.duration_since(e.at) < WINDOW
+                    && (conn.is_none() || e.conn != conn)
+                    && !(e.dest == dest && (e.signal == Signal::Closed) == closed)
+            });
+            if self.events.len() >= MAX_EVENTS {
+                self.events.remove(0);
+            }
             self.events.push(Event {
                 at: now,
                 signal,
@@ -662,6 +675,17 @@ mod tests {
         let d = r.degraded().unwrap();
         assert_eq!(d.reason, Signal::Connect);
         assert_eq!(d.until, t + 3 * S + BACKOFF_BASE);
+    }
+
+    #[test]
+    fn one_destination_retried_keeps_one_event() {
+        let t = Instant::now();
+        let mut r = Record::default();
+        for i in 0..10_000u64 {
+            r.report(t + Duration::from_millis(i), Signal::Connect, "dead.example", None);
+        }
+        assert_eq!(r.events.len(), 1);
+        assert!(r.degraded().is_none(), "one website, not the path");
     }
 
     #[test]
