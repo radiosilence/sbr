@@ -1,0 +1,1 @@
+- **Deleting the active profile removes what the tunnel kept.** The tunnel stops and its cache, rule-sets, logs and downloaded copy of the profile are deleted. Erase everything also deletes the tunnel's files when it is off.

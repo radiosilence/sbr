@@ -1,0 +1,1 @@
+- **`SbrConfigStore` keeps `config.json` out of backups.** It holds server credentials.

@@ -6,11 +6,14 @@ pub(crate) mod direct;
 pub mod group;
 mod http;
 mod hysteria2;
+mod idle;
+mod mux;
 mod proto;
 pub(crate) mod quic;
 mod shadowsocks;
 mod shadowtls;
 mod socks;
+mod ssh;
 mod tlsmini;
 mod trojan;
 mod tuic;
@@ -30,6 +33,8 @@ use sbr_core::dns::{Dns, ResolverSpec};
 use sbr_core::{BoxPacketConn, Destination, Stream};
 
 pub use group::{GroupEnv, Selector, UrlTest};
+#[doc(hidden)]
+pub use mux::fuzz_session as fuzz_mux_session;
 pub use sbr_core::{Group, Outbound, PacketConn};
 
 /// Shared services outbounds may need while being built.
@@ -180,6 +185,7 @@ fn server_of(kind: &OutboundKind) -> Option<(&sbr_config::ServerAddr, &Dial)> {
         OutboundKind::Shadowsocks(s) => Some((&s.server, &s.dial)),
         OutboundKind::ShadowTls(s) => Some((&s.server, &s.dial)),
         OutboundKind::AnyTls(a) => Some((&a.server, &a.dial)),
+        OutboundKind::Ssh(s) => Some((&s.server, &s.dial)),
         OutboundKind::Trojan(c) => Some((&c.common.server, &c.common.dial)),
         OutboundKind::Vless(c) => Some((&c.common.server, &c.common.dial)),
         OutboundKind::Vmess(c) => Some((&c.common.server, &c.common.dial)),
@@ -204,6 +210,26 @@ fn probe_target_of(kind: &OutboundKind) -> Option<Destination> {
         _ => return None,
     };
     Some(Destination::from_host_port(server, port))
+}
+
+/// The protocol outbound's config: under `multiplex` it carries the
+/// session over TCP whatever `network` says, which the mux applies instead.
+fn session_carrier<C: Clone>(c: &C, muxed: bool, network: impl FnOnce(&mut C) -> &mut Vec<sbr_config::Network>) -> C {
+    let mut c = c.clone();
+    if muxed {
+        network(&mut c).clear();
+    }
+    c
+}
+
+/// `o` behind sing-mux when `multiplex` is enabled. The protocol carries
+/// the session (to `sp.mux.sing-box.arpa`), so `network` is applied by the
+/// mux to the streams inside it.
+fn multiplexed(o: Arc<dyn Outbound>, m: Option<&sbr_config::Multiplex>, tcp: bool, udp: bool) -> Arc<dyn Outbound> {
+    match m {
+        Some(m) => Arc::new(mux::Mux::new(o, m, tcp, udp)),
+        None => o,
+    }
 }
 
 impl Builder<'_> {
@@ -263,18 +289,54 @@ impl Builder<'_> {
             }
             OutboundKind::Trojan(c) => {
                 let up = self.upstream(&c.common.dial)?;
-                Arc::new(trojan::Trojan::new(tag, c, up, self.ctx).map_err(invalid)?)
+                let o = Arc::new(
+                    trojan::Trojan::new(
+                        tag,
+                        &session_carrier(c, c.common.multiplex.is_some(), |c| &mut c.common.network),
+                        up,
+                        self.ctx,
+                    )
+                    .map_err(invalid)?,
+                );
+                multiplexed(o, c.common.multiplex.as_ref(), c.common.tcp(), c.common.udp())
             }
             OutboundKind::Vless(c) => {
                 let up = self.upstream(&c.common.dial)?;
-                Arc::new(vless::Vless::new(tag, c, up, self.ctx).map_err(invalid)?)
+                let o = Arc::new(
+                    vless::Vless::new(
+                        tag,
+                        &session_carrier(c, c.common.multiplex.is_some(), |c| &mut c.common.network),
+                        up,
+                        self.ctx,
+                    )
+                    .map_err(invalid)?,
+                );
+                multiplexed(o, c.common.multiplex.as_ref(), c.common.tcp(), c.common.udp())
             }
             OutboundKind::Vmess(c) => {
                 let up = self.upstream(&c.common.dial)?;
-                Arc::new(vmess::Vmess::new(tag, c, up, self.ctx).map_err(invalid)?)
+                let o = Arc::new(
+                    vmess::Vmess::new(
+                        tag,
+                        &session_carrier(c, c.common.multiplex.is_some(), |c| &mut c.common.network),
+                        up,
+                        self.ctx,
+                    )
+                    .map_err(invalid)?,
+                );
+                multiplexed(o, c.common.multiplex.as_ref(), c.common.tcp(), c.common.udp())
             }
             OutboundKind::Shadowsocks(s) => {
-                Arc::new(shadowsocks::Shadowsocks::new(tag, s, self.upstream(&s.dial)?).map_err(invalid)?)
+                let inner = sbr_config::ShadowsocksOutbound {
+                    network: if s.multiplex.is_some() { None } else { s.network },
+                    ..s.clone()
+                };
+                let o = Arc::new(shadowsocks::Shadowsocks::new(tag, &inner, self.upstream(&s.dial)?).map_err(invalid)?);
+                let (tcp, udp) = match s.network {
+                    None => (true, true),
+                    Some(n) => (n == sbr_config::Network::Tcp, n == sbr_config::Network::Udp),
+                };
+                multiplexed(o, s.multiplex.as_ref(), tcp, udp)
             }
             OutboundKind::Hysteria2(h) => Arc::new(
                 hysteria2::Hysteria2::new(tag, h, self.upstream(&h.dial)?, self.dns(&h.dial)).map_err(invalid)?,
@@ -299,6 +361,9 @@ impl Builder<'_> {
                 Arc::new(shadowtls::ShadowTls::new(tag, s, self.upstream(&s.dial)?).map_err(invalid)?)
             }
             OutboundKind::AnyTls(a) => Arc::new(anytls::AnyTls::new(tag, a, self.upstream(&a.dial)?).map_err(invalid)?),
+            OutboundKind::Ssh(s) => {
+                Arc::new(ssh::Ssh::new(tag, s, self.upstream(&s.dial)?, self.ctx).map_err(invalid)?)
+            }
             OutboundKind::UrlTest(g) => {
                 let members = g.outbounds.iter().map(|t| self.dep(t)).collect::<Result<Vec<_>, _>>()?;
                 let u = UrlTest::new(tag.clone(), members, g, self.ctx.groups.clone()).map_err(invalid)?;

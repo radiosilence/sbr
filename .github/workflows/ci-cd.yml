@@ -6,8 +6,11 @@ name: CI/CD
 # CD runs after `Checks` has passed on main: every push uploads the iOS app to
 # TestFlight, built from the xcframework the `Apple` job built and checked. A
 # push that changes the workspace version to one not yet released (a merged
-# `just release` pull request) also releases: the notarised macOS disk
-# image and the GitHub release, whose tag CI creates.
+# `just release` pull request) also releases: the Developer ID macOS disk
+# image and the GitHub release, whose tag CI creates. The Mac app's release
+# build is the longest job and publishes nothing, so it starts alongside the
+# checks rather than after them; the release waits for both. Apple's notary
+# comes last, after the release is out, so its queue holds up nothing.
 on:
   push:
     branches: [main]
@@ -17,37 +20,120 @@ on:
     branches: [main]
     # Documentation alone runs nothing, but changelog fragments are linted.
     paths: ["**", "!**.md", "changelog.d/**"]
+  # Releases the workspace version if it is not out yet: how a failed release
+  # is retried.
   workflow_dispatch:
-    inputs:
-      release:
-        description: Release the workspace version if it is not out yet (how a failed release is retried)
-        type: boolean
-        default: false
 
 env:
   CARGO_TERM_COLOR: always
 
-# A pull request's newer push cancels its older run. Main is pushed to more
-# often than a full run takes, so cancelling there would leave main never
-# tested and the caches never saved: a newer push waits for the run in
-# progress instead, and replaces any run still waiting, so the newest commit
-# is the one tested next. A manual run is never cancelled.
+# The macOS runners are few, so a run nobody will look at gives way to the
+# next. A pull request's newer push cancels its older run; on main, a newer
+# push cancels an older one that releases nothing, since the newer one uploads
+# to TestFlight in its place.
 #
-# A push that may release is in a group of its own, so a later push cannot
-# replace it while it waits. The group is chosen before any job runs, so it
-# cannot ask `version`: a push may release when its head commit is titled
-# `release: ` (as scripts/release.sh names its pull request) or changes
-# Cargo.toml, which also keeps an ordinary dependency change in a group of its
-# own.
+# A run that may release is in a group of its own and is never cancelled, and
+# nor is a manual run. The group is chosen before any job runs, so it cannot
+# ask `changes`: a push may release when its head commit is titled `release: `
+# (as scripts/release.sh names its pull request) or changes Cargo.toml, which
+# also keeps an ordinary dependency change from being cancelled.
 concurrency:
   group: "ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.run_id) || (startsWith(github.event.head_commit.message, 'release: ') || contains(github.event.head_commit.modified, 'Cargo.toml')) && format('release-{0}', github.sha) || 'main' }}"
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: "${{ github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'release: ') && !contains(github.event.head_commit.modified, 'Cargo.toml')) }}"
 
 permissions:
   contents: read
 
 jobs:
   # ── CI ──────────────────────────────────────────────────────────────────
+
+  # Whether this run releases, the one answer every release job reads: a push
+  # to main that changes the workspace version, or a manual run on main, when
+  # that version has no GitHub release yet. Answered first, so the release
+  # build can start alongside the checks, and a release that would fail late
+  # fails before any macOS runner starts.
+  changes:
+    name: Changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version_of() { sed -n 's/^version = "\(.*\)"/\1/p' | head -1; }
+          version=$(version_of < Cargo.toml)
+          release=false
+          if [ "$GITHUB_REF" = refs/heads/main ] && { [ "$EVENT" = workflow_dispatch ] \
+            || { [ "$EVENT" = push ] && [ "$(git show HEAD^1:Cargo.toml 2>/dev/null | version_of)" != "$version" ]; }; }; then
+            # Only a 404 means the version is not out. Any other failure stops
+            # the run: guessing either way releases twice or never.
+            if ! out=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$version" 2>&1); then
+              if printf '%s' "$out" | grep -q 'HTTP 404'; then
+                release=true
+              else
+                echo "::error::cannot tell whether v$version is released: $out"
+                exit 1
+              fi
+            fi
+          fi
+          if [ "$release" = true ]; then
+            marketing=$(sed -n 's/^ *MARKETING_VERSION: "\(.*\)"/\1/p' apple/App/project.yml | head -1)
+            if [ "$marketing" != "$version" ]; then
+              echo "::error::apple/App/project.yml's MARKETING_VERSION ($marketing) differs from Cargo.toml's version ($version)"
+              exit 1
+            fi
+            if ! grep -qxF "## $version" CHANGELOG.md; then
+              echo "::error::CHANGELOG.md has no section for $version: release with just release"
+              exit 1
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "v$version: release=$release"
+
+  # GitHub has no priority among its runners, and the account's few macOS ones
+  # are what a release waits on. A release cancels this repository's pull
+  # request runs, which are re-run from their page or by the next push, and
+  # main's earlier runs that release nothing, which a newer one supersedes. A
+  # job of its own, so only it holds a token that can cancel runs.
+  make-room:
+    name: Make room for the release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          SELF: ${{ github.run_id }}
+        # Best effort: a run it cannot list or cancel only waits longer for a
+        # runner. A push that changes Cargo.toml may release, as the
+        # concurrency rule above has it, so it is left alone whatever its title.
+        run: |
+          for status in requested queued pending waiting in_progress; do
+            gh run list --repo "$GITHUB_REPOSITORY" --workflow ci-cd.yml --status "$status" --limit 100 \
+              --json databaseId,event,headBranch,headSha,displayTitle \
+              --jq '.[] | select(.event == "pull_request" or (.event == "push" and .headBranch == "main" and (.displayTitle | startswith("release: ") | not))) | "\(.databaseId) \(.event) \(.headSha)"' || true
+          done | sort -u | while read -r id event sha; do
+            [ "$id" = "$SELF" ] && continue
+            if [ "$event" = push ]; then
+              files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '.files[].filename' || echo Cargo.toml)
+              printf '%s\n' "$files" | grep -qx Cargo.toml && continue
+            fi
+            echo "cancelling run $id"
+            gh run cancel "$id" --repo "$GITHUB_REPOSITORY" || true
+          done
 
   fmt:
     name: Format
@@ -189,27 +275,14 @@ jobs:
             fi
           done
       # Tarred: an artifact keeps neither symlinks nor modes.
-      # A release pull request's too, for the macOS signing check.
-      - if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-v')
+      - if: github.event_name != 'pull_request'
         run: tar czf "$RUNNER_TEMP/SbrCore.xcframework.tar.gz" -C apple SbrCore.xcframework
-      - if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-v')
+      - if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: SbrCore.xcframework
           path: ${{ runner.temp }}/SbrCore.xcframework.tar.gz
           retention-days: 1
-
-  # A release pull request signs, exports and packages the Developer ID app
-  # without notarising it, so a broken profile or entitlement fails the pull
-  # request rather than the release.
-  macos-signing:
-    name: macOS signing
-    needs: apple
-    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-v')
-    uses: ./.github/workflows/macos.yml
-    with:
-      notarise: false
-    secrets: inherit
 
   # CHANGELOG.md is generated from changelog.d/ (scripts/changelog.py). A pull
   # request adds fragments without regenerating it, so only its fragments and
@@ -246,7 +319,7 @@ jobs:
     name: Checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [actionlint, fmt, linux, macos, apple, macos-signing, changelog]
+    needs: [changes, actionlint, fmt, linux, macos, apple, changelog]
     if: always()
     steps:
       - env:
@@ -271,78 +344,73 @@ jobs:
     uses: ./.github/workflows/ios.yml
     secrets: inherit
 
-  # Whether this run releases, the one answer the release jobs read: a push
-  # that changes the workspace version, or a manual run asked to release (how
-  # a failed release is retried), when that version has no GitHub release yet.
-  # A manual run releases main's head, which the tag then points at.
-  version:
-    name: Version
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    outputs:
-      release: ${{ steps.check.outputs.release }}
-      version: ${{ steps.check.outputs.version }}
+
+  # The Developer ID macOS app, signed and packaged as a disk image, and
+  # notarised by `notarise` once the release is out. Started by `make-room`
+  # rather than after `Checks`: it is the longest job in a release and
+  # publishes nothing, so it builds while the checks run, and the publishing
+  # waits for both. It builds the macOS slice of the xcframework itself, from
+  # the `Apple` job's cache.
+  macos-release:
+    name: Release (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 120
+    needs: [changes, make-room]
+    if: ${{ !cancelled() && needs.make-room.result == 'success' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
         with:
-          fetch-depth: 2
-      - id: check
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: apple
+          save-if: false
+      - run: apple/build-xcframework.sh
         env:
-          EVENT: ${{ github.event_name }}
-          ASKED: ${{ inputs.release }}
-          GH_TOKEN: ${{ github.token }}
+          SBR_SKIP_IOS: "1"
+          SBR_SKIP_TVOS: "1"
+          SBR_SKIP_CATALYST: "1"
+      - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
+        with:
+          install_args: xcodegen
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: ./.github/actions/developer-id
+        with:
+          certificate-p12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          certificate-password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      - name: Install the provisioning profiles
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
-          version_of() { sed -n 's/^version = "\(.*\)"/\1/p' | head -1; }
-          version=$(version_of < Cargo.toml)
-          release=false
-          if { [ "$EVENT" = workflow_dispatch ] && [ "$ASKED" = true ]; } \
-            || { [ "$EVENT" = push ] && [ "$(git show HEAD^1:Cargo.toml 2>/dev/null | version_of)" != "$version" ]; }; then
-            # Only a 404 means the version is not out. Any other failure stops
-            # the run: guessing either way releases twice or never.
-            if ! out=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$version" 2>&1); then
-              if printf '%s' "$out" | grep -q 'HTTP 404'; then
-                release=true
-              else
-                echo "::error::cannot tell whether v$version is released: $out"
-                exit 1
-              fi
-            fi
-          fi
-          marketing=$(sed -n 's/^ *MARKETING_VERSION: "\(.*\)"/\1/p' apple/App/project.yml | head -1)
-          # Checked here, so a release that would fail late fails before any
-          # macOS runner starts.
-          if [ "$release" = true ]; then
-            if [ "$marketing" != "$version" ]; then
-              echo "::error::apple/App/project.yml's MARKETING_VERSION ($marketing) differs from Cargo.toml's version ($version)"
-              exit 1
-            fi
-            if ! grep -qxF "## $version" CHANGELOG.md; then
-              echo "::error::CHANGELOG.md has no section for $version: release with just release"
-              exit 1
-            fi
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "release=$release" >> "$GITHUB_OUTPUT"
-          echo "v$version: release=$release"
-
-  macos-release:
-    name: macOS release
-    needs: [checks, version]
-    if: ${{ !cancelled() && needs.checks.result == 'success' && needs.version.outputs.release == 'true' }}
-    uses: ./.github/workflows/macos.yml
-    with:
-      notarise: true
-    secrets: inherit
+          test -n "$APPLE_API_KEY_P8" || { echo "::error::set the APPLE_API_* secrets"; exit 1; }
+          export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$APPLE_API_KEY_PATH"
+          uv run apple/tools/fetch-profiles.py "sbr mac Developer ID" "sbr mac tunnel Developer ID"
+      - run: apple/macos-release.sh build
+      - run: apple/macos-release.sh package
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbr-macos
+          path: apple/build/macos/sbr-*.dmg
+          if-no-files-found: error
+          retention-days: 7
+      - if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
 
   publish-release:
     name: Publish GitHub release
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [version, macos-release]
-    if: ${{ !cancelled() && needs.version.outputs.release == 'true' && needs.macos-release.result == 'success' }}
+    needs: [changes, checks, macos-release]
+    if: ${{ !cancelled() && needs.changes.outputs.release == 'true' && needs.checks.result == 'success' && needs.macos-release.result == 'success' }}
     env:
-      VERSION: ${{ needs.version.outputs.version }}
+      VERSION: ${{ needs.changes.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -378,10 +446,48 @@ jobs:
         # missing, such as an asset whose upload failed.
         with:
           token: ${{ secrets.RELEASE_TOKEN }}
-          tag_name: v${{ needs.version.outputs.version }}
+          tag_name: v${{ needs.changes.outputs.version }}
           target_commitish: ${{ github.sha }}
-          name: v${{ needs.version.outputs.version }}
+          name: v${{ needs.changes.outputs.version }}
           body_path: ${{ runner.temp }}/notes.md
           draft: false
-          files: artifacts/sbr-${{ needs.version.outputs.version }}.dmg
+          files: artifacts/sbr-${{ needs.changes.outputs.version }}.dmg
           fail_on_unmatched_files: true
+
+  # Apple's notary, apart from the release: everything else is out by the time
+  # this starts, and its queue can take hours. It notarises and staples the
+  # disk image, whose ticket covers the app inside, and replaces the release's
+  # copy with it. Failing or timing out fails this job alone; re-running it
+  # waits on the submission already made (apple/tools/notarise.sh) rather than
+  # submitting again.
+  notarise:
+    name: Notarise (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 190
+    needs: [changes, publish-release]
+    if: ${{ !cancelled() && needs.publish-release.result == 'success' }}
+    env:
+      VERSION: ${{ needs.changes.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbr-macos
+          path: apple/build/macos
+      - name: Stage the App Store Connect key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          test -n "$APPLE_API_KEY_P8" || { echo "::error::set the APPLE_API_* secrets"; exit 1; }
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+      - run: apple/macos-release.sh notarise-dmg
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+      - name: Replace the release's disk image
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: gh release upload "v$VERSION" "apple/build/macos/sbr-$VERSION.dmg" --clobber
+      - if: always()
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"

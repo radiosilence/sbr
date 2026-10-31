@@ -1,0 +1,1 @@
+- **DNS servers detoured through a `direct` outbound get the cleartext warning.** They leave the tunnel exactly as servers without a detour do.

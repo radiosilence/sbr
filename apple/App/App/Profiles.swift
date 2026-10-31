@@ -72,7 +72,11 @@ final class ProfileStore: ObservableObject {
     @Published private(set) var activeID: UUID?
     @Published private(set) var refreshing: Set<UUID> = []
     /// The active profile's config, for the tunnel.
-    @Published private(set) var activeText: String?
+    @Published private(set) var activeText: String? {
+        didSet { if activeText != oldValue { activeWarnings = activeText.map(Sbr.warnings) ?? [] } }
+    }
+    /// `Sbr.warnings` for the active profile.
+    @Published private(set) var activeWarnings: [String] = []
 
     private let keychain = SbrKeychain(accessGroup: AppConfig.keychainGroup)
     private static let indexAccount = "index"
@@ -175,6 +179,8 @@ final class ProfileStore: ObservableObject {
         try? keychain.remove(SbrProfileSecret.account(profile.id.uuidString))
         profiles.removeAll { $0.id == profile.id }
         if activeID == profile.id {
+            // The tunnel's own download of it.
+            try? keychain.remove(SbrProfileSnapshot.account)
             activeID = nil
             activeText = nil
         }
@@ -221,9 +227,10 @@ final class ProfileStore: ObservableObject {
     }
 
     /// No disk cache (the response carries credentials), no cookies, and no
-    /// client-identifying User-Agent beyond the system default.
+    /// User-Agent: CFNetwork's default names the app and its build.
     private static let session: URLSession = {
         let c = URLSessionConfiguration.ephemeral
+        c.httpAdditionalHeaders = ["User-Agent": ""]
         c.urlCache = nil
         c.httpCookieStorage = nil
         c.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData

@@ -46,6 +46,9 @@ public struct SbrRemoteProfile: Codable, Sendable, Hashable {
 
 /// A remote profile as the tunnel downloaded and validated it.
 public struct SbrProfileSnapshot: Codable, Sendable, Hashable {
+    /// The Keychain item the tunnel keeps it in, next to the stored profile.
+    public static let account = "tunnel.snapshot"
+
     public var url: URL
     public var text: String
     public var updated: Date

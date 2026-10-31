@@ -1,0 +1,1 @@
+- **sing-mux multiplexing.** `multiplex` on vless, vmess, trojan and shadowsocks, over smux, yamux or h2mux, with padding, UDP and the Brutal speed exchange. Set `max_connections` to share sessions between concurrent streams.

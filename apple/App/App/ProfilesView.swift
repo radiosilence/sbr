@@ -26,6 +26,12 @@ struct ProfilesView: View {
                 ForEach(Array(profiles.profiles.enumerated()), id: \.element.id) { i, p in
                     if i > 0 { RowRule() }
                     row(p)
+                    if p.id == profiles.activeID {
+                        ForEach(profiles.activeWarnings, id: \.self) { w in
+                            Text(w).font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
+                                .padding(.bottom, Theme.Space.s)
+                        }
+                    }
                 }
                 add
                 personalRules
@@ -70,7 +76,10 @@ struct ProfilesView: View {
             if p.remoteURL != nil {
                 Button("update now") { Task { await refresh(p) } }
             }
-            Button("delete", role: .destructive) { profiles.remove(p) }
+            Button("delete", role: .destructive) {
+                profiles.remove(p)
+                if active { Task { await tunnel.forgetActive() } }
+            }
         }
     }
 

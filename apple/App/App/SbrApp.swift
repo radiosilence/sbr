@@ -9,6 +9,8 @@ struct SbrApp: App {
     @StateObject private var tunnel = TunnelModel()
     @StateObject private var profiles = ProfileStore()
     @Environment(\.scenePhase) private var scenePhase
+    /// A link opened from elsewhere, waiting for the user to confirm.
+    @State private var pendingLink: ProfileLink?
     #endif
     #if os(iOS)
     @StateObject private var inbox = PairInbox()
@@ -62,7 +64,16 @@ struct SbrApp: App {
                     }
                     #endif
                     guard let link = ProfileLink(url) else { return }
-                    Task { await AppFlow.importLink(link, tunnel: tunnel, profiles: profiles) }
+                    pendingLink = link
+                }
+                .alert(AppFlow.confirmTitle, isPresented: Binding(
+                    get: { pendingLink != nil },
+                    set: { if !$0 { pendingLink = nil } }
+                ), presenting: pendingLink) { link in
+                    Button("download") { Task { await AppFlow.importLink(link, tunnel: tunnel, profiles: profiles) } }
+                    Button("cancel", role: .cancel) {}
+                } message: { link in
+                    Text(AppFlow.confirmMessage(link))
                 }
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else { return }
@@ -93,6 +104,14 @@ enum AppFlow {
     static func sync(tunnel: TunnelModel, profiles: ProfileStore) async {
         if let snapshot = await tunnel.tunnelProfile() { profiles.adopt(snapshot) }
         _ = await profiles.refreshStale(except: tunnel.isConnected ? profiles.activeID : nil)
+    }
+
+    /// Opening a link downloads from its host before any tunnel is up, so
+    /// the user confirms it first, seeing the host.
+    static let confirmTitle = "download this profile?"
+
+    static func confirmMessage(_ link: ProfileLink) -> String {
+        "sbr will download it from \(link.url.host ?? "an unknown host"). Only continue if you trust this link."
     }
 
     static func importLink(_ link: ProfileLink, tunnel: TunnelModel, profiles: ProfileStore) async {

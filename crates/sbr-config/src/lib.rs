@@ -28,7 +28,7 @@ use serde_json::Value;
 
 pub use dns::*;
 pub use experimental::{CacheFileOptions, ClashApiOptions, Experimental, split_host_port};
-pub use proxies::{AnyTlsOutbound, ShadowTlsOutbound, UdpOverTcp};
+pub use proxies::{AnyTlsOutbound, ShadowTlsOutbound, SshOutbound, UdpOverTcp};
 pub use proxy::{PacketEncoding, TrojanOutbound, V2rayCommon, VlessOutbound, VmessOutbound};
 pub use quic::{Hysteria2Outbound, QuicOptions, TuicCongestion, TuicOutbound, TuicUdpRelay};
 pub use route::*;
@@ -176,6 +176,7 @@ pub enum OutboundKind {
     UrlTest(UrlTest),
     ShadowTls(ShadowTlsOutbound),
     AnyTls(AnyTlsOutbound),
+    Ssh(SshOutbound),
     /// From `endpoints[]`; endpoints share the outbound tag namespace and
     /// are appended after the outbounds.
     WireGuard(Box<WireGuardEndpoint>),
@@ -198,6 +199,7 @@ impl OutboundKind {
             Self::UrlTest(_) => "urltest",
             Self::ShadowTls(_) => "shadowtls",
             Self::AnyTls(_) => "anytls",
+            Self::Ssh(_) => "ssh",
             Self::WireGuard(_) => "wireguard",
         }
     }
@@ -267,6 +269,8 @@ pub struct ShadowsocksOutbound {
     /// `None`: TCP and UDP.
     pub network: Option<Network>,
     pub udp_over_tcp: Option<UdpOverTcp>,
+    /// `multiplex`, when enabled.
+    pub multiplex: Option<Multiplex>,
 }
 
 #[derive(Debug, Clone)]
@@ -373,12 +377,34 @@ impl Options {
         // the default outbound.
         outbounds.extend(endpoints);
 
-        if dns.is_none() && inbounds.iter().any(|i| matches!(i.kind, InboundKind::Tun(_))) {
+        let tun = inbounds.iter().any(|i| matches!(i.kind, InboundKind::Tun(_)));
+        if tun && dns.is_none() {
             diag.warnings.push(
                 "dns: missing with a tun inbound: server names and hijacked DNS queries go to the system resolver, \
                  which on Apple platforms is the physical network's, outside the tunnel"
                     .into(),
             );
+        }
+        let direct_tags: std::collections::HashSet<&str> = outbounds
+            .iter()
+            .filter(|o| matches!(o.kind, OutboundKind::Direct(_)))
+            .map(|o| o.tag.as_str())
+            .collect();
+        for (i, s) in dns.iter().filter(|_| tun).flat_map(|d| d.servers.iter().enumerate()) {
+            let direct = match s.dial.detour.as_deref() {
+                Some(t) => direct_tags.contains(t),
+                None => !s.legacy.as_ref().is_some_and(|l| l.default_outbound),
+            };
+            let leak = match &s.kind {
+                dns::DnsServerKind::Local => Some("asks the system resolver, which is the physical network's"),
+                dns::DnsServerKind::Udp(_) | dns::DnsServerKind::Tcp(_) if direct => {
+                    Some("sends queries in cleartext outside the tunnel (no detour, or a direct one)")
+                }
+                _ => None,
+            };
+            if let Some(leak) = leak {
+                diag.warnings.push(format!("dns.servers[{i}] ({}): {leak}", s.tag));
+            }
         }
         let options = Options {
             log,
@@ -439,6 +465,7 @@ impl Options {
                 OutboundKind::Tuic(t) => Some(&t.dial),
                 OutboundKind::ShadowTls(s) => Some(&s.dial),
                 OutboundKind::AnyTls(s) => Some(&s.dial),
+                OutboundKind::Ssh(s) => Some(&s.dial),
                 OutboundKind::WireGuard(w) => Some(&w.dial),
                 OutboundKind::Selector(g) => {
                     for t in &g.outbounds {
@@ -941,11 +968,12 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
             let password = o.string("password")?.unwrap_or_default();
             let network = proxies::parse_network_list(&mut o, "network")?;
             let udp_over_tcp = proxies::parse_uot(&mut o, "udp_over_tcp")?;
-            for k in ["plugin", "plugin_opts", "multiplex"] {
+            for k in ["plugin", "plugin_opts"] {
                 if o.has(k) {
                     return Err(Error::at(&o.sub(k), "not supported by sbr yet"));
                 }
             }
+            let multiplex = tls::parse_multiplex(&mut o, "multiplex")?.filter(|m| m.enabled);
             OutboundKind::Shadowsocks(ShadowsocksOutbound {
                 server,
                 dial,
@@ -953,6 +981,7 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
                 password,
                 network,
                 udp_over_tcp,
+                multiplex,
             })
         }
         "trojan" => OutboundKind::Trojan(proxy::parse_trojan(&mut o, diag)?),
@@ -962,6 +991,7 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
         "tuic" => OutboundKind::Tuic(quic::parse_tuic(&mut o, diag)?),
         "shadowtls" => OutboundKind::ShadowTls(proxies::parse_shadowtls(&mut o, diag)?),
         "anytls" => OutboundKind::AnyTls(proxies::parse_anytls(&mut o, diag)?),
+        "ssh" => OutboundKind::Ssh(proxies::parse_ssh(&mut o, diag)?),
         "wireguard" => {
             return Err(Error::at(
                 &o.sub("type"),

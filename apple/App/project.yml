@@ -25,7 +25,7 @@ settings:
     # there. Under the team prefix, which every provisioning profile allows.
     SBR_KEYCHAIN_GROUP: $(AppIdentifierPrefix)$(SBR_BUNDLE_ID)
     SWIFT_VERSION: "5.9"
-    MARKETING_VERSION: "0.1.0"
+    MARKETING_VERSION: "0.2.0"
     CURRENT_PROJECT_VERSION: "1"
     DEAD_CODE_STRIPPING: YES
     CODE_SIGN_STYLE: Automatic

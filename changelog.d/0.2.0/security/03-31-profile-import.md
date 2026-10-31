@@ -1,0 +1,1 @@
+- **Remote profile links ask before downloading.** The confirmation names the host, and the download sends no User-Agent, which named the app.

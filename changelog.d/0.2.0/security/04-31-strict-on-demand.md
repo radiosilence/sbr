@@ -1,0 +1,1 @@
+- **Leak protection restarts a stopped tunnel.** With leak protection on, an on-demand rule brings back a tunnel the system stopped, instead of leaving traffic outside it.
