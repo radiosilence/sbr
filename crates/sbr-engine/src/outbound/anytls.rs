@@ -25,7 +25,7 @@ use md5::Digest as _;
 use sbr_config::AnyTlsOutbound;
 use sbr_core::{BoxFuture, BoxPacketConn, Destination, Outbound, Stream};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_rustls::TlsConnector;
 use tracing::debug;
 
@@ -58,6 +58,9 @@ const MIN_IDLE_INTERVAL: Duration = Duration::from_secs(5);
 const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(3);
 /// Frames buffered per stream before the session reader waits (backpressure).
 const STREAM_QUEUE: usize = 32;
+/// Bytes buffered per stream before the session reader waits. Frames are up
+/// to 64 KiB, so the frame count alone would let one slow reader hold 2 MiB.
+const STREAM_BUFFER: u32 = 256 * 1024;
 /// A session write that makes no progress for this long closes the session.
 /// The writer is shared, so a server that stops reading would otherwise hold
 /// every stream's writes, and the tasks that finish dropped streams, forever.
@@ -274,14 +277,21 @@ impl Writer {
 }
 
 enum Event {
-    Data(Bytes),
+    /// The permit holds the bytes against the stream's [`STREAM_BUFFER`]
+    /// until they are read.
+    Data(Bytes, OwnedSemaphorePermit),
     Error(String),
+}
+
+struct StreamTx {
+    tx: mpsc::Sender<Event>,
+    budget: Arc<Semaphore>,
 }
 
 struct Session {
     pool: Weak<Pool>,
     writer: tokio::sync::Mutex<Writer>,
-    streams: Mutex<HashMap<u32, mpsc::Sender<Event>>>,
+    streams: Mutex<HashMap<u32, StreamTx>>,
     next_id: AtomicU32,
     peer_version: AtomicU32,
     /// Frames received so far: the stream-open watchdog compares it.
@@ -304,8 +314,8 @@ impl Session {
         if let Some(t) = self.reader.lock().unwrap().take() {
             t.abort();
         }
-        for (_, tx) in self.streams.lock().unwrap().drain() {
-            let _ = tx.try_send(Event::Error("anytls: session closed".into()));
+        for (_, s) in self.streams.lock().unwrap().drain() {
+            let _ = s.tx.try_send(Event::Error("anytls: session closed".into()));
         }
     }
 
@@ -363,15 +373,22 @@ impl Session {
                         if len == 0 {
                             continue;
                         }
-                        let tx = self.streams.lock().unwrap().get(&id).cloned();
-                        if let Some(tx) = tx {
-                            // Waiting here is the backpressure, as in sing-anytls.
-                            let _ = tx.send(Event::Data(data)).await;
+                        let s = self
+                            .streams
+                            .lock()
+                            .unwrap()
+                            .get(&id)
+                            .map(|s| (s.tx.clone(), s.budget.clone()));
+                        // Waiting here is the backpressure, as in sing-anytls.
+                        if let Some((tx, budget)) = s
+                            && let Ok(permit) = budget.acquire_many_owned(len as u32).await
+                        {
+                            let _ = tx.send(Event::Data(data, permit)).await;
                         }
                     }
                     CMD_SYNACK => {
                         if len > 0
-                            && let Some(tx) = self.streams.lock().unwrap().get(&id).cloned()
+                            && let Some(tx) = self.streams.lock().unwrap().get(&id).map(|s| s.tx.clone())
                         {
                             let msg = String::from_utf8_lossy(&data).into_owned();
                             let _ = tx.try_send(Event::Error(format!("anytls: remote: {msg}")));
@@ -430,8 +447,8 @@ impl Session {
         }
         // Not via close(): our own JoinHandle must not abort us mid-cleanup.
         self.closed.store(true, Ordering::Release);
-        for (_, tx) in self.streams.lock().unwrap().drain() {
-            let _ = tx.try_send(Event::Error("anytls: session closed".into()));
+        for (_, s) in self.streams.lock().unwrap().drain() {
+            let _ = s.tx.try_send(Event::Error("anytls: session closed".into()));
         }
         if let Some(pool) = self.pool.upgrade() {
             pool.forget(&self);
@@ -643,7 +660,13 @@ impl AnyTls {
                     "anytls: session closed",
                 ));
             }
-            streams.insert(id, tx);
+            streams.insert(
+                id,
+                StreamTx {
+                    tx,
+                    budget: Arc::new(Semaphore::new(STREAM_BUFFER as usize)),
+                },
+            );
         }
         let mut addr = Vec::with_capacity(32);
         socks5::write_addr(&mut addr, dest)?;
@@ -652,7 +675,7 @@ impl AnyTls {
             pool: self.pool.clone(),
             id,
             rx,
-            chunk: Bytes::new(),
+            chunk: (Bytes::new(), None),
             request: Some(addr),
             write: None,
             wbuf: None,
@@ -700,7 +723,8 @@ struct AnyStream {
     pool: Arc<Pool>,
     id: u32,
     rx: mpsc::Receiver<Event>,
-    chunk: Bytes,
+    /// Data being read, and its hold on the stream's buffer budget.
+    chunk: (Bytes, Option<OwnedSemaphorePermit>),
     /// Encoded destination, until the request is sent.
     request: Option<Vec<u8>>,
     /// In-flight write and the byte count it reports when done.
@@ -780,13 +804,16 @@ impl AsyncRead for AnyStream {
             ready!(this.poll_write_done(cx))?;
         }
         loop {
-            if !this.chunk.is_empty() {
-                let n = this.chunk.len().min(buf.remaining());
-                buf.put_slice(&this.chunk.split_to(n));
+            if !this.chunk.0.is_empty() {
+                let n = this.chunk.0.len().min(buf.remaining());
+                buf.put_slice(&this.chunk.0.split_to(n));
+                if this.chunk.0.is_empty() {
+                    this.chunk.1 = None;
+                }
                 return Poll::Ready(Ok(()));
             }
             match ready!(this.rx.poll_recv(cx)) {
-                Some(Event::Data(b)) => this.chunk = b,
+                Some(Event::Data(b, permit)) => this.chunk = (b, Some(permit)),
                 Some(Event::Error(e)) => {
                     return Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, e)));
                 }
