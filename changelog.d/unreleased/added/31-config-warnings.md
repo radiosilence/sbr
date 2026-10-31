@@ -1,0 +1,1 @@
+- **Config warnings in the app.** `sbr_check_warnings` returns a config's warnings and the app lists the active profile's, including new ones for DNS servers that resolve outside the tunnel: `local`, and plain UDP/TCP without a detour.
