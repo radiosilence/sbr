@@ -8,6 +8,8 @@ use ipnet::IpNet;
 use regex::RegexSet;
 use sbr_config::PortRange;
 
+const MOBILE: bool = cfg!(any(target_os = "ios", target_os = "tvos", target_os = "visionos"));
+
 #[derive(Default)]
 pub struct DomainSet {
     exact: HashSet<Box<str>>,
@@ -38,7 +40,21 @@ impl DomainSet {
             s.keyword = Some(AhoCorasick::new(keyword).expect("keyword automaton"));
         }
         if !regex.is_empty() {
-            s.regex = Some(RegexSet::new(regex)?);
+            // The default limits (10 MiB compiled, 2 MiB per lazy-DFA cache)
+            // let one remote rule-set's patterns take a fifth of the iOS
+            // extension's memory. A pattern over the limit fails the
+            // rule-set's load instead.
+            let (size, dfa) = if MOBILE {
+                (1 << 20, 256 << 10)
+            } else {
+                (10 << 20, 2 << 20)
+            };
+            s.regex = Some(
+                regex::RegexSetBuilder::new(regex)
+                    .size_limit(size)
+                    .dfa_size_limit(dfa)
+                    .build()?,
+            );
         }
         Ok(s)
     }
@@ -182,6 +198,14 @@ mod tests {
         assert!(!s.matches("badexample.com"));
         assert!(s.matches("baidu.cn"));
         assert!(!s.matches("cn"), "leading dot means subdomains only");
+    }
+
+    #[test]
+    fn regex_over_the_size_limit_fails_to_build() {
+        // Unicode \w compiles to a large automaton; a thousand of them is far
+        // past either limit.
+        assert!(DomainSet::new(&[], &[], &[], &[r"\w{1000}".into()]).is_err());
+        assert!(DomainSet::new(&[], &[], &[], &[r"^ads\.".into()]).is_ok());
     }
 
     #[test]

@@ -18,9 +18,11 @@ use tracing::debug;
 use super::super::ServerDialer;
 
 /// Go's `http2.Transport` defaults are 4 MiB per stream and 1 GiB per
-/// connection; the connection window here bounds memory on iOS instead.
-const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
-const CONN_WINDOW: u32 = 16 * 1024 * 1024;
+/// connection. The connection window is what the server may park unread
+/// across all streams; with XMUX opening several connections it is kept to
+/// 4 MiB where memory is capped (the iOS extension's ~50 MB).
+const STREAM_WINDOW: u32 = if crate::MOBILE { 2 } else { 4 } * 1024 * 1024;
+const CONN_WINDOW: u32 = if crate::MOBILE { 4 } else { 16 } * 1024 * 1024;
 const MAX_WRITE: usize = 64 * 1024;
 
 pub fn h2_err(e: h2::Error) -> io::Error {
