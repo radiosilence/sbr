@@ -210,6 +210,9 @@ enum State {
     Payload(u64),
     /// Not a framed stream (QPACK, or a type h3 rejects or ignores).
     Unframed,
+    /// Refused: whatever follows is the rejected frame's payload, so it is
+    /// never parsed as framing.
+    Failed,
 }
 
 /// Frame headers on one receive stream.
@@ -224,10 +227,20 @@ impl Frames {
         Self(State::StreamType(VarInt::default()))
     }
 
-    fn feed(&mut self, mut data: &[u8]) -> Result<(), &'static str> {
+    fn feed(&mut self, data: &[u8]) -> Result<(), &'static str> {
+        let r = self.parse(data);
+        if r.is_err() {
+            self.0 = State::Failed;
+        }
+        r
+    }
+
+    fn parse(&mut self, mut data: &[u8]) -> Result<(), &'static str> {
         while let Some((&b, rest)) = data.split_first() {
             match &mut self.0 {
                 State::Unframed => return Ok(()),
+                State::Failed => return Err("HTTP/3 stream already refused"),
+                // Skips payload in bulk, from `data` itself rather than past `b`.
                 State::Payload(left) => {
                     let n = (*left).min(data.len() as u64);
                     *left -= n;
@@ -298,6 +311,7 @@ mod tests {
         let mut f = Frames::request();
         let bad = frame(1, MAX_FRAME + 1);
         assert!(bad.chunks(1).try_for_each(|b| f.feed(b)).is_err());
+        assert!(f.feed(&frame(0, 1)).is_err(), "stays refused");
         let mut f = Frames::request();
         assert!(f.feed(&frame(0x21, 1 << 40)).is_err(), "reserved types too");
         let mut ok = frame(0x21, 100);
