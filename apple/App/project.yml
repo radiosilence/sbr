@@ -222,6 +222,12 @@ targets:
     info:
       path: Support/SystemExtension-Info.plist
       properties:
+        # sysextd files an extension under a category by its package type,
+        # which XcodeGen leaves out of a generated plist; without SYSX it
+        # refuses to activate the extension ("does not appear to belong to
+        # any extension categories").
+        CFBundlePackageType: SYSX
+        NSSystemExtensionUsageDescription: Routes this Mac's traffic through your sbr profile.
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NetworkExtension:
