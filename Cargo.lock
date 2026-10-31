@@ -2906,7 +2906,7 @@ dependencies = [
 
 [[package]]
 name = "sbr"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -2920,7 +2920,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-apple"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ipnet",
  "libc",
@@ -2933,7 +2933,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-config"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -2945,7 +2945,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aho-corasick",
  "arc-swap",
@@ -2961,7 +2961,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-dns"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2988,7 +2988,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-engine"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -3044,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-reality"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -3064,7 +3064,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-tun"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "ipnet",
