@@ -58,6 +58,10 @@ const MIN_IDLE_INTERVAL: Duration = Duration::from_secs(5);
 const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(3);
 /// Frames buffered per stream before the session reader waits (backpressure).
 const STREAM_QUEUE: usize = 32;
+/// A session write that makes no progress for this long closes the session.
+/// The writer is shared, so a server that stops reading would otherwise hold
+/// every stream's writes, and the tasks that finish dropped streams, forever.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub const DEFAULT_PADDING_SCHEME: &str = "stop=8
 0=30-30
@@ -181,6 +185,15 @@ fn parse_settings(b: &[u8]) -> HashMap<String, String> {
 
 type Tls = Stream;
 
+async fn bounded(f: impl Future<Output = io::Result<()>>) -> io::Result<()> {
+    tokio::time::timeout(WRITE_TIMEOUT, f).await.unwrap_or_else(|_| {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "anytls: session write timed out",
+        ))
+    })
+}
+
 struct Writer {
     w: WriteHalf<Tls>,
     /// The settings frame, sent in front of the first request.
@@ -220,6 +233,8 @@ impl Writer {
         self.packet_count += 1;
         if self.packet_count >= padding.stop {
             self.send_padding = false;
+            // Up to a frame long; nothing pads again for this session.
+            self.record = Vec::new();
             return self.w.write_all(data).await;
         }
         for size in padding.sizes(self.packet_count) {
@@ -315,7 +330,9 @@ impl Session {
         frame_header(&mut f, cmd, stream, data.len());
         f.extend_from_slice(data);
         let padding = self.padding();
-        let r = self.writer.lock().await.write(&f, &padding).await;
+        let mut w = self.writer.lock().await;
+        let r = bounded(w.write(&f, &padding)).await;
+        drop(w);
         if r.is_err() {
             self.close();
         }
@@ -632,7 +649,7 @@ impl AnyTls {
             chunk: Bytes::new(),
             request: Some(addr),
             write: None,
-            wbuf: Some(Vec::with_capacity(MAX_FRAME + FRAME_OVERHEAD)),
+            wbuf: None,
             fin_sent: false,
         })
     }
@@ -702,26 +719,30 @@ impl AnyStream {
         let fut = async move {
             let padding = session.padding();
             let mut w = session.writer.lock().await;
-            let mut r = Ok(());
-            if let Some(addr) = request {
-                let mut req = Vec::with_capacity(2 * FRAME_OVERHEAD + addr.len());
-                frame_header(&mut req, CMD_SYN, id, 0);
-                frame_header(&mut req, CMD_PSH, id, addr.len());
-                req.extend_from_slice(&addr);
-                session.arm_open_timeout(id);
-                r = if w.pending.is_some() {
-                    // New session: settings + SYN + destination as one record.
-                    w.write(&req, &padding).await
-                } else {
-                    match w.write_packet(&req[..FRAME_OVERHEAD], &padding).await {
-                        Ok(()) => w.write_packet(&req[FRAME_OVERHEAD..], &padding).await,
-                        e => e,
-                    }
-                };
-            }
-            if r.is_ok() && !buf.is_empty() {
-                r = w.write(&buf, &padding).await;
-            }
+            let r = bounded(async {
+                let mut r = Ok(());
+                if let Some(addr) = request {
+                    let mut req = Vec::with_capacity(2 * FRAME_OVERHEAD + addr.len());
+                    frame_header(&mut req, CMD_SYN, id, 0);
+                    frame_header(&mut req, CMD_PSH, id, addr.len());
+                    req.extend_from_slice(&addr);
+                    session.arm_open_timeout(id);
+                    r = if w.pending.is_some() {
+                        // New session: settings + SYN + destination as one record.
+                        w.write(&req, &padding).await
+                    } else {
+                        match w.write_packet(&req[..FRAME_OVERHEAD], &padding).await {
+                            Ok(()) => w.write_packet(&req[FRAME_OVERHEAD..], &padding).await,
+                            e => e,
+                        }
+                    };
+                }
+                if r.is_ok() && !buf.is_empty() {
+                    r = w.write(&buf, &padding).await;
+                }
+                r
+            })
+            .await;
             drop(w);
             if r.is_err() {
                 session.close();
