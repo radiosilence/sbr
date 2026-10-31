@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.2
+
+### Added
+
+- **Homebrew cask.** `brew install --cask radiosilence/sbr/sbr` installs the Mac app; each release moves the cask to its disk image once the image is notarised.
+- **Mac app icon and disk image layout.** The Developer ID macOS app has an icon drawn for macOS's unmasked tile, and its disk image opens to a laid-out window with the app beside an Applications link, instead of a bare folder.
+
+### Changed
+
+- **Mac menu bar in title case.** The menu bar menu uses macOS capitalisation ("Open sbr", "Launch at Login") instead of the app's lowercase style, which stays for the window.
+
+### Fixed
+
+- **The Mac app's tunnel activates.** The Developer ID app's system extension now declares `CFBundlePackageType` `SYSX`, without which macOS refused to activate it ("does not appear to belong to any extension categories") and the app could not connect.
+
+### Internal
+
+- **One macOS runner per run.** The macOS tests and the Apple build share one job instead of holding two macOS runners, and a release push skips that job, since its pull request ran it, leaving the release build as its only macOS job while the checks run.
+
 ## 0.2.1
 
 ### Security
