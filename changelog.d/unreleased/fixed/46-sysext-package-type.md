@@ -1,0 +1,1 @@
+- **The Mac app's tunnel activates.** The Developer ID app's system extension now declares `CFBundlePackageType` `SYSX`, without which macOS refused to activate it ("does not appear to belong to any extension categories") and the app could not connect.

@@ -104,6 +104,8 @@ PLIST
   codesign --verify --deep --strict --verbose=2 "$app"
   codesign -d --entitlements - --xml "$sysext" 2>/dev/null | grep -q packet-tunnel-provider-systemextension \
     || { echo "the system extension is not signed with packet-tunnel-provider-systemextension" >&2; exit 1; }
+  [ "$(/usr/libexec/PlistBuddy -c 'Print CFBundlePackageType' "$sysext/Contents/Info.plist" 2>/dev/null)" = SYSX ] \
+    || { echo "the system extension's CFBundlePackageType is not SYSX, so macOS will not activate it" >&2; exit 1; }
   app_build=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$app/Contents/Info.plist")
   ext_build=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$sysext/Contents/Info.plist")
   [ "$app_build" = "$build" ] && [ "$ext_build" = "$build" ] \
