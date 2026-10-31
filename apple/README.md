@@ -339,7 +339,15 @@ which archives the app against that xcframework and uploads it to TestFlight; `i
 by hand to retry an upload. A pull request's newer push cancels its older run; on `main` a run always finishes and only the newest waiting commit runs next. Pull requests
 never upload.
 
-The upload uses these repository secrets, the same names kōan uses:
+A push that changes the workspace version (a merged release pull request)
+also calls `macos.yml`: `build` archives `SbrMac` against the same
+xcframework and exports it with Developer ID signing, `package` notarises and
+staples the app and makes the disk image, and `notarise-dmg` notarises and
+staples that, after which CI/CD publishes the GitHub release. A release pull
+request runs `build` and `package` without notarising. See the root README's
+"Releases".
+
+These jobs use these repository secrets, the same names kōan uses:
 
 | secret | value |
 |---|---|
@@ -347,5 +355,10 @@ The upload uses these repository secrets, the same names kōan uses:
 | `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID` | that key's ID and issuer |
 | `IOS_CERTIFICATE_P12` | base64 of the Apple Distribution certificate (`.p12`) |
 | `IOS_CERTIFICATE_PASSWORD` | its password |
+| `MACOS_CERTIFICATE_P12` | base64 of the Developer ID Application certificate (`.p12`) |
+| `MACOS_CERTIFICATE_PASSWORD` | its password |
+| `RELEASE_TOKEN` | a token with `contents: write` on this repository, which creates the release and its tag |
 
-Without the key or the certificate, the TestFlight job is skipped.
+Without the key or the certificate, the TestFlight job is skipped. The macOS
+release jobs fail instead: a release must not quietly ship without its disk
+image.

@@ -36,8 +36,10 @@ and `cc.blit.sbr.mac.tunnel`), so archiving it locally needs them installed:
 Developer ID"`. Each build gets a new build number, because macOS replaces an
 active system extension only when its version changes.
 
-Both bundle IDs need the **Network Extensions** and **App Groups**
-capabilities. The group is `group.cc.blit.sbr` on iOS and tvOS, and
+Every bundle ID (`cc.blit.sbr`, `cc.blit.sbr.tunnel`, `cc.blit.sbr.mac`,
+`cc.blit.sbr.mac.tunnel`) needs the **Network Extensions** and **App Groups**
+capabilities, and `cc.blit.sbr.mac` also **System Extension**, to install its
+tunnel. The group is `group.cc.blit.sbr` on iOS and tvOS, and
 `<TEAM_ID>.cc.blit.sbr` on macOS. The app and its tunnel share the Keychain
 access group `<TEAM_ID>.cc.blit.sbr` (`<TEAM_ID>.cc.blit.sbr.mac` for
 `SbrMac`); groups under the team prefix are allowed by every provisioning
