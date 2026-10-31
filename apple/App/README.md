@@ -1,6 +1,6 @@
 # sbr app
 
-The sbr client for iOS 17+, macOS 14+ and tvOS 17+. It runs sing-box profiles in
+The sbr client for iOS 17+, macOS 15+ and tvOS 17+. It runs sing-box profiles in
 a packet tunnel extension (an empty subclass of SbrKit's
 `SbrPacketTunnelProvider`) and follows kōan's design language: Geist Mono,
 lowercase interface text, square corners, hairlines and a single mint accent

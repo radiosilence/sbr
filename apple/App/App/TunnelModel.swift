@@ -1,6 +1,9 @@
 import Foundation
 import NetworkExtension
 import SbrKit
+#if os(macOS)
+import ServiceManagement
+#endif
 
 @MainActor
 final class TunnelModel: ObservableObject {
@@ -15,6 +18,9 @@ final class TunnelModel: ObservableObject {
     @Published var errorMessage: String?
     /// Why the tunnel last stopped without being asked to, from the system.
     @Published private(set) var lastStop: String?
+    /// The system extension is waiting for the user to allow it in System
+    /// Settings. Always false outside the Developer ID build.
+    @Published private(set) var needsApproval = false
     /// "Block traffic outside the tunnel": `Sbr.applyLeakProtection`. Follows
     /// the profile's `strict_route` until the user sets it. Applied the next
     /// time the tunnel connects.
@@ -341,6 +347,7 @@ final class TunnelModel: ObservableObject {
     private func install(onDemand: Bool? = nil) async throws {
         guard config != nil else { throw SbrError("no profile selected") }
         #if SBR_SYSTEM_EXTENSION
+        defer { needsApproval = SystemExtensionActivator.awaitingApproval }
         try await SystemExtensionActivator.activate(identifier: AppConfig.tunnelBundleIdentifier)
         #endif
         let m = manager ?? NETunnelProviderManager()
@@ -390,6 +397,15 @@ final class TunnelModel: ObservableObject {
                 errorMessage = error.localizedDescription
             }
         }
+        #if os(macOS)
+        if [.enabled, .requiresApproval].contains(SMAppService.mainApp.status) {
+            do {
+                try await SMAppService.mainApp.unregister()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+        #endif
         if let statusObserver { NotificationCenter.default.removeObserver(statusObserver) }
         statusObserver = nil
         manager = nil

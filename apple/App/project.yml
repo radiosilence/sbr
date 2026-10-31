@@ -1,7 +1,7 @@
 # XcodeGen spec: `xcodegen generate` (see README.md).
 #
 # Targets
-#   Sbr                        iOS 17+, macOS 14+, tvOS 17+ app (SwiftUI)
+#   Sbr                        iOS 17+, macOS 15+, tvOS 17+ app (SwiftUI)
 #   SbrTunnel                  its packet tunnel, as an app extension
 #                              (iOS, tvOS, and Mac App Store style on macOS)
 #   SbrMac                     macOS Developer ID flavour of the same app ...
@@ -41,7 +41,7 @@ targets:
     supportedDestinations: [iOS, macOS, tvOS]
     deploymentTarget:
       iOS: "17.0"
-      macOS: "14.0"
+      macOS: "15.0"
       tvOS: "17.0"
     sources:
       - path: App
@@ -108,7 +108,7 @@ targets:
     supportedDestinations: [iOS, macOS, tvOS]
     deploymentTarget:
       iOS: "17.0"
-      macOS: "14.0"
+      macOS: "15.0"
       tvOS: "17.0"
     sources:
       - path: Tunnel
@@ -171,7 +171,7 @@ targets:
   SbrMac:
     type: application
     platform: macOS
-    deploymentTarget: "14.0"
+    deploymentTarget: "15.0"
     sources:
       - path: App
         excludes: ["*.entitlements"]
@@ -203,7 +203,7 @@ targets:
   SbrTunnelSystemExtension:
     type: system-extension
     platform: macOS
-    deploymentTarget: "14.0"
+    deploymentTarget: "15.0"
     sources:
       - Tunnel/PacketTunnelProvider.swift
       - SystemExtension/main.swift
