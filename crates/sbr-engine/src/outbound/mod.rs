@@ -5,6 +5,7 @@ mod anytls;
 pub(crate) mod direct;
 pub mod group;
 mod http;
+mod idle;
 mod hysteria2;
 mod proto;
 pub(crate) mod quic;

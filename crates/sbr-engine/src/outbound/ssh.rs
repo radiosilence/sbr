@@ -4,16 +4,16 @@
 //! russh's flow control is its per-channel message queue, not the SSH window:
 //! it adjusts the window as packets arrive, then blocks the whole connection
 //! when a channel's queue is full. `CHANNEL_QUEUE` therefore bounds memory
-//! per channel, `max_channels` bounds it per connection, and one stalled
+//! per channel, `max_channels` bounds it per outbound, and one stalled
 //! reader stalls every channel on the connection.
 
 use std::borrow::Cow;
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 use futures_util::future::Shared;
@@ -25,6 +25,7 @@ use sbr_core::{BoxFuture, Destination, Host, Outbound, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use super::idle::Idle;
 use super::{BuildContext, Upstream};
 
 /// What sbr announces unless `client_version` says otherwise.
@@ -37,9 +38,12 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 /// A connection with no channels for this long is closed, so a stale one is
 /// never reused after a long idle period and idle costs no wakeups.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a refusal by the server (authentication, host key) is returned
+/// without dialing again.
+const FAILURE_BACKOFF: Duration = Duration::from_secs(30);
 /// Messages (up to `MAX_PACKET` each) queued per channel before russh stops
 /// reading the connection.
-const CHANNEL_QUEUE: usize = 4;
+const CHANNEL_QUEUE: usize = 2;
 const MAX_PACKET: u32 = 32768;
 
 /// Concurrent channels per outbound, sized so that full queues stay within
@@ -108,16 +112,17 @@ type DialResult = Result<Arc<Conn>, Arc<io::Error>>;
 
 enum State {
     Down,
-    Dialing(Shared<BoxFuture<'static, DialResult>>),
+    Dialing(u64, Shared<BoxFuture<'static, DialResult>>),
     Up(Arc<Conn>),
+    /// The server refused us (authentication, host key): not retried until
+    /// `until`, so a wrong credential doesn't trip fail2ban.
+    Failed(Instant, Arc<io::Error>),
 }
 
 struct Conn {
     handle: Handle<Client>,
-    channels: AtomicUsize,
-    /// Bumped whenever the channel count leaves zero, so an idle timer can
-    /// tell whether the connection was used since it was armed.
-    epoch: AtomicU64,
+    /// Open channels.
+    idle: Arc<Idle>,
 }
 
 /// Ask the server to close; the session task then ends and drops the socket.
@@ -131,7 +136,9 @@ fn close(conn: &Arc<Conn>) {
     });
 }
 
-struct Inner {
+/// What a dial needs, apart from the outbound's state, so a dial in flight
+/// keeps no reference to the outbound.
+struct Dialer {
     upstream: Upstream,
     server: Destination,
     config: Arc<client::Config>,
@@ -139,7 +146,12 @@ struct Inner {
     key: Option<Arc<PrivateKey>>,
     password: Option<String>,
     pins: Arc<[PublicKey]>,
+}
+
+struct Inner {
+    dialer: Arc<Dialer>,
     state: Mutex<State>,
+    generation: AtomicU64,
     slots: Arc<Semaphore>,
 }
 
@@ -172,10 +184,7 @@ impl Ssh {
         let pins = c
             .host_key
             .iter()
-            .map(|line| {
-                let b64 = line.split_whitespace().nth(1).unwrap_or_default();
-                russh::keys::parse_public_key_base64(b64).map_err(|e| format!("host_key {line:?}: {e}"))
-            })
+            .map(|line| parse_host_key(line).ok_or_else(|| format!("host_key {line:?}: not a public key")))
             .collect::<Result<Vec<_>, _>>()?;
         let host_keys = host_key_algorithms(&c.host_key_algorithms, &pins)?;
         let config = client::Config {
@@ -198,95 +207,69 @@ impl Ssh {
             },
             inactivity_timeout: None,
             keepalive_interval: None,
-            nodelay: true,
             ..Default::default()
         };
         Ok(Self {
             tag,
             inner: Arc::new(Inner {
-                upstream,
-                server: Destination::from_host_port(&c.server.server, c.server.server_port),
-                config: Arc::new(config),
-                user: c.user.clone(),
-                key,
-                password: c.password.clone(),
-                pins: pins.into(),
+                dialer: Arc::new(Dialer {
+                    upstream,
+                    server: Destination::from_host_port(&c.server.server, c.server.server_port),
+                    config: Arc::new(config),
+                    user: c.user.clone(),
+                    key,
+                    password: c.password.clone(),
+                    pins: pins.into(),
+                }),
                 state: Mutex::new(State::Down),
+                generation: AtomicU64::new(0),
                 slots: Arc::new(Semaphore::new(max_channels())),
             }),
         })
     }
 }
 
+/// An `authorized_keys` line, options prefix allowed: the key is the token
+/// after the first token naming its own algorithm.
+fn parse_host_key(line: &str) -> Option<PublicKey> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    tokens.windows(2).find_map(|w| {
+        russh::keys::parse_public_key_base64(w[1])
+            .ok()
+            .filter(|k| k.algorithm().as_str() == w[0])
+    })
+}
+
 /// `host_key_algorithms` when given; otherwise the pinned keys' algorithms
 /// (so a server with several host keys presents the pinned one), or the
 /// OpenSSH order when nothing is pinned.
 fn host_key_algorithms(names: &[String], pins: &[PublicKey]) -> Result<Vec<Algorithm>, String> {
-    if !names.is_empty() {
-        return names
+    let pinned = |a: &Algorithm| {
+        pins.iter().any(|p| match (p.algorithm(), a) {
+            (Algorithm::Rsa { .. }, Algorithm::Rsa { .. }) => true,
+            (pa, a) => &pa == a,
+        })
+    };
+    let algs: Vec<Algorithm> = if !names.is_empty() {
+        names
             .iter()
             .map(|n| {
                 n.parse::<Algorithm>()
                     .map_err(|e| format!("host_key_algorithms {n:?}: {e}"))
             })
-            .collect();
+            .collect::<Result<_, _>>()?
+    } else if pins.is_empty() {
+        HOST_KEYS.to_vec()
+    } else {
+        HOST_KEYS.iter().filter(|a| pinned(a)).cloned().collect()
+    };
+    if algs.is_empty() || (!pins.is_empty() && !algs.iter().any(pinned)) {
+        return Err("no supported host key algorithm matches the pinned host_key".into());
     }
-    if pins.is_empty() {
-        return Ok(HOST_KEYS.to_vec());
-    }
-    Ok(HOST_KEYS
-        .iter()
-        .filter(|a| {
-            pins.iter().any(|p| match (p.algorithm(), a) {
-                (Algorithm::Rsa { .. }, Algorithm::Rsa { .. }) => true,
-                (pa, a) => &pa == *a,
-            })
-        })
-        .cloned()
-        .collect())
+    Ok(algs)
 }
 
-impl Inner {
-    /// The live connection, dialing one if there is none. Concurrent callers
-    /// share one dial and its outcome.
-    async fn conn(self: &Arc<Self>) -> io::Result<Arc<Conn>> {
-        let dial = {
-            let mut st = self.state.lock().unwrap();
-            match &*st {
-                State::Up(c) if !c.handle.is_closed() => return Ok(c.clone()),
-                State::Dialing(f) => f.clone(),
-                _ => {
-                    let me = Arc::downgrade(self);
-                    let f = async move {
-                        let me = me
-                            .upgrade()
-                            .ok_or_else(|| Arc::new(io::Error::other("ssh: outbound closed")))?;
-                        let r = tokio::time::timeout(DIAL_TIMEOUT, me.dial()).await.unwrap_or_else(|_| {
-                            Err(io::Error::new(io::ErrorKind::TimedOut, "ssh: handshake timed out"))
-                        });
-                        let mut st = me.state.lock().unwrap();
-                        match r {
-                            Ok(c) => {
-                                let c = Arc::new(c);
-                                *st = State::Up(c.clone());
-                                Ok(c)
-                            }
-                            Err(e) => {
-                                *st = State::Down;
-                                Err(Arc::new(e))
-                            }
-                        }
-                    }
-                    .boxed()
-                    .shared();
-                    *st = State::Dialing(f.clone());
-                    f
-                }
-            }
-        };
-        dial.await.map_err(|e| io::Error::new(e.kind(), e.to_string()))
-    }
-
+impl Dialer {
     async fn dial(&self) -> io::Result<Conn> {
         let stream = self.upstream.connect(&self.server).await?;
         let handler = Client {
@@ -322,9 +305,66 @@ impl Inner {
         }
         Ok(Conn {
             handle,
-            channels: AtomicUsize::new(0),
-            epoch: AtomicU64::new(0),
+            idle: Arc::default(),
         })
+    }
+}
+
+fn copy_err(e: &io::Error) -> io::Error {
+    io::Error::new(e.kind(), e.to_string())
+}
+
+impl Inner {
+    /// The live connection, dialing one if there is none. Concurrent callers
+    /// share one dial and its outcome.
+    async fn conn(self: &Arc<Self>) -> io::Result<Arc<Conn>> {
+        let dial = {
+            let mut st = self.state.lock().unwrap();
+            match &*st {
+                State::Up(c) if !c.handle.is_closed() => return Ok(c.clone()),
+                State::Dialing(_, f) => f.clone(),
+                State::Failed(until, e) if Instant::now() < *until => return Err(copy_err(e)),
+                _ => {
+                    let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+                    let dialer = self.dialer.clone();
+                    let me = Arc::downgrade(self);
+                    let f = async move {
+                        let r = tokio::time::timeout(DIAL_TIMEOUT, dialer.dial())
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err(io::Error::new(io::ErrorKind::TimedOut, "ssh: handshake timed out"))
+                            });
+                        let r = r.map(Arc::new).map_err(Arc::new);
+                        let current = me.upgrade().map(|me| {
+                            let mut st = me.state.lock().unwrap();
+                            let current = matches!(&*st, State::Dialing(g, _) if *g == generation);
+                            if current {
+                                *st = match &r {
+                                    Ok(c) => State::Up(c.clone()),
+                                    Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                                        State::Failed(Instant::now() + FAILURE_BACKOFF, e.clone())
+                                    }
+                                    Err(_) => State::Down,
+                                };
+                            }
+                            current
+                        });
+                        // Superseded (network change) or the outbound is gone.
+                        if current != Some(true)
+                            && let Ok(c) = &r
+                        {
+                            close(c);
+                        }
+                        r
+                    }
+                    .boxed()
+                    .shared();
+                    *st = State::Dialing(generation, f.clone());
+                    f
+                }
+            }
+        };
+        dial.await.map_err(|e| copy_err(&e))
     }
 
     /// Drop `conn` if it is still the current one.
@@ -349,8 +389,7 @@ impl Inner {
         // A connection that stopped answering is replaced once.
         for attempt in 0..2 {
             let conn = self.conn().await?;
-            conn.channels.fetch_add(1, Ordering::AcqRel);
-            conn.epoch.fetch_add(1, Ordering::AcqRel);
+            conn.idle.acquire();
             let mut guard = ChannelGuard {
                 conn: conn.clone(),
                 inner: Arc::downgrade(self),
@@ -388,6 +427,7 @@ impl Inner {
         unreachable!("the second attempt returns")
     }
 
+    /// Also forgets a refusal: the new network may reach a different server.
     fn network_changed(&self) {
         let old = std::mem::replace(&mut *self.state.lock().unwrap(), State::Down);
         if let State::Up(c) = old {
@@ -396,15 +436,20 @@ impl Inner {
     }
 }
 
+/// On reload: an idle connection closes now, a busy one when its last
+/// channel ends (`ChannelGuard`), so streams in flight finish.
 impl Drop for Inner {
     fn drop(&mut self) {
-        if let State::Up(c) = std::mem::replace(self.state.get_mut().unwrap(), State::Down) {
+        if let State::Up(c) = std::mem::replace(self.state.get_mut().unwrap(), State::Down)
+            && c.idle.users() == 0
+        {
             close(&c);
         }
     }
 }
 
-/// Counts a channel against its connection; the last one out arms the idle close.
+/// Counts a channel against its connection; the last one out starts the
+/// idle close.
 struct ChannelGuard {
     conn: Arc<Conn>,
     inner: Weak<Inner>,
@@ -413,23 +458,20 @@ struct ChannelGuard {
 
 impl Drop for ChannelGuard {
     fn drop(&mut self) {
-        if self.conn.channels.fetch_sub(1, Ordering::AcqRel) != 1 {
+        if !self.conn.idle.release() {
             return;
         }
-        let epoch = self.conn.epoch.load(Ordering::Acquire);
+        if self.inner.strong_count() == 0 {
+            close(&self.conn);
+            return;
+        }
         let conn = Arc::downgrade(&self.conn);
         let inner = self.inner.clone();
-        let Ok(rt) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        rt.spawn(async move {
-            tokio::time::sleep(IDLE_TIMEOUT).await;
-            let Some(conn) = conn.upgrade() else { return };
-            if conn.channels.load(Ordering::Acquire) == 0 && conn.epoch.load(Ordering::Acquire) == epoch {
-                match inner.upgrade() {
-                    Some(inner) => inner.discard(&conn),
-                    None => close(&conn),
-                }
+        self.conn.idle.arm(IDLE_TIMEOUT, move || {
+            let Some(c) = conn.upgrade() else { return };
+            match inner.upgrade() {
+                Some(inner) => inner.discard(&c),
+                None => close(&c),
             }
         });
     }

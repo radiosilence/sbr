@@ -119,6 +119,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
         Sbr.forwardLogs(to: Logger(subsystem: Self.subsystem, category: "core"), publicMessages: publicLogMessages)
         logger.info("starting sbr \(Sbr.version, privacy: .public)")
         if options?[SbrStartOption.erase] != nil {
+            erasing = true
             erase()
             throw SbrError("erased")
         }
@@ -148,6 +149,8 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
 
     override open func stopTunnel(with reason: NEProviderStopReason) async {
         logger.info("stopping (reason \(reason.rawValue))")
+        // An erase-only start: leave nothing behind in the wiped directory.
+        if erasing { return }
         heartbeat?.cancel()
         heartbeat = nil
         memoryPressure?.cancel()
@@ -427,6 +430,8 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: Previous-session report
 
     private var heartbeat: Task<Void, Never>?
+    /// This start only erased (`SbrStartOption.erase`).
+    private var erasing = false
     private static var crashURL: URL? { privateDirectory?.appendingPathComponent("crash.log") }
     private static var heartbeatURL: URL? { privateDirectory?.appendingPathComponent("heartbeat") }
 

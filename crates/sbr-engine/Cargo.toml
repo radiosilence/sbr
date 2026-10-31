@@ -64,5 +64,5 @@ libc = "0.2"
 hickory-proto = { version = "0.26", default-features = false, features = ["std"] }
 serde_json.workspace = true
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-tungstenite = "0.28"

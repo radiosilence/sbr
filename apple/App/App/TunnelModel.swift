@@ -418,20 +418,42 @@ final class TunnelModel: ObservableObject {
     /// Have the extension delete its files (cache, rule-sets, logs). They
     /// live in its own container, so a stopped tunnel is started with
     /// `SbrStartOption.erase`, which deletes them and stops.
+    /// On demand is disarmed first, or it would start the tunnel again with
+    /// the profile right after the erase (and recreate the files).
     private func eraseTunnelFiles() async {
         if isConnected, let session {
             _ = try? await session.send(.erase)
             return
         }
         guard let manager, manager.connection.status == .disconnected else { return }
+        await disarmOnDemand(manager)
         do {
             try manager.connection.startVPNTunnel(options: [SbrStartOption.erase: NSNumber(value: true)])
         } catch {
             return
         }
-        for _ in 0..<50 where manager.connection.status != .disconnected {
-            try? await Task.sleep(nanoseconds: 100_000_000)
+        // Starting is asynchronous: wait for it to begin, then to end.
+        _ = await Self.wait(manager.connection, seconds: 2) { $0 != .disconnected }
+        _ = await Self.wait(manager.connection, seconds: 10) { $0 == .disconnected || $0 == .invalid }
+    }
+
+    private func disarmOnDemand(_ m: NETunnelProviderManager) async {
+        guard m.isOnDemandEnabled else { return }
+        m.isOnDemandEnabled = false
+        try? await m.saveToPreferences()
+        try? await m.loadFromPreferences()
+    }
+
+    /// Poll `connection` until its status satisfies `done`; false on timeout.
+    private static func wait(_ connection: NEVPNConnection, seconds: Double,
+                             until done: (NEVPNStatus) -> Bool) async -> Bool
+    {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !done(connection.status) {
+            if Date() > deadline { return false }
+            try? await Task.sleep(nanoseconds: 50_000_000)
         }
+        return true
     }
 
     /// The active profile was deleted: stop the tunnel and delete what the
@@ -442,10 +464,10 @@ final class TunnelModel: ObservableObject {
         remote = nil
         stored = nil
         if let manager {
-            if isOn { try? await TunnelControl.setOn(false, manager) }
-            for _ in 0..<50 where manager.connection.status != .disconnected {
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            }
+            // Armed on demand would keep starting a tunnel whose profile is gone.
+            await disarmOnDemand(manager)
+            if isOn { manager.connection.stopVPNTunnel() }
+            _ = await Self.wait(manager.connection, seconds: 10) { $0 == .disconnected || $0 == .invalid }
         }
         await eraseTunnelFiles()
         groups = []

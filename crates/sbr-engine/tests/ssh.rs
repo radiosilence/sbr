@@ -8,7 +8,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use common::{bulk_echo, echo, free_port, port, socks_connect, start};
+use tokio::net::{TcpListener, TcpStream};
 
 fn sshd_bin() -> Option<PathBuf> {
     let p = std::env::var_os("SBR_SSHD")
@@ -196,4 +200,66 @@ async fn ssh_wrong_pin_is_refused() {
     .await
     .unwrap();
     assert!(!r, "connect must fail when the host key is not the pinned one");
+}
+
+/// A TCP relay to `upstream` that can stop forwarding every flow open so
+/// far while still relaying new ones: a NAT mapping that expired.
+async fn freezer(upstream: u16) -> (u16, Arc<AtomicU64>) {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p = l.local_addr().unwrap().port();
+    let frozen_below = Arc::new(AtomicU64::new(0));
+    let f = frozen_below.clone();
+    tokio::spawn(async move {
+        let mut n = 0u64;
+        while let Ok((c, _)) = l.accept().await {
+            n += 1;
+            let (id, f) = (n, f.clone());
+            tokio::spawn(async move {
+                let u = TcpStream::connect(("127.0.0.1", upstream)).await.unwrap();
+                let (cr, cw) = c.into_split();
+                let (ur, uw) = u.into_split();
+                let pump = |mut r: tokio::net::tcp::OwnedReadHalf, mut w: tokio::net::tcp::OwnedWriteHalf| {
+                    let f = f.clone();
+                    async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let mut b = vec![0u8; 16 * 1024];
+                        loop {
+                            let Ok(k) = r.read(&mut b).await else { return };
+                            if k == 0 {
+                                return;
+                            }
+                            if f.load(Ordering::SeqCst) >= id {
+                                // Swallow everything from now on, keep the socket open.
+                                std::future::pending::<()>().await;
+                            }
+                            if w.write_all(&b[..k]).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                };
+                let a = tokio::spawn(pump(cr, uw));
+                let b = tokio::spawn(pump(ur, cw));
+                let _ = (a.await, b.await);
+            });
+        }
+    });
+    (p, frozen_below)
+}
+
+#[tokio::test]
+async fn ssh_dead_connection_is_replaced() {
+    let bin = need_sshd!();
+    let d = sshd(&bin).await;
+    let (relay, freeze) = freezer(d.port).await;
+    let ob = ssh_outbound(&d, &d.user_key, &d.host_pub).replace(&format!(":{},", d.port), &format!(":{relay},"));
+    let sbr = sbr_via(&ob).await;
+    let target = echo().await;
+    bulk_echo(socks_connect(port(&sbr, "in"), target).await, 64 * 1024).await;
+    // The first connection's path goes silent; the next connect times out
+    // its channel open and redials on a fresh one.
+    freeze.store(1, Ordering::SeqCst);
+    let t = std::time::Instant::now();
+    bulk_echo(socks_connect(port(&sbr, "in"), target).await, 64 * 1024).await;
+    assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
 }
