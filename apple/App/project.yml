@@ -199,6 +199,13 @@ targets:
         OTHER_LDFLAGS: $(inherited) -lresolv
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) SBR_SYSTEM_EXTENSION
         ENABLE_HARDENED_RUNTIME: YES
+      configs:
+        # Developer ID distribution (apple/macos-release.sh) signs with the
+        # API-provisioned profiles.
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Developer ID Application
+          PROVISIONING_PROFILE_SPECIFIER: sbr mac Developer ID
 
   SbrTunnelSystemExtension:
     type: system-extension
@@ -223,3 +230,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID).mac.tunnel
         CODE_SIGN_ENTITLEMENTS: SystemExtension/SystemExtension.entitlements
         ENABLE_HARDENED_RUNTIME: YES
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Developer ID Application
+          PROVISIONING_PROFILE_SPECIFIER: sbr mac tunnel Developer ID

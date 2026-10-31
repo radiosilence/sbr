@@ -4,3 +4,11 @@ xcodegen = "2.46.0"
 [tasks."test:apple-tunnel"]
 description = "Run sbr in a real macOS packet tunnel and check TCP, DNS, UDP and bulk through it"
 run = "apple/TunnelCheck/tunnel-check.sh"
+
+[tasks.release]
+description = "Open the release pull request: bump the version, cut the changelog. Merging it releases. Usage: mise run release patch|minor|major|X.Y.Z"
+run = "scripts/release.sh"
+
+[tasks.changelog]
+description = "Write CHANGELOG.md from changelog.d/ (--check, --lint, --stdout)"
+run = "python3 scripts/changelog.py"
