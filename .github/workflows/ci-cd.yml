@@ -463,8 +463,9 @@ jobs:
 
   # Apple's notary, apart from the release: everything else is out by the time
   # this starts, and its queue can take hours. It notarises and staples the
-  # disk image, whose ticket covers the app inside, and replaces the release's
-  # copy with it. Failing or timing out fails this job alone; re-running it
+  # disk image, whose ticket covers the app inside, replaces the release's
+  # copy with it, then moves the Homebrew cask (radiosilence/homebrew-sbr) to
+  # it. Failing or timing out fails this job alone; re-running it
   # waits on the submission already made (apple/tools/notarise.sh) rather than
   # submitting again.
   notarise:
@@ -496,5 +497,46 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: gh release upload "v$VERSION" "apple/build/macos/sbr-$VERSION.dmg" --clobber
+      # The cask follows the notarised image only: one pointing at the image
+      # before stapling would install an app Gatekeeper may refuse offline.
+      - name: Update the Homebrew cask
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GITHUB_TOKEN" ]; then
+            echo "::error::RELEASE_TOKEN is not set; the Homebrew cask cannot be updated"
+            exit 1
+          fi
+          sha=$(shasum -a 256 "apple/build/macos/sbr-$VERSION.dmg" | awk '{print $1}')
+          git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/radiosilence/homebrew-sbr.git" "$RUNNER_TEMP/tap"
+          cd "$RUNNER_TEMP/tap"
+          mkdir -p Casks
+          cat > Casks/sbr.rb <<CASK
+          cask "sbr" do
+            version "${VERSION}"
+            sha256 "${sha}"
+
+            url "https://github.com/radiosilence/sbr/releases/download/v#{version}/sbr-#{version}.dmg"
+            name "sbr"
+            desc "Proxy client compatible with sing-box configurations"
+            homepage "https://sbr.blit.cc"
+
+            depends_on macos: ">= :sequoia"
+
+            app "sbr.app"
+
+            zap trash: [
+              "~/Library/Containers/cc.blit.sbr.mac",
+              "~/Library/Group Containers/2256Q92VF2.cc.blit.sbr",
+            ]
+          end
+          CASK
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "Update sbr to v${VERSION}"
+          git push
       - if: always()
         run: rm -f "$RUNNER_TEMP/AuthKey.p8"

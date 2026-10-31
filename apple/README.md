@@ -346,8 +346,8 @@ its pull request already ran: it builds the xcframework without tvOS (and
 keeps it for TestFlight), then `apple/macos-release.sh build` archives `SbrMac` and exports
 it with Developer ID signing and `package` makes the signed disk image. Once
 the checks pass, CI/CD publishes the GitHub release with that image, and the
-`Notarise` job then runs `notarise-dmg` and replaces the release's copy with
-the stapled one. See the root README's "Releases".
+`Notarise` job then runs `notarise-dmg`, replaces the release's copy with
+the stapled one, and writes `Casks/sbr.rb` in radiosilence/homebrew-sbr. See the root README's "Releases".
 
 These jobs use these repository secrets, the same names kōan uses:
 
@@ -359,7 +359,7 @@ These jobs use these repository secrets, the same names kōan uses:
 | `IOS_CERTIFICATE_PASSWORD` | its password |
 | `MACOS_CERTIFICATE_P12` | base64 of the Developer ID Application certificate (`.p12`) |
 | `MACOS_CERTIFICATE_PASSWORD` | its password |
-| `RELEASE_TOKEN` | a token with `contents: write` on this repository, which creates the release and its tag |
+| `RELEASE_TOKEN` | a token with `contents: write` on this repository and radiosilence/homebrew-sbr, which creates the release and its tag and updates the cask |
 
 Without the key or the certificate, the TestFlight job is skipped. The macOS
 release jobs fail instead: a release must not quietly ship without its disk

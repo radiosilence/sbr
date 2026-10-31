@@ -1,0 +1,1 @@
+- **Homebrew cask.** `brew install --cask radiosilence/sbr/sbr` installs the Mac app; each release moves the cask to its disk image once the image is notarised.

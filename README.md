@@ -270,6 +270,14 @@ Vision skips sing-box's 5 ms sleep before the first raw write; rustls is fed one
 
 `shadowsocks` 1.25 `ProxyClientStream` assumes the first write (address header + payload) fits in one AEAD chunk. A larger first write is reported as fully written while only part of it is sent: a `debug_assert!` in debug builds, silent data loss in release builds. `FirstWriteCap` in `outbound/shadowsocks.rs` caps the first write. This should be reported upstream.
 
+## Installing the Mac app
+
+```sh
+brew install --cask radiosilence/sbr/sbr
+```
+
+or download `sbr-<version>.dmg` from the [latest release](https://github.com/radiosilence/sbr/releases/latest) and drag sbr to Applications. Either way, approve the network extension under System Settings › General › Login Items & Extensions on first connect. macOS 15 or later. The cask moves to a release once its disk image is notarised, which can lag the release by Apple's queue.
+
 ## CI
 
 Every push and pull request to `main` runs `cargo fmt`, clippy and the tests on Linux and macOS, with the interop tests running against sing-box, Xray and hysteria on macOS, and builds the xcframework and the Apple app. Each push to `main` that passes uploads an iOS build to TestFlight. See [`apple/README.md`](apple/README.md#ci).
@@ -278,7 +286,7 @@ Every push and pull request to `main` runs `cargo fmt`, clippy and the tests on 
 
 A change records itself as a fragment under `changelog.d/unreleased/` (see [`changelog.d/README.md`](changelog.d/README.md)), not in `CHANGELOG.md`, so open pull requests never conflict over it. `just release patch|minor|major|X.Y.Z` opens the release pull request: it bumps the workspace version and the Apple apps' `MARKETING_VERSION` together, and turns the fragments into that version's changelog section.
 
-Merging it is what releases: CI sees the push change the version to one with no GitHub release yet, builds and signs the Developer ID macOS disk image while the checks run, and once both have passed publishes the release with that image, creating the `vX.Y.Z` tag. Nothing else creates tags. Notarisation comes after the release is out, so Apple's queue holds nothing up: the `Notarise` job notarises and staples the image and replaces the release's copy. TestFlight likewise runs on its own and nothing waits on it. A failed release is retried by re-running the failed jobs (a re-run of a failed notarisation takes up the submission already made), or by running CI/CD by hand on `main`, which releases the workspace version if it is not out yet. It needs the `RELEASE_TOKEN` secret, a token with `contents: write` on this repository, because GitHub does not let the workflow token create a tag on a commit that changes a workflow.
+Merging it is what releases: CI sees the push change the version to one with no GitHub release yet, builds and signs the Developer ID macOS disk image while the checks run, and once both have passed publishes the release with that image, creating the `vX.Y.Z` tag. Nothing else creates tags. Notarisation comes after the release is out, so Apple's queue holds nothing up: the `Notarise` job notarises and staples the image, replaces the release's copy, and then points the Homebrew cask at it. TestFlight likewise runs on its own and nothing waits on it. A failed release is retried by re-running the failed jobs (a re-run of a failed notarisation takes up the submission already made), or by running CI/CD by hand on `main`, which releases the workspace version if it is not out yet. It needs the `RELEASE_TOKEN` secret, a token with `contents: write` on this repository and on [radiosilence/homebrew-sbr](https://github.com/radiosilence/homebrew-sbr), the tap holding the cask, because GitHub does not let the workflow token create a tag on a commit that changes a workflow.
 
 ## Website
 
