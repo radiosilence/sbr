@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use quinn::congestion::{BbrConfig, ControllerFactory, CubicConfig, NewRenoConfig};
-use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use quinn::{Connection, RecvStream, SendStream};
 use sbr_config::{DomainStrategy, Network, TuicCongestion, TuicOutbound, TuicUdpRelay};
 use sbr_core::dns::Dns;
 use sbr_core::{BoxFuture, BoxPacketConn, Destination, Host, Outbound, PacketConn, Stream};
@@ -620,14 +620,7 @@ impl PacketConn for Uot {
                 let len = usize::from(u16::from_be_bytes([pl[2], pl[3]]));
                 if len > buf.len() {
                     // Too big for the caller: drop it and keep the session.
-                    let mut left = len;
-                    while left > 0 {
-                        let n = left.min(buf.len()).max(1).min(len);
-                        let mut scratch = [0u8; 512];
-                        let n = n.min(scratch.len());
-                        read_exact(&mut r, &mut scratch[..n]).await?;
-                        left -= n;
-                    }
+                    super::proto::discard(&mut *r, len).await?;
                     continue;
                 }
                 read_exact(&mut r, &mut buf[..len]).await?;

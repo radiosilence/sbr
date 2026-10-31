@@ -26,7 +26,8 @@ const NAME_MAX: usize = 255;
 const MAX_CACHED_RECORDS: usize = 64;
 /// Wire bytes cached across all entries. Entries are capped in count and
 /// records, but 64 TXT records under each of a thousand names an app makes up
-/// would still be tens of megabytes; a decoded message is larger again.
+/// would still be tens of megabytes. The bound is on wire bytes; the decoded
+/// messages take a small multiple of it.
 const MAX_CACHED_BYTES: usize = if cfg!(any(target_os = "ios", target_os = "tvos", target_os = "visionos")) {
     1 << 20
 } else {
