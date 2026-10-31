@@ -344,7 +344,11 @@ or a manual run on `main` while that version is unreleased, also runs the
 `Release (macOS)` job alongside the checks, in place of the `Apple` job, which
 its pull request already ran: it builds the xcframework without tvOS (and
 keeps it for TestFlight), then `apple/macos-release.sh build` archives `SbrMac` and exports
-it with Developer ID signing and `package` makes the signed disk image. Once
+it with Developer ID signing and `package` makes the signed disk image. The
+image is built with dmgbuild (`apple/dmg/settings.py`, run through `uvx`),
+which writes the Finder window's layout into `.DS_Store` directly rather than
+scripting Finder, so it lays out the same on a runner with no logged-in
+session. Once
 the checks pass, CI/CD publishes the GitHub release with that image, and the
 `Notarise` job then runs `notarise-dmg` and replaces the release's copy with
 the stapled one. See the root README's "Releases".
