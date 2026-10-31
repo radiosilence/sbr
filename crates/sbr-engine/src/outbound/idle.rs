@@ -3,7 +3,9 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 pub struct Idle {
     users: AtomicUsize,
@@ -56,7 +58,7 @@ impl Idle {
                 let Some(since) = me.upgrade().map(|i| *i.since.lock().unwrap()) else {
                     return;
                 };
-                tokio::time::sleep_until((since + timeout).into()).await;
+                tokio::time::sleep_until(since + timeout).await;
                 let Some(i) = me.upgrade() else { return };
                 if i.users() > 0 {
                     i.armed.store(false, Ordering::Release);

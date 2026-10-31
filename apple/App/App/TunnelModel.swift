@@ -432,8 +432,9 @@ final class TunnelModel: ObservableObject {
         } catch {
             return
         }
-        // Starting is asynchronous: wait for it to begin, then to end.
-        _ = await Self.wait(manager.connection, seconds: 2) { $0 != .disconnected }
+        // Starting is asynchronous: wait for it to begin (a cold extension
+        // launch takes a while), then to end.
+        _ = await Self.wait(manager.connection, seconds: 10) { $0 != .disconnected }
         _ = await Self.wait(manager.connection, seconds: 10) { $0 == .disconnected || $0 == .invalid }
     }
 

@@ -270,37 +270,47 @@ fn host_key_algorithms(names: &[String], pins: &[PublicKey]) -> Result<Vec<Algor
 }
 
 impl Dialer {
-    async fn dial(&self) -> io::Result<Conn> {
-        let stream = self.upstream.connect(&self.server).await?;
+    /// `Err(.., true)` when the server refused us (authentication or host
+    /// key), as opposed to a network or local failure.
+    async fn dial(&self) -> Result<Conn, (io::Error, bool)> {
+        let net = |e: io::Error| (e, false);
+        let stream = self.upstream.connect(&self.server).await.map_err(net)?;
         let handler = Client {
             pins: self.pins.clone(),
         };
         let mut handle = client::connect_stream(self.config.clone(), stream, handler)
             .await
-            .map_err(ssh_err)?;
+            .map_err(|e| {
+                let refused = matches!(e, russh::Error::UnknownKey);
+                (ssh_err(e), refused)
+            })?;
         // Key first: a signature gives an impostor nothing, a password gives it the password.
         let mut ok = false;
         if let Some(key) = &self.key {
-            let hash = handle.best_supported_rsa_hash().await.map_err(ssh_err)?.flatten();
+            let hash = handle
+                .best_supported_rsa_hash()
+                .await
+                .map_err(|e| net(ssh_err(e)))?
+                .flatten();
             let key = PrivateKeyWithHashAlg::new(key.clone(), hash);
             ok = handle
                 .authenticate_publickey(&self.user, key)
                 .await
-                .map_err(ssh_err)?
+                .map_err(|e| net(ssh_err(e)))?
                 .success();
         }
         if !ok && let Some(pw) = &self.password {
             ok = handle
                 .authenticate_password(&self.user, pw)
                 .await
-                .map_err(ssh_err)?
+                .map_err(|e| net(ssh_err(e)))?
                 .success();
         }
         if !ok {
             let _ = handle.disconnect(Disconnect::ByApplication, "", "").await;
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "ssh: authentication failed",
+            return Err((
+                io::Error::new(io::ErrorKind::PermissionDenied, "ssh: authentication failed"),
+                true,
             ));
         }
         Ok(Conn {
@@ -332,18 +342,20 @@ impl Inner {
                         let r = tokio::time::timeout(DIAL_TIMEOUT, dialer.dial())
                             .await
                             .unwrap_or_else(|_| {
-                                Err(io::Error::new(io::ErrorKind::TimedOut, "ssh: handshake timed out"))
+                                Err((
+                                    io::Error::new(io::ErrorKind::TimedOut, "ssh: handshake timed out"),
+                                    false,
+                                ))
                             });
-                        let r = r.map(Arc::new).map_err(Arc::new);
+                        let refused = matches!(r, Err((_, true)));
+                        let r = r.map(Arc::new).map_err(|(e, _)| Arc::new(e));
                         let current = me.upgrade().map(|me| {
                             let mut st = me.state.lock().unwrap();
                             let current = matches!(&*st, State::Dialing(g, _) if *g == generation);
                             if current {
                                 *st = match &r {
                                     Ok(c) => State::Up(c.clone()),
-                                    Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                                        State::Failed(Instant::now() + FAILURE_BACKOFF, e.clone())
-                                    }
+                                    Err(e) if refused => State::Failed(Instant::now() + FAILURE_BACKOFF, e.clone()),
                                     Err(_) => State::Down,
                                 };
                             }

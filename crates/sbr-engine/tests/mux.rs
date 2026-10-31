@@ -90,6 +90,12 @@ async fn multiplex_vs_sing_box() {
 
 #[tokio::test]
 async fn multiplex_brutal_exchange_vs_sing_box() {
+    // sing-box refuses a brutal inbound where TCP Brutal (a Linux kernel
+    // module) cannot exist.
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipped: TCP Brutal servers need Linux");
+        return;
+    }
     let bin = need_sing_box!();
     let p = free_port();
     let cfg = format!(

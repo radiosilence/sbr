@@ -263,3 +263,50 @@ async fn ssh_dead_connection_is_replaced() {
     bulk_echo(socks_connect(port(&sbr, "in"), target).await, 64 * 1024).await;
     assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
 }
+
+/// Live SSH connections to `d`: sshd forks one child per connection.
+fn sessions(d: &Sshd) -> usize {
+    let out = Command::new("pgrep")
+        .args(["-P", &d.child.id().to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).lines().count()
+}
+
+async fn wait_sessions(d: &Sshd, n: usize) -> bool {
+    for _ in 0..100 {
+        if sessions(d) == n {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn ssh_connection_ends_with_the_instance() {
+    let bin = need_sshd!();
+    let d = sshd(&bin).await;
+    let target = echo().await;
+    // Idle when the instance goes.
+    let sbr = sbr_via(&ssh_outbound(&d, &d.user_key, &d.host_pub)).await;
+    bulk_echo(socks_connect(port(&sbr, "in"), target).await, 64 * 1024).await;
+    assert!(wait_sessions(&d, 1).await, "one connection while in use");
+    drop(sbr);
+    assert!(
+        wait_sessions(&d, 0).await,
+        "idle connection left open: {}",
+        sessions(&d)
+    );
+    // A stream still open when the instance goes.
+    let sbr = sbr_via(&ssh_outbound(&d, &d.user_key, &d.host_pub)).await;
+    let s = socks_connect(port(&sbr, "in"), target).await;
+    assert!(wait_sessions(&d, 1).await);
+    drop(sbr);
+    drop(s);
+    assert!(
+        wait_sessions(&d, 0).await,
+        "busy connection left open: {}",
+        sessions(&d)
+    );
+}
