@@ -16,6 +16,7 @@ mod h2mux;
 
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
@@ -33,6 +34,9 @@ use frames::Proto;
 /// sing-mux `TCPTimeout`: dialing a session, and opening a stream.
 const TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Under the h2mux server's own 30 s idle close, so a stream is never sent
+/// into a session the server is about to close.
+const H2_IDLE_TIMEOUT: Duration = Duration::from_secs(25);
 const SESSION_HOST: &str = "sp.mux.sing-box.arpa";
 const SESSION_PORT: u16 = 444;
 const BRUTAL_HOST: &str = "_BrutalBwExchange";
@@ -118,6 +122,9 @@ struct Client {
     sessions: Mutex<Vec<Arc<Entry>>>,
     /// Serialises session creation, as sing-mux's client lock does.
     dialing: tokio::sync::Mutex<()>,
+    /// Session dials started, and the last one that failed.
+    dials: AtomicU64,
+    failure: Mutex<Option<(u64, io::ErrorKind, String)>>,
 }
 
 pub struct Mux {
@@ -144,6 +151,8 @@ impl Mux {
                 brutal: m.brutal.map(|(up, down)| (up as u64 * 125_000, down as u64 * 125_000)),
                 sessions: Mutex::new(Vec::new()),
                 dialing: tokio::sync::Mutex::new(()),
+                dials: AtomicU64::new(0),
+                failure: Mutex::new(None),
             }),
             tcp,
             udp,
@@ -173,6 +182,7 @@ impl Client {
 
     /// A session with a stream counted against it.
     async fn offer(self: &Arc<Self>) -> io::Result<StreamGuard> {
+        let seen = self.dials.load(Ordering::Acquire);
         let _dialing = self.dialing.lock().await;
         let picked = {
             let mut sessions = self.sessions.lock().unwrap();
@@ -188,9 +198,24 @@ impl Client {
         let entry = match picked {
             Some(e) => e,
             None => {
-                let e = tokio::time::timeout(TIMEOUT, self.new_session())
+                // A dial that failed while this caller waited answers it too,
+                // so queued connects on a dead path don't each wait a timeout.
+                if let Some((n, kind, msg)) = &*self.failure.lock().unwrap()
+                    && *n > seen
+                {
+                    return Err(io::Error::new(*kind, msg.clone()));
+                }
+                let n = self.dials.fetch_add(1, Ordering::AcqRel) + 1;
+                let r = tokio::time::timeout(TIMEOUT, self.new_session())
                     .await
-                    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "mux: session dial timed out"))??;
+                    .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "mux: session dial timed out")));
+                let e = match r {
+                    Ok(e) => e,
+                    Err(e) => {
+                        *self.failure.lock().unwrap() = Some((n, e.kind(), e.to_string()));
+                        return Err(e);
+                    }
+                };
                 self.sessions.lock().unwrap().push(e.clone());
                 e
             }
@@ -236,12 +261,14 @@ impl Client {
                     continue;
                 }
             };
-            match tokio::time::timeout(TIMEOUT, guard.entry.open()).await {
-                Ok(Ok(s)) => return Ok(Box::new(Guarded { s, _guard: guard })),
-                Ok(Err(e)) => last = Some(e),
-                Err(_) => last = Some(io::Error::new(io::ErrorKind::TimedOut, "mux: stream open timed out")),
+            // Not cancelled by a timeout: a frame half written would corrupt
+            // the session. A failure leaves the session to its own checks
+            // (closed, SYN not acknowledged, idle), since other streams on
+            // it may be fine.
+            match guard.entry.open().await {
+                Ok(s) => return Ok(Box::new(Guarded { s, _guard: guard })),
+                Err(e) => last = Some(e),
             }
-            guard.entry.close();
         }
         Err(last.unwrap_or_else(|| io::Error::other("mux: no session")))
     }
@@ -330,7 +357,11 @@ impl Drop for StreamGuard {
             return;
         };
         let (entry, client) = (Arc::downgrade(&self.entry), Arc::downgrade(&client));
-        self.entry.idle.arm(IDLE_TIMEOUT, move || {
+        let timeout = match self.entry.sess {
+            Sess::H2(_) => H2_IDLE_TIMEOUT,
+            Sess::Frames(_) => IDLE_TIMEOUT,
+        };
+        self.entry.idle.arm(timeout, move || {
             let Some(e) = entry.upgrade() else { return };
             if let Some(c) = client.upgrade() {
                 c.sessions.lock().unwrap().retain(|x| !Arc::ptr_eq(x, &e));
@@ -555,25 +586,6 @@ impl Outbound for Mux {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn responses() {
-        assert_eq!(parse_response(&[]), Err(()));
-        assert_eq!(parse_response(&[0]), Ok(None));
-        assert_eq!(parse_response(&[1]), Err(()));
-        assert_eq!(parse_response(&[1, 2, b'n']), Err(()));
-        assert_eq!(parse_response(&[1, 2, b'n', b'o']), Ok(Some("no".into())));
-        // A length over the cap is refused without waiting for the bytes.
-        assert_eq!(
-            parse_response(&[1, 0xff, 0x7f]),
-            Ok(Some("mux: error message too long".into()))
-        );
-    }
-}
-
 /// Fuzzing entry point: `data[0]` picks smux or yamux and padding, the rest
 /// is everything the server sends to a client session with one stream open.
 #[doc(hidden)]
@@ -606,4 +618,23 @@ pub async fn fuzz_session(data: &[u8]) {
         }
     }
     session.close();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn responses() {
+        assert_eq!(parse_response(&[]), Err(()));
+        assert_eq!(parse_response(&[0]), Ok(None));
+        assert_eq!(parse_response(&[1]), Err(()));
+        assert_eq!(parse_response(&[1, 2, b'n']), Err(()));
+        assert_eq!(parse_response(&[1, 2, b'n', b'o']), Ok(Some("no".into())));
+        // A length over the cap is refused without waiting for the bytes.
+        assert_eq!(
+            parse_response(&[1, 0xff, 0x7f]),
+            Ok(Some("mux: error message too long".into()))
+        );
+    }
 }

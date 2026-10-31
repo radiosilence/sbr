@@ -79,8 +79,29 @@ fn rejects_unknown_fields_with_path() {
 
 #[test]
 fn rejects_unsupported_protocols_loudly() {
-    let e = err(r#"{"outbounds":[{"type":"ssh","tag":"v"}]}"#);
-    assert!(e.contains("outbounds[0].type") && e.contains("ssh"), "{e}");
+    let e = err(r#"{"outbounds":[{"type":"tor","tag":"v"}]}"#);
+    assert!(e.contains("outbounds[0].type") && e.contains("tor"), "{e}");
+}
+
+#[test]
+fn ssh_outbound() {
+    let o = Options::parse(
+        r#"{"outbounds":[{"type":"ssh","tag":"s","server":"a.com","private_key":["-----BEGIN","k"],
+            "host_key":["ssh-ed25519 AAAA c"],"client_version":"SSH-2.0-OpenSSH_9.6"}]}"#,
+    )
+    .unwrap();
+    let OutboundKind::Ssh(s) = &o.outbounds[0].kind else {
+        panic!()
+    };
+    assert_eq!((s.server.server_port, s.user.as_str()), (22, "root"));
+    assert_eq!(s.private_key.as_deref(), Some("-----BEGIN\nk"));
+    assert!(!o.warnings.iter().any(|w| w.contains("host_key")));
+    let o = Options::parse(r#"{"outbounds":[{"type":"ssh","server":"a.com","password":"p"}]}"#).unwrap();
+    assert!(o.warnings.iter().any(|w| w.contains("no host_key")), "{:?}", o.warnings);
+    let e = err(r#"{"outbounds":[{"type":"ssh","server":"a.com","client_version":"OpenSSH"}]}"#);
+    assert!(e.starts_with("outbounds[0].client_version"), "{e}");
+    let e = err(r#"{"outbounds":[{"type":"ssh","server":"a.com","host_key":["AAAA"]}]}"#);
+    assert!(e.starts_with("outbounds[0].host_key[0]"), "{e}");
 }
 
 #[test]
@@ -129,9 +150,25 @@ fn v2ray_family_outbounds() {
 fn v2ray_family_rejections() {
     let base = r#""server":"a.com","server_port":443,"uuid":"b831381d-6324-4d53-ad4f-8cda48b30811""#;
     let e = err(&format!(
-        r#"{{"outbounds":[{{"type":"vless",{base},"multiplex":{{"enabled":true}}}}]}}"#
+        r#"{{"outbounds":[{{"type":"vless",{base},"flow":"xtls-rprx-vision","multiplex":{{"enabled":true}}}}]}}"#
     ));
     assert!(e.starts_with("outbounds[0].multiplex"), "{e}");
+    let e = err(&format!(
+        r#"{{"outbounds":[{{"type":"vless",{base},"multiplex":{{"enabled":true,"protocol":"mplex"}}}}]}}"#
+    ));
+    assert!(e.starts_with("outbounds[0].multiplex.protocol"), "{e}");
+    let e = err(&format!(
+        r#"{{"outbounds":[{{"type":"vless",{base},"multiplex":{{"enabled":true,"brutal":{{"enabled":true,"up_mbps":0,"down_mbps":10}}}}}}]}}"#
+    ));
+    assert!(e.starts_with("outbounds[0].multiplex.brutal.up_mbps"), "{e}");
+    let o = Options::parse(&format!(
+        r#"{{"outbounds":[{{"type":"shadowsocks","server":"a.com","server_port":1,"method":"none","multiplex":{{"enabled":true,"protocol":"smux","padding":true}}}}]}}"#
+    ))
+    .unwrap();
+    let OutboundKind::Shadowsocks(ss) = &o.outbounds[0].kind else {
+        panic!()
+    };
+    assert!(ss.multiplex.as_ref().is_some_and(|m| m.padding));
     let e = err(&format!(
         r#"{{"outbounds":[{{"type":"vless",{base},"flow":"xtls-rprx-vision"}}]}}"#
     ));

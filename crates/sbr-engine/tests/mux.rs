@@ -120,3 +120,28 @@ async fn multiplex_brutal_exchange_vs_sing_box() {
         Err(e) => assert!(e.to_string().contains("brutal exchange: remote"), "{e}"),
     }
 }
+
+/// `network` applies to the streams inside the mux, not to the session,
+/// which always runs over TCP.
+#[tokio::test]
+async fn multiplex_udp_only_network_vs_sing_box() {
+    let bin = need_sing_box!();
+    let p = free_port();
+    let cfg = format!(
+        r#"{{"log":{{"level":"warn"}},
+        "inbounds":[{{"type":"trojan","users":[{{"password":"pw"}}],"listen":"127.0.0.1","listen_port":{p},"multiplex":{{"enabled":true}}}}],
+        "outbounds":[{{"type":"direct"}}]}}"#
+    );
+    let _sb = SingBox::start(&bin, &cfg, Some(p)).await;
+    let sbr = start(&format!(
+        r#"{{"inbounds":[{{"type":"mixed","tag":"in","listen":"127.0.0.1","listen_port":0}}],
+        "outbounds":[{{"type":"trojan","password":"pw","tag":"o","server":"127.0.0.1","server_port":{p},"network":"udp",
+            "multiplex":{{"enabled":true,"protocol":"yamux"}}}}]}}"#
+    ))
+    .await;
+    let udp = SocksUdp::new(port(&sbr, "in")).await;
+    udp.echo_check(udp_echo().await, &[1, 1400]).await;
+    let o = sbr.engine.outbound("o").unwrap();
+    let dest = sbr_engine::sbr_core::Destination::from(echo().await);
+    assert!(o.connect(&dest).await.is_err(), "tcp is disabled by network");
+}

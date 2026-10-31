@@ -6,6 +6,10 @@
 //! limit, and when it is spent the reader stops, stalling every stream (as
 //! xtaci/smux does with `MaxReceiveBuffer`). yamux's per-stream window is
 //! fixed by the protocol at 256 KiB, so the session caps its streams instead.
+//!
+//! A received frame is read into the session's buffer and handed to its
+//! stream as `Bytes`; while earlier frames are still queued that buffer is a
+//! fresh allocation, so a busy stream costs one allocation per frame.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
