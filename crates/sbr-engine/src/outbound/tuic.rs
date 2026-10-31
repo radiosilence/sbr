@@ -70,7 +70,6 @@ pub struct Tuic {
 
 struct Session {
     conn: Connection,
-    _endpoint: Endpoint,
     usage: Arc<Usage>,
     udp: Arc<Sessions<u16>>,
     next_udp: AtomicU16,
@@ -152,7 +151,9 @@ impl Tuic {
         })
     }
 
-    async fn dial(&self) -> io::Result<Arc<Session>> {
+    /// A pooled connection, or for `probe` one that measures a fresh
+    /// handshake: never 0-RTT, which returns before any round trip.
+    async fn dial(&self, probe: bool) -> io::Result<Arc<Session>> {
         let cc: Arc<dyn ControllerFactory + Send + Sync> = match self.cc {
             TuicCongestion::Cubic => Arc::new(CubicConfig::default()),
             TuicCongestion::NewReno => Arc::new(NewRenoConfig::default()),
@@ -173,7 +174,7 @@ impl Tuic {
             cc,
         );
         let (endpoint, connecting) = self.dialer.start(t).await?;
-        let early = if self.zero_rtt {
+        let early = if self.zero_rtt && !probe {
             connecting.into_0rtt()
         } else {
             Err(connecting)
@@ -203,7 +204,6 @@ impl Tuic {
         };
         let session = Arc::new(Session {
             conn: conn.clone(),
-            _endpoint: endpoint,
             usage: Arc::default(),
             udp: Arc::new(Sessions::new()),
             next_udp: AtomicU16::new(0),
@@ -221,6 +221,7 @@ impl Tuic {
         tokio::spawn(watch(
             conn,
             session.usage.clone(),
+            Arc::new(Mutex::new(Some(endpoint))),
             self.quic.idle_timeout.unwrap_or(DEFAULT_IDLE),
             Some((self.heartbeat, beat)),
         ));
@@ -228,7 +229,7 @@ impl Tuic {
     }
 
     async fn open(&self, dest: &Destination) -> io::Result<(QuicStream, Arc<Session>)> {
-        let (s, guard) = self.pool.get(|| self.dial()).await?;
+        let (s, guard) = self.pool.get(|| self.dial(false)).await?;
         let (mut send, recv) = s.conn.open_bi().await.map_err(io_err)?;
         let mut req = vec![VERSION, CMD_CONNECT];
         put_addr(&mut req, Some(dest));
@@ -322,10 +323,16 @@ impl Outbound for Tuic {
         "tuic"
     }
 
-    /// The QUIC connection's smoothed RTT: a real round-trip measurement to
-    /// the server that costs no extra traffic once the session exists.
+    /// The handshake round trip of a connection dialed for the probe and
+    /// closed at once. A pooled connection's RTT can be stale: one whose path
+    /// died still reports its last estimate until quinn times it out.
     fn probe_rtt(&self) -> Option<BoxFuture<'_, io::Result<std::time::Duration>>> {
-        Some(Box::pin(async move { Ok(self.dial().await?.conn.rtt()) }))
+        Some(Box::pin(async move {
+            let s = self.dial(true).await?;
+            let rtt = s.conn.rtt();
+            s.conn.close(0u32.into(), b"");
+            Ok(rtt)
+        }))
     }
 
     fn connect<'a>(&'a self, dest: &'a Destination) -> BoxFuture<'a, io::Result<Stream>> {
@@ -355,7 +362,7 @@ impl Outbound for Tuic {
                 };
                 return Ok(Box::new(PinnedUdp::new(uot, self.dns.clone(), self.strategy)) as BoxPacketConn);
             }
-            let (s, guard) = self.pool.get(|| self.dial()).await?;
+            let (s, guard) = self.pool.get(|| self.dial(false)).await?;
             let (tx, rx) = mpsc::channel(UDP_QUEUE);
             let id = {
                 let mut map = s.udp.map.lock().unwrap();

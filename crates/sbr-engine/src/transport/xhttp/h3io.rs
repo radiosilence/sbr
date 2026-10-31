@@ -34,7 +34,6 @@ const CONN_WINDOW: u64 = 16 << 20;
 struct Session {
     send: Send3,
     usage: Arc<Usage>,
-    _endpoint: quinn::Endpoint,
 }
 
 #[derive(Default)]
@@ -81,14 +80,10 @@ impl H3Conn {
             let (dead, watched) = (self.dead.clone(), conn.clone());
             let u = usage.clone();
             tokio::spawn(async move {
-                quic::watch(watched, u, IDLE, None).await;
+                quic::watch(watched, u, Arc::new(std::sync::Mutex::new(Some(endpoint))), IDLE, None).await;
                 dead.store(true, Ordering::Relaxed);
             });
-            Ok(Session {
-                send,
-                usage,
-                _endpoint: endpoint,
-            })
+            Ok(Session { send, usage })
         }
         .await;
         if r.is_err() {
