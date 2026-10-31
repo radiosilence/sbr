@@ -86,11 +86,12 @@ SbrInstance *sbr_start(const char *config_json, const char *base_dir, char **err
  * successful sbr_reload. */
 char *sbr_reload(SbrInstance *instance, const char *config_json);
 
-/* Called once per sbr_fetch_profile, from an sbr thread: `profile` is the
- * downloaded text and `error` NULL, or `profile` NULL and `error` why. The
- * error never names the URL or any host it led to, so it is safe to show or
- * log. Both are only valid during the call. Do not call sbr_stop, sbr_reload or
- * sbr_apply_profile from inside it. */
+/* Called once per sbr_fetch_profile, on a thread of its own: `profile` is
+ * the downloaded text and `error` NULL, or `profile` NULL and `error` why.
+ * The error never names the URL or any host it led to, so it is safe to show
+ * or log. Both are only valid during the call. It may call back into sbr,
+ * including sbr_apply_profile on the same instance. A cancellation can arrive
+ * after sbr_stop has returned, so `context` must stay valid until the call. */
 typedef void (*SbrFetchCallback)(void *context, const char *profile, const char *error);
 
 /* Download a remote profile from `url` (https only) through the running

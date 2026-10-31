@@ -179,7 +179,11 @@ impl Inner {
 pub type FetchFn = unsafe extern "C" fn(context: *mut c_void, profile: *const c_char, error: *const c_char);
 
 /// Calls the host back exactly once: with the result, or with an error if
-/// the task is dropped first (the engine stopped or reloaded).
+/// the task is dropped first (the engine stopped or reloaded). The call runs
+/// on a thread of its own. A cancellation runs while the runtime is torn
+/// down, inside `sbr_stop` or `sbr_reload` with the instance locked, and a
+/// result runs on the engine's own threads, so a host calling back into sbr
+/// from either would deadlock.
 struct Reply {
     callback: FetchFn,
     context: *mut c_void,
@@ -197,9 +201,42 @@ impl Reply {
             Ok(p) => (Some(p), None),
             Err(e) => (None, CString::new(e.replace('\0', " ")).ok()),
         };
+        let call = Call {
+            callback: self.callback,
+            context: self.context,
+            profile,
+            error,
+        };
+        let mut call = Some(call);
+        let spawned = std::thread::Builder::new().name("sbr-reply".into()).spawn({
+            let call = call.take();
+            move || call.map(Call::run)
+        });
+        if let Err(e) = spawned {
+            // Could not spawn: calling inline is better than never.
+            tracing::warn!(error = %e, "profile callback thread");
+        }
+        if let Some(call) = call {
+            call.run();
+        }
+    }
+}
+
+struct Call {
+    callback: FetchFn,
+    context: *mut c_void,
+    profile: Option<CString>,
+    error: Option<CString>,
+}
+
+// SAFETY: as for `Reply`.
+unsafe impl Send for Call {}
+
+impl Call {
+    fn run(self) {
         let p = |s: &Option<CString>| s.as_ref().map_or(ptr::null(), |s| s.as_ptr());
         // SAFETY: the host passed a valid callback; the strings outlive the call.
-        unsafe { (self.callback)(self.context, p(&profile), p(&error)) };
+        unsafe { (self.callback)(self.context, p(&self.profile), p(&self.error)) };
     }
 }
 
