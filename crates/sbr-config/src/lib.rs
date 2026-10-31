@@ -375,12 +375,26 @@ impl Options {
         // the default outbound.
         outbounds.extend(endpoints);
 
-        if dns.is_none() && inbounds.iter().any(|i| matches!(i.kind, InboundKind::Tun(_))) {
+        let tun = inbounds.iter().any(|i| matches!(i.kind, InboundKind::Tun(_)));
+        if tun && dns.is_none() {
             diag.warnings.push(
                 "dns: missing with a tun inbound: server names and hijacked DNS queries go to the system resolver, \
                  which on Apple platforms is the physical network's, outside the tunnel"
                     .into(),
             );
+        }
+        for (i, s) in dns.iter().flat_map(|d| d.servers.iter().enumerate()) {
+            let direct = s.dial.detour.is_none() && !s.legacy.as_ref().is_some_and(|l| l.default_outbound);
+            let leak = match &s.kind {
+                dns::DnsServerKind::Local => Some("asks the system resolver, which is the physical network's"),
+                dns::DnsServerKind::Udp(_) | dns::DnsServerKind::Tcp(_) if direct => {
+                    Some("sends queries in cleartext outside the tunnel (no detour)")
+                }
+                _ => None,
+            };
+            if let (true, Some(leak)) = (tun, leak) {
+                diag.warnings.push(format!("dns.servers[{i}] ({}): {leak}", s.tag));
+            }
         }
         let options = Options {
             log,

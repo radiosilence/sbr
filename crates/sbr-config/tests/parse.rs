@@ -190,6 +190,30 @@ fn tun_without_dns_warns_of_the_system_resolver() {
     ))
     .unwrap();
     assert!(!o.warnings.iter().any(|w| w.starts_with("dns: missing")));
+    assert!(
+        o.warnings
+            .iter()
+            .any(|w| w.starts_with("dns.servers[0] (l): asks the system resolver"))
+    );
+}
+
+#[test]
+fn tun_dns_in_cleartext_outside_the_tunnel_warns() {
+    let o = Options::parse(
+        r#"{"inbounds":[{"type":"tun","address":["172.19.0.1/30"],"auto_route":true}],
+        "outbounds":[{"type":"direct","tag":"d"},{"type":"socks","tag":"p","server":"127.0.0.1","server_port":1080}],
+        "dns":{"servers":[
+            {"type":"udp","tag":"plain","server":"1.1.1.1"},
+            {"type":"udp","tag":"via","server":"1.1.1.1","detour":"p"},
+            {"type":"https","tag":"doh","server":"1.1.1.1"}]}}"#,
+    )
+    .unwrap();
+    let w: Vec<_> = o.warnings.iter().filter(|w| w.starts_with("dns.servers")).collect();
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(
+        w[0].starts_with("dns.servers[0] (plain): sends queries in cleartext"),
+        "{w:?}"
+    );
 }
 
 #[test]

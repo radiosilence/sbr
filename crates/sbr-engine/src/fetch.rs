@@ -238,9 +238,10 @@ impl HttpClient {
             inner: via.connect(&dest).await?,
             meter,
         };
+        // No User-Agent: a probe to a leaf's own server can reach a site the
+        // server fronts for (REALITY's dest), which should not learn sbr is the client.
         let req = format!(
-            "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: sbr/{}\r\n{}\r\n",
-            env!("CARGO_PKG_VERSION"),
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\n{}\r\n",
             if range {
                 format!("Range: bytes=0-{}\r\n", PROOF_BYTES - 1)
             } else {

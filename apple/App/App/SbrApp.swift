@@ -9,6 +9,9 @@ struct SbrApp: App {
     @StateObject private var inbox = PairInbox()
     #endif
     @Environment(\.scenePhase) private var scenePhase
+    /// A link opened from elsewhere, waiting for the user to confirm: opening
+    /// it downloads from its host, before any tunnel is up.
+    @State private var pendingLink: ProfileLink?
 
     init() {
         Theme.registerFont()
@@ -45,7 +48,16 @@ struct SbrApp: App {
                     }
                     #endif
                     guard let link = ProfileLink(url) else { return }
-                    Task { await importLink(link) }
+                    pendingLink = link
+                }
+                .alert("download this profile?", isPresented: Binding(
+                    get: { pendingLink != nil },
+                    set: { if !$0 { pendingLink = nil } }
+                ), presenting: pendingLink) { link in
+                    Button("download") { Task { await importLink(link) } }
+                    Button("cancel", role: .cancel) {}
+                } message: { link in
+                    Text("sbr will connect to \(link.url.host ?? "an unknown host") directly, outside any tunnel. Only continue if you trust this link.")
                 }
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else { return }

@@ -92,6 +92,12 @@ public final class Sbr: @unchecked Sendable {
         takeString(sbr_check(config))
     }
 
+    /// Warnings for a config that parses: options sbr ignores, and setups
+    /// that send traffic or DNS outside the tunnel.
+    public static func warnings(config: String) -> [String] {
+        takeString(sbr_check_warnings(config))?.split(separator: "\n").map(String.init) ?? []
+    }
+
     /// The utun fd NetworkExtension opened for this process. Call after
     /// `setTunnelNetworkSettings` has completed.
     public static func findTunFileDescriptor() -> Int32? {

@@ -70,6 +70,10 @@ const char *sbr_version(void);
  * error message naming the offending JSON path. */
 char *sbr_check(const char *config_json);
 
+/* Warnings for a config that parses (settings sbr ignores, leaks it can see),
+ * one per line, or NULL if there are none or it does not parse. */
+char *sbr_check_warnings(const char *config_json);
+
 SbrStartOptions sbr_start_options_default(void);
 
 /* Start an instance. On failure returns NULL and, if `error_out` is non-NULL,

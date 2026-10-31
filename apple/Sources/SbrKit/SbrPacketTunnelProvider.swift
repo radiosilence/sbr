@@ -118,6 +118,10 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     override open func startTunnel(options: [String: NSObject]?) async throws {
         Sbr.forwardLogs(to: Logger(subsystem: Self.subsystem, category: "core"), publicMessages: publicLogMessages)
         logger.info("starting sbr \(Sbr.version, privacy: .public)")
+        if options?[SbrStartOption.erase] != nil {
+            erase()
+            throw SbrError("erased")
+        }
         reportPreviousSession()
         do {
             let saved = Self.savedState(providerConfiguration)
@@ -367,13 +371,12 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private static var snapshotURL: URL? { privateDirectory?.appendingPathComponent("remote-profile.json") }
-    private static let snapshotAccount = "tunnel.snapshot"
 
     private func loadSnapshot() -> SbrProfileSnapshot? {
         if let stored {
             // A file left by a build that kept the download on disk.
             if let url = Self.snapshotURL { try? FileManager.default.removeItem(at: url) }
-            return try? stored.keychain.value(SbrProfileSnapshot.self, Self.snapshotAccount)
+            return try? stored.keychain.value(SbrProfileSnapshot.self, SbrProfileSnapshot.account)
         }
         guard let url = Self.snapshotURL, let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(SbrProfileSnapshot.self, from: data)
@@ -384,7 +387,7 @@ open class SbrPacketTunnelProvider: NEPacketTunnelProvider {
     /// first unlock and out of backups.
     private func saveSnapshot(_ snapshot: SbrProfileSnapshot) {
         if let stored {
-            try? stored.keychain.set(value: snapshot, for: Self.snapshotAccount)
+            try? stored.keychain.set(value: snapshot, for: SbrProfileSnapshot.account)
             return
         }
         guard var url = Self.snapshotURL, let data = try? JSONEncoder().encode(snapshot) else { return }

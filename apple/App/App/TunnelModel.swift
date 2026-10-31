@@ -336,8 +336,9 @@ final class TunnelModel: ObservableObject {
     /// including in profiles it downloads itself.
     private var logLevel: String? { verbose ? "debug" : nil }
 
-    /// Save the VPN configuration. `onDemand` arms or disarms auto-connect;
-    /// nil keeps whatever a manual connect or disconnect last left it as.
+    /// Save the VPN configuration. `onDemand` arms or disarms on-demand
+    /// rules; nil keeps whatever a manual connect or disconnect last left it
+    /// as, arming it while the tunnel is on.
     private func install(onDemand: Bool? = nil) async throws {
         guard config != nil else { throw SbrError("no profile selected") }
         #if SBR_SYSTEM_EXTENSION
@@ -365,8 +366,11 @@ final class TunnelModel: ObservableObject {
         m.protocolConfiguration = proto
         m.localizedDescription = "sbr"
         m.isEnabled = true
-        m.onDemandRules = autoConnect ? OnDemand.rules(trusted: trustedNetworks) : nil
-        m.isOnDemandEnabled = autoConnect && (onDemand ?? (manager == nil || m.isOnDemandEnabled))
+        // Under `strict`, on demand also restarts a tunnel the system killed
+        // (memory, crash) instead of leaving traffic outside it.
+        let rules = autoConnect ? OnDemand.rules(trusted: trustedNetworks) : strict ? OnDemand.rules(trusted: []) : nil
+        m.onDemandRules = rules
+        m.isOnDemandEnabled = rules != nil && (onDemand ?? (manager == nil || m.isOnDemandEnabled || isOn))
         try await m.saveToPreferences()
         // A freshly saved manager must be reloaded before it can start.
         try await m.loadFromPreferences()
@@ -381,7 +385,7 @@ final class TunnelModel: ObservableObject {
         config = nil
         remote = nil
         stored = nil
-        if isConnected, let session { _ = try? await session.send(.erase) }
+        await eraseTunnelFiles()
         for m in (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? [] {
             m.connection.stopVPNTunnel()
             do {
@@ -409,6 +413,46 @@ final class TunnelModel: ObservableObject {
         URLCache.shared.removeAllCachedResponses()
         if let domain = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: domain) }
         TunnelControl.reloadControl()
+    }
+
+    /// Have the extension delete its files (cache, rule-sets, logs). They
+    /// live in its own container, so a stopped tunnel is started with
+    /// `SbrStartOption.erase`, which deletes them and stops.
+    private func eraseTunnelFiles() async {
+        if isConnected, let session {
+            _ = try? await session.send(.erase)
+            return
+        }
+        guard let manager, manager.connection.status == .disconnected else { return }
+        do {
+            try manager.connection.startVPNTunnel(options: [SbrStartOption.erase: NSNumber(value: true)])
+        } catch {
+            return
+        }
+        for _ in 0..<50 where manager.connection.status != .disconnected {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    /// The active profile was deleted: stop the tunnel and delete what the
+    /// extension kept from it. The VPN configuration stays, so the next
+    /// profile needs no new system prompt.
+    func forgetActive() async {
+        config = nil
+        remote = nil
+        stored = nil
+        if let manager {
+            if isOn { try? await TunnelControl.setOn(false, manager) }
+            for _ in 0..<50 where manager.connection.status != .disconnected {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        await eraseTunnelFiles()
+        groups = []
+        connections = []
+        connectionsTotal = 0
+        logs = []
+        if let url = Self.logsURL { try? FileManager.default.removeItem(at: url) }
     }
 
     private func observeStatus() {

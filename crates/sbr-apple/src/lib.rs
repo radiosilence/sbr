@@ -259,6 +259,17 @@ pub unsafe extern "C" fn sbr_check(config_json: *const c_char) -> *mut c_char {
     r.map_or(ptr::null_mut(), out_string)
 }
 
+/// # Safety
+/// `config_json` must be NULL or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sbr_check_warnings(config_json: *const c_char) -> *mut c_char {
+    let r = guard(None, || {
+        let o = parse(unsafe { str_arg(config_json) }).ok()?;
+        (!o.warnings.is_empty()).then(|| o.warnings.join("\n"))
+    });
+    r.map_or(ptr::null_mut(), out_string)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn sbr_start_options_default() -> SbrStartOptions {
     SbrStartOptions {
