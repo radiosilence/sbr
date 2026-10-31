@@ -14,7 +14,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 # RFC 8879 certificate decompression: Chrome offers brotli, Apple zlib, Firefox all three.
 brotli-decompressor = "5"
 flate2.workspace = true
-ruzstd = "0.8"
+ruzstd = "0.9.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
