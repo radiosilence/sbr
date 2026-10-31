@@ -121,13 +121,15 @@ pub async fn start(
 /// Connections the controller serves at once; a dashboard keeps a few
 /// WebSockets and some requests open. Past it new ones are closed at once.
 const MAX_API_CONNECTIONS: usize = 32;
-/// How long a connection may take to send its request headers.
+/// How long a connection may take to send its request headers, counted
+/// from when hyper starts waiting for them, so it also closes a kept-alive
+/// connection left idle.
 const API_HEADER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `axum::serve` with a connection cap and a header deadline: it sets no
 /// timer, so hyper's header timeout never runs, and it accepts without
 /// limit, so any local app or LAN peer could hold the extension's file
-/// descriptors with idle connections. Requests are not kept alive.
+/// descriptors with idle connections.
 async fn serve_api(listener: tokio::net::TcpListener, app: Router) {
     let limit = Arc::new(tokio::sync::Semaphore::new(MAX_API_CONNECTIONS));
     loop {
@@ -149,7 +151,6 @@ async fn serve_api(listener: tokio::net::TcpListener, app: Router) {
             let conn = hyper::server::conn::http1::Builder::new()
                 .timer(hyper_util::rt::TokioTimer::new())
                 .header_read_timeout(API_HEADER_TIMEOUT)
-                .keep_alive(false)
                 .serve_connection(hyper_util::rt::TokioIo::new(tcp), service)
                 .with_upgrades();
             if let Err(e) = conn.await {
