@@ -339,8 +339,8 @@ which archives the app against that xcframework and uploads it to TestFlight; `i
 by hand to retry an upload. A pull request's newer push cancels its older run; on `main` a run always finishes and only the newest waiting commit runs next. Pull requests
 never upload.
 
-A push that changes the workspace version (a merged release pull request)
-also calls `macos.yml`: `build` archives `SbrMac` against the same
+A push that changes the workspace version (a merged release pull request),
+or a manual run with **release** ticked, also calls `macos.yml`: `build` archives `SbrMac` against the same
 xcframework and exports it with Developer ID signing, `package` notarises and
 staples the app and makes the disk image, and `notarise-dmg` notarises and
 staples that, after which CI/CD publishes the GitHub release. A release pull
