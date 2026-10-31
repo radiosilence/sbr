@@ -183,6 +183,9 @@ targets:
     info:
       path: Support/AppMac-Info.plist
       properties:
+        # The product is SbrMac.app, shipped as sbr.app; this names the app
+        # in its menus.
+        CFBundleName: sbr
         CFBundleDisplayName: sbr
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)

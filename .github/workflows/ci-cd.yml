@@ -16,6 +16,11 @@ on:
     branches: [main]
     paths-ignore: ["**.md"]
   workflow_dispatch:
+    inputs:
+      release:
+        description: Release the workspace version if it is not out yet (how a failed release is retried)
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -267,8 +272,9 @@ jobs:
     secrets: inherit
 
   # Whether this run releases, the one answer the release jobs read: a push
-  # that changes the workspace version, or a manual run (how a failed release
-  # is retried), when that version has no GitHub release yet.
+  # that changes the workspace version, or a manual run asked to release (how
+  # a failed release is retried), when that version has no GitHub release yet.
+  # A manual run releases main's head, which the tag then points at.
   version:
     name: Version
     runs-on: ubuntu-latest
@@ -284,12 +290,14 @@ jobs:
       - id: check
         env:
           EVENT: ${{ github.event_name }}
+          ASKED: ${{ inputs.release }}
           GH_TOKEN: ${{ github.token }}
         run: |
           version_of() { sed -n 's/^version = "\(.*\)"/\1/p' | head -1; }
           version=$(version_of < Cargo.toml)
           release=false
-          if [ "$EVENT" = workflow_dispatch ] || [ "$(git show HEAD^1:Cargo.toml 2>/dev/null | version_of)" != "$version" ]; then
+          if { [ "$EVENT" = workflow_dispatch ] && [ "$ASKED" = true ]; } \
+            || { [ "$EVENT" = push ] && [ "$(git show HEAD^1:Cargo.toml 2>/dev/null | version_of)" != "$version" ]; }; then
             # Only a 404 means the version is not out. Any other failure stops
             # the run: guessing either way releases twice or never.
             if ! out=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$version" 2>&1); then
@@ -302,9 +310,17 @@ jobs:
             fi
           fi
           marketing=$(sed -n 's/^ *MARKETING_VERSION: "\(.*\)"/\1/p' apple/App/project.yml | head -1)
-          if [ "$release" = true ] && [ "$marketing" != "$version" ]; then
-            echo "::error::apple/App/project.yml's MARKETING_VERSION ($marketing) differs from Cargo.toml's version ($version)"
-            exit 1
+          # Checked here, so a release that would fail late fails before any
+          # macOS runner starts.
+          if [ "$release" = true ]; then
+            if [ "$marketing" != "$version" ]; then
+              echo "::error::apple/App/project.yml's MARKETING_VERSION ($marketing) differs from Cargo.toml's version ($version)"
+              exit 1
+            fi
+            if ! grep -qx "## $version" CHANGELOG.md; then
+              echo "::error::CHANGELOG.md has no section for $version: release with mise run release"
+              exit 1
+            fi
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "release=$release" >> "$GITHUB_OUTPUT"
@@ -348,10 +364,6 @@ jobs:
       - name: Write the release notes
         run: |
           section=$(awk -v h="## $VERSION" '$0==h{f=1;next} f&&/^## /{exit} f' CHANGELOG.md)
-          if [ -z "$section" ]; then
-            echo "::error::CHANGELOG.md has no section for $VERSION"
-            exit 1
-          fi
           cat > "$RUNNER_TEMP/notes.md" <<NOTES
           ## Install
 
