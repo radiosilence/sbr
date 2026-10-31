@@ -51,16 +51,33 @@ pub struct WireGuard {
 struct Running {
     shared: Arc<Shared>,
     task: JoinHandle<()>,
+    started: std::time::Instant,
     /// Detour receive tasks: they end only when a datagram finds the device
     /// gone, so they are stopped with it.
     readers: Vec<JoinHandle<()>>,
 }
+
+/// A device that stopped this soon after starting is not restarted until
+/// this has passed: on a path that fails at once, every connect would
+/// otherwise start it again.
+const RESTART_AFTER: Duration = Duration::from_secs(5);
 
 impl Drop for Running {
     fn drop(&mut self) {
         self.task.abort();
         for r in &self.readers {
             r.abort();
+        }
+        // Nothing drives this stack any more: fail the connections on it
+        // rather than leave them waiting for a device that is gone.
+        let mut st = self.shared.stack.lock().unwrap_or_else(|e| e.into_inner());
+        for (_, s) in st.sockets.iter_mut() {
+            match s {
+                smoltcp::socket::Socket::Tcp(t) => t.abort(),
+                smoltcp::socket::Socket::Udp(u) => u.close(),
+                #[allow(unreachable_patterns)]
+                _ => {}
+            }
         }
     }
 }
@@ -96,9 +113,15 @@ impl WireGuard {
         if let Some(r) = self.current() {
             return Ok(r.shared.clone());
         }
-        if self.running.lock().unwrap().take().is_some() {
+        let mut slot = self.running.lock().unwrap();
+        if let Some(old) = slot.as_ref() {
+            if old.started.elapsed() < RESTART_AFTER {
+                return Err(io::Error::other("wireguard: device stopped"));
+            }
             warn!(tag = %self.tag, "wireguard: device stopped, restarting");
         }
+        slot.take();
+        drop(slot);
         let r = Arc::new(self.start().await?);
         *self.running.lock().unwrap() = Some(r.clone());
         Ok(r.shared.clone())
@@ -202,7 +225,12 @@ impl WireGuard {
             rebind,
         };
         let task = tokio::spawn(dev.run());
-        Ok(Running { shared, task, readers })
+        Ok(Running {
+            shared,
+            task,
+            started: std::time::Instant::now(),
+            readers,
+        })
     }
 
     /// Resolve with the engine DNS, preferring the families we have

@@ -354,6 +354,19 @@ impl Engine {
                         loop {
                             let (n, from) = match conn.recv_from(&mut buf).await {
                                 Ok(r) => r,
+                                // An ICMP error reported on a connected
+                                // socket: one stray one must not restart the
+                                // flow (a new outbound port breaks ICE).
+                                Err(e)
+                                    if matches!(
+                                        e.kind(),
+                                        io::ErrorKind::ConnectionRefused
+                                            | io::ErrorKind::HostUnreachable
+                                            | io::ErrorKind::NetworkUnreachable
+                                    ) =>
+                                {
+                                    continue;
+                                }
                                 Err(_) => return,
                             };
                             last.store(now_ms(epoch), Ordering::Relaxed);
