@@ -1,0 +1,1 @@
+- **SSH outbound.** sing-box's `ssh` outbound, with pinned host keys and an OpenSSH 9.9 banner and algorithm order. One connection per outbound carries a channel per stream; an idle connection costs no wakeups.

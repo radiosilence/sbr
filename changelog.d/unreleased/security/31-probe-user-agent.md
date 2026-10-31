@@ -1,0 +1,1 @@
+- **urltest probes send no User-Agent.** Behind REALITY, the probe's `sbr/<version>` reached the site the server fronts for.
