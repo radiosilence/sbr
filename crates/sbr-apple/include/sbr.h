@@ -90,8 +90,11 @@ char *sbr_reload(SbrInstance *instance, const char *config_json);
  * the downloaded text and `error` NULL, or `profile` NULL and `error` why.
  * The error never names the URL or any host it led to, so it is safe to show
  * or log. Both are only valid during the call. It may call back into sbr,
- * including sbr_apply_profile on the same instance. A cancellation can arrive
- * after sbr_stop has returned, so `context` must stay valid until the call. */
+ * including sbr_apply_profile on the same instance, except in one case: if
+ * no thread can be started (the process is out of threads or memory) it is
+ * called inline, from inside sbr, where calling into sbr can deadlock. A
+ * cancellation can arrive after sbr_stop has returned, so `context` must
+ * stay valid until the call. */
 typedef void (*SbrFetchCallback)(void *context, const char *profile, const char *error);
 
 /* Download a remote profile from `url` (https only) through the running

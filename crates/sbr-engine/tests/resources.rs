@@ -72,6 +72,11 @@ const BYTES_PER_CONNECTION: usize = 128 * 1024;
 /// Growth that stays (map capacity, timer wheel levels) happens in round
 /// one; a per-connection leak shows again in round two.
 const ROUND_SLACK: usize = 256 * 1024;
+/// Connections that carry a megabyte each before the idle measurement.
+const BULKED: usize = 20;
+/// What a connection that carried bulk traffic may hold beyond an idle one:
+/// buffers that grow to a burst and stay are what this catches.
+const AFTER_BULK: usize = 16 * 1024;
 
 async fn start(json: &str) -> Instance {
     let o = Options::parse(json).unwrap();
@@ -99,12 +104,10 @@ async fn round_trip(mut s: tokio::net::TcpStream) -> tokio::net::TcpStream {
     s
 }
 
-/// Echo `len` bytes through `s` and keep it open.
-async fn bulk(s: &mut tokio::net::TcpStream, len: usize) {
-    let data = vec![0x5au8; len];
+/// Echo `data` through `s` and keep it open.
+async fn bulk(s: &mut tokio::net::TcpStream, data: &[u8], got: &mut [u8]) {
     let (mut r, mut w) = s.split();
-    let mut got = vec![0u8; len];
-    let (a, b) = tokio::join!(w.write_all(&data), r.read_exact(&mut got));
+    let (a, b) = tokio::join!(w.write_all(data), r.read_exact(got));
     a.unwrap();
     b.unwrap();
     assert!(got == data);
@@ -127,32 +130,42 @@ async fn closed_connections_leave_nothing_and_open_ones_stay_small() {
     let proxy = common::port(&client, "in");
     let idle = || client.engine.active_connections() == 0 && server.engine.active_connections() == 0;
 
-    // Open, carry data, idle, close; returns heap per idle connection.
-    let round = || async {
+    // The bulk pattern and its echo, allocated once so they are not counted.
+    let (data, got) = (&vec![0x5au8; 1 << 20], &mut vec![0u8; 1 << 20]);
+    // Open, carry data, idle, close; returns heap per idle connection, per
+    // connection at peak, and held per connection after bulk traffic.
+    let mut round = async || {
         let before = LIVE.load(Ordering::Relaxed);
         PEAK.store(before, Ordering::Relaxed);
         let mut open = Vec::with_capacity(CONNECTIONS);
         for _ in 0..CONNECTIONS {
             open.push(round_trip(common::socks_connect(proxy, echo).await).await);
         }
-        // Buffers grow under bulk traffic and may stay: measure after it.
-        for s in &mut open[..20] {
-            bulk(s, 1 << 20).await;
-        }
         let per = LIVE.load(Ordering::Relaxed).saturating_sub(before) / CONNECTIONS;
         let peak = PEAK.load(Ordering::Relaxed).saturating_sub(before) / CONNECTIONS;
+        // Buffers grow under bulk traffic and may stay: what the connections
+        // that carried a megabyte hold afterwards, beyond the idle ones.
+        let bulk_before = LIVE.load(Ordering::Relaxed);
+        for s in &mut open[..BULKED] {
+            bulk(s, data, got).await;
+        }
+        let after_bulk = LIVE.load(Ordering::Relaxed).saturating_sub(bulk_before) / BULKED;
         drop(open);
         settles("connections", idle).await;
-        (per, peak)
+        (per, peak, after_bulk)
     };
 
-    let (per, peak) = round().await;
-    eprintln!("round 1: {per} heap bytes per idle connection, {peak} at peak");
+    let (per, peak, after_bulk) = round().await;
+    eprintln!("round 1: {per} heap bytes per idle connection, {peak} at peak, {after_bulk} more after bulk");
     assert!(per < BYTES_PER_CONNECTION, "{per} bytes per idle connection");
+    assert!(
+        after_bulk < AFTER_BULK,
+        "{after_bulk} more bytes per connection after bulk traffic"
+    );
     let (tasks0, fds0, bytes0) = (tasks(), open_fds(), LIVE.load(Ordering::Relaxed));
 
-    let (per, peak) = round().await;
-    eprintln!("round 2: {per} heap bytes per idle connection, {peak} at peak");
+    let (per, peak, after_bulk) = round().await;
+    eprintln!("round 2: {per} heap bytes per idle connection, {peak} at peak, {after_bulk} more after bulk");
     settles("tasks, file descriptors and heap", || {
         tasks() <= tasks0 && open_fds() <= fds0 && LIVE.load(Ordering::Relaxed) <= bytes0 + ROUND_SLACK
     })

@@ -67,6 +67,14 @@ mod tests {
     #[test]
     fn threads_get_an_alt_stack() {
         std::thread::spawn(|| {
+            // The test harness has a Rust `main`, so std gave this thread a
+            // stack already; remove it to exercise what a host thread gets.
+            // SAFETY: disabling this thread's alternate stack.
+            unsafe {
+                let mut ss: libc::stack_t = std::mem::zeroed();
+                ss.ss_flags = libc::SS_DISABLE;
+                libc::sigaltstack(&ss, std::ptr::null_mut());
+            }
             super::install();
             // SAFETY: querying this thread's alternate stack.
             let ss = unsafe {
@@ -75,6 +83,7 @@ mod tests {
                 ss
             };
             assert_eq!(ss.ss_flags & libc::SS_DISABLE, 0);
+            assert_eq!(ss.ss_size, super::ALT_STACK);
         })
         .join()
         .unwrap();

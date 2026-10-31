@@ -180,10 +180,10 @@ pub type FetchFn = unsafe extern "C" fn(context: *mut c_void, profile: *const c_
 
 /// Calls the host back exactly once: with the result, or with an error if
 /// the task is dropped first (the engine stopped or reloaded). The call runs
-/// on a thread of its own. A cancellation runs while the runtime is torn
-/// down, inside `sbr_stop` or `sbr_reload` with the instance locked, and a
-/// result runs on the engine's own threads, so a host calling back into sbr
-/// from either would deadlock.
+/// on a thread of its own when one can be started: a cancellation runs
+/// while the runtime is torn down, inside `sbr_stop` or `sbr_reload` with
+/// the instance locked, and a result runs on the engine's own threads, so a
+/// host calling back into sbr from either would deadlock.
 struct Reply {
     callback: FetchFn,
     context: *mut c_void,

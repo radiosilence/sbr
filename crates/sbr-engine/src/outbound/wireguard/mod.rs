@@ -68,16 +68,21 @@ impl Drop for Running {
         for r in &self.readers {
             r.abort();
         }
-        // Nothing drives this stack any more: fail the connections on it
-        // rather than leave them waiting for a device that is gone.
-        let mut st = self.shared.stack.lock().unwrap_or_else(|e| e.into_inner());
-        for (_, s) in st.sockets.iter_mut() {
-            match s {
-                smoltcp::socket::Socket::Tcp(t) => t.abort(),
-                smoltcp::socket::Socket::Udp(u) => u.close(),
-                #[allow(unreachable_patterns)]
-                _ => {}
-            }
+        fail_sockets(&self.shared);
+    }
+}
+
+/// Nothing drives this stack any more: fail the connections on it rather
+/// than leave them waiting for a device that is gone. Aborting and closing
+/// wake their readers and writers.
+fn fail_sockets(shared: &Shared) {
+    let mut st = shared.stack.lock().unwrap_or_else(|e| e.into_inner());
+    for (_, s) in st.sockets.iter_mut() {
+        match s {
+            smoltcp::socket::Socket::Tcp(t) => t.abort(),
+            smoltcp::socket::Socket::Udp(u) => u.close(),
+            #[allow(unreachable_patterns)]
+            _ => {}
         }
     }
 }
@@ -225,7 +230,15 @@ impl WireGuard {
             public,
             rebind,
         };
-        let task = tokio::spawn(dev.run());
+        let task = {
+            // Fails the connections as soon as the device stops, not only
+            // when a later connect replaces it.
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                dev.run().await;
+                fail_sockets(&shared);
+            })
+        };
         Ok(Running {
             shared,
             task,
