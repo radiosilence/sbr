@@ -1,0 +1,1 @@
+- **The direct-detour DNS warning test expects both warnings.** #36 merged before its test change.
