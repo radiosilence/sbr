@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TARGETS=(aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios-macabi)
+TARGETS=(aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios-macabi aarch64-apple-tvos aarch64-apple-tvos-sim)
 ARGS=("$@")
 [ ${#ARGS[@]} -eq 0 ] && ARGS=(-p sbr-apple --all-targets)
 
@@ -44,23 +44,4 @@ for t in "${TARGETS[@]}"; do
   fi
 done
 
-# tvOS is tier 3: no prebuilt std, so it needs nightly + build-std.
-if rustup toolchain list | grep -q nightly; then
-  for t in aarch64-apple-tvos aarch64-apple-tvos-sim; do
-    env_args=()
-    if [ -n "$stub" ]; then
-      u=${t//-/_}
-      env_args=("CC_$u=$stub/cc" "AR_$u=$stub/ar" "SDKROOT=$stub")
-    fi
-    if env "${env_args[@]}" cargo +nightly check --quiet -Zbuild-std=std,panic_unwind --target "$t" "${ARGS[@]}" \
-      2>"${TMPDIR:-/tmp}/sbr-check-$t.log"; then
-      echo "ok    $t (nightly, build-std)"
-    else
-      echo "FAIL  $t (see ${TMPDIR:-/tmp}/sbr-check-$t.log)"
-      status=1
-    fi
-  done
-else
-  echo "skip  tvOS (needs: rustup toolchain install nightly --component rust-src)"
-fi
 exit $status

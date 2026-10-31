@@ -286,18 +286,19 @@ in flight or a back-off on an error path:
 apple/build-xcframework.sh          # on macOS with Xcode
 ```
 
-- iOS (arm64), iOS Simulator (arm64 + x86_64), macOS (arm64 + x86_64),
-  Mac Catalyst (arm64 + x86_64), tvOS (arm64), tvOS Simulator (arm64 + x86_64).
-- tvOS is a Rust tier-3 target with no prebuilt std. The script builds it with
-  `cargo +nightly build -Zbuild-std=std,panic_unwind`, so you need
-  `rustup toolchain install nightly --component rust-src`. `SBR_SKIP_TVOS=1`
-  skips it. `SBR_SKIP_CATALYST=1` skips Catalyst.
+- iOS (arm64), iOS Simulator (arm64), macOS (arm64 + x86_64),
+  Mac Catalyst (arm64 + x86_64), tvOS (arm64), tvOS Simulator (arm64), all on
+  stable Rust. The simulators are arm64 only, since an Intel simulator needs an
+  Intel Mac. `SBR_SKIP_TVOS=1` skips tvOS and `SBR_SKIP_CATALYST=1` skips
+  Catalyst.
+- Every target builds in one cargo invocation, so the single-threaded final
+  LTO passes overlap instead of queueing.
 - Release builds use fat LTO with one codegen unit, and the script prints each
   slice's size. The archives are not run through `strip`: it corrupts aws-lc's
   assembly objects and the app then fails to link. Xcode strips the final binary.
 
 From Linux, `apple/check-apple-targets.sh` runs `cargo check` for all of these
-targets, with nightly build-std for tvOS. aws-lc-sys and blake3 build C code
+targets. aws-lc-sys and blake3 build C code
 that needs an Apple SDK, so on Linux the script swaps in a stand-in compiler
 that emits empty objects. The Rust code is fully type-checked; the C code is
 only compiled by the real macOS build.

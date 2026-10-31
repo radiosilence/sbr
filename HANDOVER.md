@@ -15,7 +15,7 @@ changes.
   (with less CPU per GB). It loses **WireGuard upload** (−15–40%: one device task
   vs wireguard-go's multicore crypto), and wins WireGuard download (+52–72%).
 - **Nothing has ever run on Apple hardware.** Rust compile-checks pass for iOS,
-  iOS sim, macOS, Catalyst and tvOS (nightly `-Zbuild-std`). The Swift code is
+  iOS sim, macOS, Catalyst and tvOS. The Swift code is
   syntax-checked only: no Xcode build, no device run.
 
 ## The user's real setup (read this first)
