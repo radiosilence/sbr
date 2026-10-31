@@ -6,7 +6,8 @@
 # Run on macOS with Xcode and rustup. tvOS targets are Rust tier 3 (no
 # prebuilt std): they build with nightly + -Zbuild-std, so install
 #   rustup toolchain install nightly --component rust-src
-# or skip them with SBR_SKIP_TVOS=1. SBR_SKIP_CATALYST=1 skips Catalyst.
+# or skip them with SBR_SKIP_TVOS=1. SBR_SKIP_CATALYST=1 skips Catalyst, and
+# SBR_SKIP_IOS=1 the iOS device and simulator slices.
 #
 # Release profile: fat LTO, one codegen unit (workspace Cargo.toml), no debug
 # info. The archives are deliberately not run through strip(1): it corrupts
@@ -25,7 +26,8 @@ CATALYST=(aarch64-apple-ios-macabi x86_64-apple-ios-macabi)
 TVOS=(aarch64-apple-tvos)
 TVOS_SIM=(aarch64-apple-tvos-sim x86_64-apple-tvos)
 
-STABLE=("${IOS[@]}" "${IOS_SIM[@]}" "${MACOS[@]}")
+STABLE=("${MACOS[@]}")
+[ "${SBR_SKIP_IOS:-0}" = 1 ] || STABLE+=("${IOS[@]}" "${IOS_SIM[@]}")
 [ "${SBR_SKIP_CATALYST:-0}" = 1 ] || STABLE+=("${CATALYST[@]}")
 
 rustup target add "${STABLE[@]}"
@@ -65,8 +67,10 @@ slice() {
 }
 
 XCF_ARGS=()
-slice ios "${IOS[@]}"
-slice ios-simulator "${IOS_SIM[@]}"
+if [ "${SBR_SKIP_IOS:-0}" != 1 ]; then
+  slice ios "${IOS[@]}"
+  slice ios-simulator "${IOS_SIM[@]}"
+fi
 slice macos "${MACOS[@]}"
 [ "${SBR_SKIP_CATALYST:-0}" = 1 ] || slice maccatalyst "${CATALYST[@]}"
 if [ "${SBR_SKIP_TVOS:-0}" != 1 ]; then
