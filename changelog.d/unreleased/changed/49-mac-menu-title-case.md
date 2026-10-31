@@ -1,0 +1,1 @@
+- **Mac menu bar in title case.** The menu bar menu uses macOS capitalisation ("Open sbr", "Launch at Login") instead of the app's lowercase style, which stays for the window.
