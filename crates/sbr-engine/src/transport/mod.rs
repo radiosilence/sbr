@@ -18,6 +18,11 @@ use crate::tls::{EchRetry, Retry, TlsClient, TlsConn};
 
 pub use prefixed::Prefixed;
 
+/// Largest response header block an HTTP/2 or HTTP/3 client accepts. The
+/// libraries' defaults (16 MiB for h2, unbounded for h3) let one hostile
+/// server's headers exhaust the iOS extension's memory.
+pub(crate) const MAX_RESPONSE_HEADERS: u32 = 64 * 1024;
+
 /// TCP to the proxy server, then TLS when configured.
 #[derive(Clone)]
 pub struct ServerDialer {

@@ -148,6 +148,7 @@ impl Hysteria2 {
     ) -> io::Result<Arc<Session>> {
         let fail = |e: &dyn std::fmt::Display| io::Error::other(format!("hysteria2 auth: {e}"));
         let (mut driver, mut send) = h3::client::builder()
+            .max_field_section_size(crate::transport::MAX_RESPONSE_HEADERS.into())
             .build::<_, _, Bytes>(h3_quinn::Connection::new(conn.clone()))
             .await
             .map_err(|e| fail(&e))?;

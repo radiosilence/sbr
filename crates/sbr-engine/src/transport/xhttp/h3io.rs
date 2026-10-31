@@ -68,6 +68,7 @@ impl H3Conn {
                 .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "xhttp: QUIC handshake timed out"))?
                 .map_err(io_err)?;
             let (mut driver, send) = h3::client::builder()
+                .max_field_section_size(crate::transport::MAX_RESPONSE_HEADERS.into())
                 .build::<_, _, Bytes>(h3_quinn::Connection::new(conn.clone()))
                 .await
                 .map_err(io_err)?;
