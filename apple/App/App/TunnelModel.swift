@@ -173,7 +173,7 @@ final class TunnelModel: ObservableObject {
 
     func setOn(_ on: Bool) async {
         do {
-            if manager == nil || installFailed { try await install() }
+            if manager == nil || (on && installFailed) { try await install() }
             guard let manager else { return }
             try await TunnelControl.setOn(on, manager)
         } catch {
@@ -422,6 +422,7 @@ final class TunnelModel: ObservableObject {
         if let statusObserver { NotificationCenter.default.removeObserver(statusObserver) }
         statusObserver = nil
         manager = nil
+        installFailed = false
         status = .invalid
         groups = []
         stats = nil
