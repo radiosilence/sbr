@@ -4,7 +4,7 @@
 //! uses, requests or seconds, and are dropped once nothing runs on them.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use sbr_config::{Range, Xmux};
@@ -20,8 +20,12 @@ pub fn rand_between(r: Range) -> i32 {
 }
 
 /// Go's `http.Transport.IdleConnTimeout` for XHTTP (`net.ConnIdleTimeout`).
-/// Checked when a slot is picked rather than with a timer.
+/// Checked when a slot is picked, and by one timer per idle slot, which
+/// drops it from the pool so its connection (and any keep-alive pings)
+/// ends even if nothing connects through the outbound again.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+type Slots<C> = Mutex<Vec<Arc<Slot<C>>>>;
 
 /// A slot's connection handle, which may die on its own.
 pub trait PoolConn {
@@ -37,6 +41,9 @@ pub struct Slot<C> {
     unreusable_at: Option<Instant>,
     closed: AtomicBool,
     idle_since: Mutex<Option<Instant>>,
+    pool: Weak<Slots<C>>,
+    /// A task is waiting to retire this slot once it has idled long enough.
+    reaping: AtomicBool,
 }
 
 impl<C: PoolConn> Slot<C> {
@@ -62,9 +69,9 @@ impl<C: PoolConn> Slot<C> {
 }
 
 /// A connection that counts towards `maxConcurrency` while it lives.
-pub struct Running<C>(pub Arc<Slot<C>>);
+pub struct Running<C: PoolConn + Send + Sync + 'static>(pub Arc<Slot<C>>);
 
-impl<C> Running<C> {
+impl<C: PoolConn + Send + Sync + 'static> Running<C> {
     pub fn new(slot: Arc<Slot<C>>) -> Self {
         slot.running.fetch_add(1, Ordering::Relaxed);
         *slot.idle_since.lock().unwrap() = None;
@@ -72,19 +79,60 @@ impl<C> Running<C> {
     }
 }
 
-impl<C> Drop for Running<C> {
+impl<C: PoolConn + Send + Sync + 'static> Drop for Running<C> {
     fn drop(&mut self) {
         if self.0.running.fetch_sub(1, Ordering::Relaxed) == 1 {
             *self.0.idle_since.lock().unwrap() = Some(Instant::now());
+            reap_when_idle(&self.0);
         }
     }
+}
+
+/// Retire `slot` once it has been idle for [`IDLE_TIMEOUT`]: one task per
+/// idle slot, which ends as soon as the slot is used again.
+fn reap_when_idle<C: PoolConn + Send + Sync + 'static>(slot: &Arc<Slot<C>>) {
+    let Ok(rt) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    if slot.reaping.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let weak = Arc::downgrade(slot);
+    rt.spawn(async move {
+        loop {
+            let Some(since) = weak.upgrade().and_then(|s| *s.idle_since.lock().unwrap()) else {
+                // Gone, or in use again: a later idle spell arms a new timer.
+                if let Some(s) = weak.upgrade() {
+                    s.reaping.store(false, Ordering::Release);
+                    // Went idle again between the check and the reset.
+                    if s.idle_since.lock().unwrap().is_some() && !s.reaping.swap(true, Ordering::AcqRel) {
+                        continue;
+                    }
+                }
+                return;
+            };
+            tokio::time::sleep_until((since + IDLE_TIMEOUT).into()).await;
+            let Some(s) = weak.upgrade() else { return };
+            if s.idle_since
+                .lock()
+                .unwrap()
+                .is_some_and(|t| t.elapsed() >= IDLE_TIMEOUT)
+            {
+                s.mark_closed();
+                if let Some(slots) = s.pool.upgrade() {
+                    slots.lock().unwrap().retain(|x| !Arc::ptr_eq(x, &s));
+                }
+                return;
+            }
+        }
+    });
 }
 
 pub struct Pool<C> {
     cfg: Xmux,
     concurrency: i32,
     connections: i32,
-    slots: Mutex<Vec<Arc<Slot<C>>>>,
+    slots: Arc<Slots<C>>,
 }
 
 impl<C: PoolConn> Pool<C> {
@@ -93,7 +141,7 @@ impl<C: PoolConn> Pool<C> {
             concurrency: rand_between(cfg.max_concurrency),
             connections: rand_between(cfg.max_connections),
             cfg: cfg.clone(),
-            slots: Mutex::new(Vec::new()),
+            slots: Arc::default(),
         }
     }
 
@@ -109,6 +157,8 @@ impl<C: PoolConn> Pool<C> {
             unreusable_at: (secs > 0).then(|| Instant::now() + Duration::from_secs(secs as u64)),
             closed: AtomicBool::new(false),
             idle_since: Mutex::new(Some(Instant::now())),
+            pool: Arc::downgrade(&self.slots),
+            reaping: AtomicBool::new(false),
         })
     }
 

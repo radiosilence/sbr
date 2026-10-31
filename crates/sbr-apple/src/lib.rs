@@ -179,7 +179,11 @@ impl Inner {
 pub type FetchFn = unsafe extern "C" fn(context: *mut c_void, profile: *const c_char, error: *const c_char);
 
 /// Calls the host back exactly once: with the result, or with an error if
-/// the task is dropped first (the engine stopped or reloaded).
+/// the task is dropped first (the engine stopped or reloaded). The call runs
+/// on a thread of its own when one can be started: a cancellation runs
+/// while the runtime is torn down, inside `sbr_stop` or `sbr_reload` with
+/// the instance locked, and a result runs on the engine's own threads, so a
+/// host calling back into sbr from either would deadlock.
 struct Reply {
     callback: FetchFn,
     context: *mut c_void,
@@ -197,9 +201,57 @@ impl Reply {
             Ok(p) => (Some(p), None),
             Err(e) => (None, CString::new(e.replace('\0', " ")).ok()),
         };
+        let call = Call {
+            callback: self.callback,
+            context: self.context,
+            profile,
+            error,
+        };
+        deliver(call, |f| {
+            std::thread::Builder::new()
+                .name("sbr-reply".into())
+                .spawn(move || {
+                    sbr_engine::signal_stack::install();
+                    f()
+                })
+                .map(drop)
+        });
+    }
+}
+
+/// Run `call` on a thread from `spawn`, or inline if none can be started:
+/// the host is owed exactly one call.
+fn deliver(call: Call, spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>) {
+    let slot = Arc::new(Mutex::new(Some(call)));
+    let take = |s: &Mutex<Option<Call>>| s.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let theirs = slot.clone();
+    if let Err(e) = spawn(Box::new(move || {
+        if let Some(c) = take(&theirs) {
+            c.run();
+        }
+    })) {
+        tracing::warn!(error = %e, "profile callback thread");
+        if let Some(c) = take(&slot) {
+            c.run();
+        }
+    }
+}
+
+struct Call {
+    callback: FetchFn,
+    context: *mut c_void,
+    profile: Option<CString>,
+    error: Option<CString>,
+}
+
+// SAFETY: as for `Reply`.
+unsafe impl Send for Call {}
+
+impl Call {
+    fn run(self) {
         let p = |s: &Option<CString>| s.as_ref().map_or(ptr::null(), |s| s.as_ptr());
         // SAFETY: the host passed a valid callback; the strings outlive the call.
-        unsafe { (self.callback)(self.context, p(&profile), p(&error)) };
+        unsafe { (self.callback)(self.context, p(&self.profile), p(&self.error)) };
     }
 }
 
@@ -207,6 +259,22 @@ impl Drop for Reply {
     fn drop(&mut self) {
         if !self.sent {
             self.send(Err("cancelled: sbr stopped".to_owned()));
+        }
+    }
+}
+
+/// What a Rust `main` does at startup and a library linked into the host
+/// never gets: without it, a write to a socket the peer has reset kills the
+/// process unless that socket has `SO_NOSIGPIPE`. A handler the host
+/// installed is left alone.
+fn ignore_sigpipe() {
+    #[cfg(unix)]
+    // SAFETY: sigaction with a zeroed out-parameter, then with a plain
+    // ignore disposition.
+    unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(libc::SIGPIPE, ptr::null(), &mut old) == 0 && old.sa_sigaction == libc::SIG_DFL {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         }
     }
 }
@@ -310,6 +378,7 @@ pub unsafe extern "C" fn sbr_start_ex(
 ) -> *mut SbrInstance {
     let r = guard(Err("internal error (panic)".to_owned()), || {
         log::install();
+        ignore_sigpipe();
         // SAFETY: NULL or valid per the contract.
         let o = unsafe { options.as_ref() }
             .copied()

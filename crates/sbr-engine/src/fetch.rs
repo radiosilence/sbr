@@ -556,7 +556,15 @@ where
     let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io))
         .await
         .map_err(io::Error::other)?;
-    let driver = tokio::spawn(conn);
+    // Stopped on every way out, including errors and the caller's timeout,
+    // not only once the body is read.
+    struct Abort<T>(tokio::task::JoinHandle<T>);
+    impl<T> Drop for Abort<T> {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _driver = Abort(tokio::spawn(conn));
     let mut req = Request::builder()
         .method(method)
         .uri(&url.path)
@@ -582,7 +590,6 @@ where
             .map_err(|e| io::Error::other(format!("read body: {e}")))?
             .to_bytes()
     };
-    driver.abort();
     Ok(Response {
         status: parts.status,
         headers: parts.headers,

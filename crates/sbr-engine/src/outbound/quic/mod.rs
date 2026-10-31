@@ -8,6 +8,7 @@
 //! reconnect RTT on a phone.
 
 pub(crate) mod brutal;
+pub(crate) mod h3guard;
 mod initial;
 pub(crate) mod socket;
 mod tls;
@@ -282,12 +283,32 @@ impl Drop for UseGuard {
     }
 }
 
+/// A connection's endpoint, released by [`watch`] once the connection
+/// closes. A pooled session outlives its connection until the next dial, and
+/// a held endpoint keeps quinn's driver, the UDP socket and any port hopper
+/// running.
+pub(crate) type EndpointSlot = Arc<Mutex<Option<Endpoint>>>;
+
 /// Closes `conn` after `idle` without users and, while it has users, calls
 /// `heartbeat` every period. Every wait is a deadline or an event: an idle
-/// connection is closed once, an active one wakes only for heartbeats.
+/// connection is closed once, an active one wakes only for heartbeats. Once
+/// the connection is closed, either way, `endpoint` is emptied.
 pub(crate) async fn watch(
     conn: quinn::Connection,
     usage: Arc<Usage>,
+    endpoint: EndpointSlot,
+    idle: Duration,
+    heartbeat: Option<(Duration, Box<dyn Fn() + Send + Sync>)>,
+) {
+    watch_conn(&conn, &usage, idle, heartbeat).await;
+    // quinn keeps driving a closing connection until it has drained, without
+    // the handle.
+    endpoint.lock().unwrap().take();
+}
+
+async fn watch_conn(
+    conn: &quinn::Connection,
+    usage: &Usage,
     idle: Duration,
     heartbeat: Option<(Duration, Box<dyn Fn() + Send + Sync>)>,
 ) {
@@ -356,12 +377,9 @@ impl<S: Pooled> Pool<S> {
 
     /// The live connections.
     pub(crate) fn live(&self) -> Vec<Arc<S>> {
-        let slots = self.slots.lock().unwrap();
-        slots
-            .iter()
-            .filter(|s| s.conn().close_reason().is_none())
-            .cloned()
-            .collect()
+        let mut slots = self.slots.lock().unwrap();
+        slots.retain(|s| s.conn().close_reason().is_none());
+        slots.clone()
     }
 
     pub(crate) async fn get<F, Fut>(&self, dial: F) -> io::Result<(Arc<S>, UseGuard)>
@@ -645,6 +663,47 @@ mod tests {
         let mut b = Vec::new();
         put_varint(&mut b, 0x401);
         assert_eq!(b, [0x44, 0x01]);
+    }
+
+    /// The pool keeps a closed session until its next dial; the endpoint
+    /// (socket, driver, port hopper) must not live that long.
+    #[tokio::test]
+    async fn watch_releases_the_endpoint_once_idle_closed() {
+        let key = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let der = key.cert.der().clone();
+        let pkcs8 = rustls_pki_types::PrivateKeyDer::Pkcs8(key.signing_key.serialize_der().into());
+        let server_config = quinn::ServerConfig::with_single_cert(vec![der.clone()], pkcs8).unwrap();
+        let server = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Some(incoming) = server.accept().await {
+                held.extend(incoming.await);
+            }
+        });
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(der).unwrap();
+        let crypto =
+            rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+        let mut client = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        client.set_default_client_config(ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(crypto).unwrap(),
+        )));
+        let conn = client.connect(addr, "localhost").unwrap().await.unwrap();
+        let slot: EndpointSlot = Arc::new(Mutex::new(Some(client)));
+        let idle = Duration::from_millis(50);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            watch(conn.clone(), Arc::default(), slot.clone(), idle, None),
+        )
+        .await
+        .expect("idle connection closed");
+        assert!(conn.close_reason().is_some());
+        assert!(slot.lock().unwrap().is_none(), "endpoint released");
     }
 
     #[test]

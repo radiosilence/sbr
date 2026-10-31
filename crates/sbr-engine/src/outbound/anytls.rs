@@ -25,7 +25,7 @@ use md5::Digest as _;
 use sbr_config::AnyTlsOutbound;
 use sbr_core::{BoxFuture, BoxPacketConn, Destination, Outbound, Stream};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_rustls::TlsConnector;
 use tracing::debug;
 
@@ -58,6 +58,16 @@ const MIN_IDLE_INTERVAL: Duration = Duration::from_secs(5);
 const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(3);
 /// Frames buffered per stream before the session reader waits (backpressure).
 const STREAM_QUEUE: usize = 32;
+/// Bytes buffered per stream before the session reader waits. Frames are up
+/// to 64 KiB, so the frame count alone would let one slow reader hold 2 MiB.
+const STREAM_BUFFER: u32 = 256 * 1024;
+/// A session write (at most one frame, with its padding) that has not
+/// finished in this long closes the session. Frames are as large as the
+/// relay's writes, 16 KiB on iOS, so only a link below about 600 B/s hits it
+/// without the server having stopped reading.
+/// The writer is shared, so a server that stops reading would otherwise hold
+/// every stream's writes, and the tasks that finish dropped streams, forever.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub const DEFAULT_PADDING_SCHEME: &str = "stop=8
 0=30-30
@@ -220,6 +230,8 @@ impl Writer {
         self.packet_count += 1;
         if self.packet_count >= padding.stop {
             self.send_padding = false;
+            // Up to a frame long; nothing pads again for this session.
+            self.record = Vec::new();
             return self.w.write_all(data).await;
         }
         for size in padding.sizes(self.packet_count) {
@@ -268,14 +280,21 @@ impl Writer {
 }
 
 enum Event {
-    Data(Bytes),
+    /// The permit holds the bytes against the stream's [`STREAM_BUFFER`]
+    /// until they are read.
+    Data(Bytes, OwnedSemaphorePermit),
     Error(String),
+}
+
+struct StreamTx {
+    tx: mpsc::Sender<Event>,
+    budget: Arc<Semaphore>,
 }
 
 struct Session {
     pool: Weak<Pool>,
     writer: tokio::sync::Mutex<Writer>,
-    streams: Mutex<HashMap<u32, mpsc::Sender<Event>>>,
+    streams: Mutex<HashMap<u32, StreamTx>>,
     next_id: AtomicU32,
     peer_version: AtomicU32,
     /// Frames received so far: the stream-open watchdog compares it.
@@ -298,8 +317,8 @@ impl Session {
         if let Some(t) = self.reader.lock().unwrap().take() {
             t.abort();
         }
-        for (_, tx) in self.streams.lock().unwrap().drain() {
-            let _ = tx.try_send(Event::Error("anytls: session closed".into()));
+        for (_, s) in self.streams.lock().unwrap().drain() {
+            let _ = s.tx.try_send(Event::Error("anytls: session closed".into()));
         }
     }
 
@@ -315,7 +334,24 @@ impl Session {
         frame_header(&mut f, cmd, stream, data.len());
         f.extend_from_slice(data);
         let padding = self.padding();
-        let r = self.writer.lock().await.write(&f, &padding).await;
+        let mut w = self.writer.lock().await;
+        self.bounded(w.write(&f, &padding)).await
+    }
+
+    /// Run a write with the writer locked. A failed or timed-out write may
+    /// have left part of a frame in the stream, so it closes the session
+    /// before the lock is released, and no later holder writes after it:
+    /// the server would read the next frame from inside the last one.
+    async fn bounded(&self, f: impl Future<Output = io::Result<()>>) -> io::Result<()> {
+        if self.is_closed() {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "anytls: session closed"));
+        }
+        let r = tokio::time::timeout(WRITE_TIMEOUT, f).await.unwrap_or_else(|_| {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "anytls: session write timed out",
+            ))
+        });
         if r.is_err() {
             self.close();
         }
@@ -340,15 +376,22 @@ impl Session {
                         if len == 0 {
                             continue;
                         }
-                        let tx = self.streams.lock().unwrap().get(&id).cloned();
-                        if let Some(tx) = tx {
-                            // Waiting here is the backpressure, as in sing-anytls.
-                            let _ = tx.send(Event::Data(data)).await;
+                        let s = self
+                            .streams
+                            .lock()
+                            .unwrap()
+                            .get(&id)
+                            .map(|s| (s.tx.clone(), s.budget.clone()));
+                        // Waiting here is the backpressure, as in sing-anytls.
+                        if let Some((tx, budget)) = s
+                            && let Ok(permit) = budget.acquire_many_owned(len as u32).await
+                        {
+                            let _ = tx.send(Event::Data(data, permit)).await;
                         }
                     }
                     CMD_SYNACK => {
                         if len > 0
-                            && let Some(tx) = self.streams.lock().unwrap().get(&id).cloned()
+                            && let Some(tx) = self.streams.lock().unwrap().get(&id).map(|s| s.tx.clone())
                         {
                             let msg = String::from_utf8_lossy(&data).into_owned();
                             let _ = tx.try_send(Event::Error(format!("anytls: remote: {msg}")));
@@ -407,8 +450,8 @@ impl Session {
         }
         // Not via close(): our own JoinHandle must not abort us mid-cleanup.
         self.closed.store(true, Ordering::Release);
-        for (_, tx) in self.streams.lock().unwrap().drain() {
-            let _ = tx.try_send(Event::Error("anytls: session closed".into()));
+        for (_, s) in self.streams.lock().unwrap().drain() {
+            let _ = s.tx.try_send(Event::Error("anytls: session closed".into()));
         }
         if let Some(pool) = self.pool.upgrade() {
             pool.forget(&self);
@@ -620,7 +663,13 @@ impl AnyTls {
                     "anytls: session closed",
                 ));
             }
-            streams.insert(id, tx);
+            streams.insert(
+                id,
+                StreamTx {
+                    tx,
+                    budget: Arc::new(Semaphore::new(STREAM_BUFFER as usize)),
+                },
+            );
         }
         let mut addr = Vec::with_capacity(32);
         socks5::write_addr(&mut addr, dest)?;
@@ -629,10 +678,10 @@ impl AnyTls {
             pool: self.pool.clone(),
             id,
             rx,
-            chunk: Bytes::new(),
+            chunk: (Bytes::new(), None),
             request: Some(addr),
             write: None,
-            wbuf: Some(Vec::with_capacity(MAX_FRAME + FRAME_OVERHEAD)),
+            wbuf: None,
             fin_sent: false,
         })
     }
@@ -677,7 +726,8 @@ struct AnyStream {
     pool: Arc<Pool>,
     id: u32,
     rx: mpsc::Receiver<Event>,
-    chunk: Bytes,
+    /// Data being read, and its hold on the stream's buffer budget.
+    chunk: (Bytes, Option<OwnedSemaphorePermit>),
     /// Encoded destination, until the request is sent.
     request: Option<Vec<u8>>,
     /// In-flight write and the byte count it reports when done.
@@ -702,30 +752,32 @@ impl AnyStream {
         let fut = async move {
             let padding = session.padding();
             let mut w = session.writer.lock().await;
-            let mut r = Ok(());
-            if let Some(addr) = request {
-                let mut req = Vec::with_capacity(2 * FRAME_OVERHEAD + addr.len());
-                frame_header(&mut req, CMD_SYN, id, 0);
-                frame_header(&mut req, CMD_PSH, id, addr.len());
-                req.extend_from_slice(&addr);
-                session.arm_open_timeout(id);
-                r = if w.pending.is_some() {
-                    // New session: settings + SYN + destination as one record.
-                    w.write(&req, &padding).await
-                } else {
-                    match w.write_packet(&req[..FRAME_OVERHEAD], &padding).await {
-                        Ok(()) => w.write_packet(&req[FRAME_OVERHEAD..], &padding).await,
-                        e => e,
+            let r = session
+                .bounded(async {
+                    let mut r = Ok(());
+                    if let Some(addr) = request {
+                        let mut req = Vec::with_capacity(2 * FRAME_OVERHEAD + addr.len());
+                        frame_header(&mut req, CMD_SYN, id, 0);
+                        frame_header(&mut req, CMD_PSH, id, addr.len());
+                        req.extend_from_slice(&addr);
+                        session.arm_open_timeout(id);
+                        r = if w.pending.is_some() {
+                            // New session: settings + SYN + destination as one record.
+                            w.write(&req, &padding).await
+                        } else {
+                            match w.write_packet(&req[..FRAME_OVERHEAD], &padding).await {
+                                Ok(()) => w.write_packet(&req[FRAME_OVERHEAD..], &padding).await,
+                                e => e,
+                            }
+                        };
                     }
-                };
-            }
-            if r.is_ok() && !buf.is_empty() {
-                r = w.write(&buf, &padding).await;
-            }
+                    if r.is_ok() && !buf.is_empty() {
+                        r = w.write(&buf, &padding).await;
+                    }
+                    r
+                })
+                .await;
             drop(w);
-            if r.is_err() {
-                session.close();
-            }
             (r, buf)
         };
         self.write = Some((Box::pin(fut), n));
@@ -755,13 +807,16 @@ impl AsyncRead for AnyStream {
             ready!(this.poll_write_done(cx))?;
         }
         loop {
-            if !this.chunk.is_empty() {
-                let n = this.chunk.len().min(buf.remaining());
-                buf.put_slice(&this.chunk.split_to(n));
+            if !this.chunk.0.is_empty() {
+                let n = this.chunk.0.len().min(buf.remaining());
+                buf.put_slice(&this.chunk.0.split_to(n));
+                if this.chunk.0.is_empty() {
+                    this.chunk.1 = None;
+                }
                 return Poll::Ready(Ok(()));
             }
             match ready!(this.rx.poll_recv(cx)) {
-                Some(Event::Data(b)) => this.chunk = b,
+                Some(Event::Data(b, permit)) => this.chunk = (b, Some(permit)),
                 Some(Event::Error(e)) => {
                     return Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, e)));
                 }
@@ -911,6 +966,45 @@ mod tests {
             .unwrap();
         assert!(got == data);
         drop(writer);
+    }
+
+    /// A server that stops reading: the first write times out and closes the
+    /// session, and writers queued behind it fail at once rather than each
+    /// waiting out its own deadline on the same socket, or writing after a
+    /// partial frame.
+    #[tokio::test(start_paused = true)]
+    async fn wedged_session_writes_time_out_once() {
+        let (c, _server) = tokio::io::duplex(64);
+        let (_r, w) = tokio::io::split(Box::new(c) as Tls);
+        let session = Arc::new(Session {
+            pool: Weak::new(),
+            writer: tokio::sync::Mutex::new(Writer {
+                w,
+                pending: None,
+                send_padding: false,
+                packet_count: 0,
+                record: Vec::new(),
+            }),
+            streams: Mutex::default(),
+            next_id: AtomicU32::new(1),
+            peer_version: AtomicU32::new(0),
+            frames: AtomicU64::new(0),
+            heart_pending: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            reader: Mutex::new(None),
+        });
+        let start = tokio::time::Instant::now();
+        let writes: Vec<_> = (0..3)
+            .map(|i| {
+                let s = session.clone();
+                tokio::spawn(async move { s.write_control(CMD_PSH, i, &[0u8; 1024]).await })
+            })
+            .collect();
+        for w in writes {
+            assert!(w.await.unwrap().is_err());
+        }
+        assert!(session.is_closed());
+        assert!(start.elapsed() < WRITE_TIMEOUT * 2, "{:?}", start.elapsed());
     }
 
     #[test]

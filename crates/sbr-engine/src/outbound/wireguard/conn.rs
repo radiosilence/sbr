@@ -149,6 +149,10 @@ impl WgUdp {
         poll_fn(|cx| {
             let mut st = self.shared.stack.lock().unwrap();
             let s = st.sockets.get_mut::<udp::Socket>(self.handle);
+            if !s.is_open() {
+                // Closed with the device it belonged to.
+                return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+            }
             match s.send_slice(payload, (IpAddress::from(to.ip()), to.port())) {
                 Ok(()) => {
                     drop(st);
@@ -169,6 +173,9 @@ impl WgUdp {
         poll_fn(|cx| {
             let mut st = self.shared.stack.lock().unwrap();
             let s = st.sockets.get_mut::<udp::Socket>(self.handle);
+            if !s.is_open() {
+                return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+            }
             match s.recv_slice(buf) {
                 Ok((n, meta)) => {
                     let ip: IpAddr = meta.endpoint.addr.into();

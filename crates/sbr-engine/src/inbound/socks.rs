@@ -2,6 +2,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context as TaskContext, Poll};
 
 use bytes::Bytes;
@@ -143,7 +144,11 @@ async fn udp_associate(ctx: &Context, mut ctrl: TcpStream, client: SocketAddr) -
     write_addr(&mut rep, &Destination::from(bound))?;
     ctrl.write_all(&rep).await?;
 
-    let back: Arc<dyn UdpWriteBack> = Arc::new(SocksUdpBack { sock: sock.clone() });
+    let socks_back = Arc::new(SocksUdpBack {
+        sock: sock.clone(),
+        closed: AtomicBool::new(false),
+    });
+    let back: Arc<dyn UdpWriteBack> = socks_back.clone();
     let relay = async {
         let mut buf = vec![0u8; 65535];
         loop {
@@ -176,18 +181,28 @@ async fn udp_associate(ctx: &Context, mut ctrl: TcpStream, client: SocketAddr) -
         io::Result::Ok(())
     };
     let mut sink = [0u8; 64];
-    tokio::select! {
+    let r = tokio::select! {
         r = relay => r,
         _ = async { while matches!(ctrl.read(&mut sink).await, Ok(n) if n > 0) {} } => Ok(()),
-    }
+    };
+    // The NAT sessions hold the socket through `back`: refusing their
+    // replies ends them, and closes the socket, now rather than after their
+    // idle timeout.
+    socks_back.closed.store(true, Ordering::Relaxed);
+    r
 }
 
 struct SocksUdpBack {
     sock: Arc<UdpSocket>,
+    /// The association has ended.
+    closed: AtomicBool,
 }
 
 impl UdpWriteBack for SocksUdpBack {
     fn write_back(&self, payload: &[u8], from: &Destination, to: SocketAddr) -> io::Result<()> {
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
         let mut out = Vec::with_capacity(payload.len() + 22);
         out.extend_from_slice(&[0, 0, 0]);
         write_addr(&mut out, from)?;

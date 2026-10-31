@@ -113,11 +113,51 @@ pub async fn start(
         {
             warn!("download external ui error: {e}");
         }
-        if let Err(e) = axum::serve(listener, app).await {
-            warn!("external controller serve error: {e}");
-        }
+        serve_api(listener, app).await;
     });
     Ok(Some((local, serve)))
+}
+
+/// Connections the controller serves at once; a dashboard keeps a few
+/// WebSockets and some requests open. Past it new ones are closed at once.
+const MAX_API_CONNECTIONS: usize = 32;
+/// How long a connection may take to send its request headers, counted
+/// from when hyper starts waiting for them, so it also closes a kept-alive
+/// connection left idle.
+const API_HEADER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `axum::serve` with a connection cap and a header deadline: it sets no
+/// timer, so hyper's header timeout never runs, and it accepts without
+/// limit, so any local app or LAN peer could hold the extension's file
+/// descriptors with idle connections.
+async fn serve_api(listener: tokio::net::TcpListener, app: Router) {
+    let limit = Arc::new(tokio::sync::Semaphore::new(MAX_API_CONNECTIONS));
+    loop {
+        let tcp = match listener.accept().await {
+            Ok((tcp, _)) => tcp,
+            Err(e) => {
+                // Out of descriptors, say: back off rather than spin.
+                warn!("external controller accept error: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        let Ok(permit) = limit.clone().try_acquire_owned() else {
+            continue;
+        };
+        let service = hyper_util::service::TowerToHyperService::new(app.clone());
+        tokio::spawn(async move {
+            let _permit = permit;
+            let conn = hyper::server::conn::http1::Builder::new()
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(API_HEADER_TIMEOUT)
+                .serve_connection(hyper_util::rt::TokioIo::new(tcp), service)
+                .with_upgrades();
+            if let Err(e) = conn.await {
+                tracing::debug!("external controller connection: {e}");
+            }
+        });
+    }
 }
 
 pub fn router(api: Api) -> Router {

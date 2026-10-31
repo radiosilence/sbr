@@ -341,7 +341,12 @@ impl Engine {
                         from
                     }
                 };
-                let reader = {
+                // Ends when the outbound's packet connection fails, and the
+                // session with it: the client keeps sending on the same flow,
+                // so a session left in place would swallow its packets until
+                // it fell silent, rather than the next packet opening a new
+                // connection.
+                let mut reader = {
                     let (conn, back, last) = (conn.clone(), back.clone(), last.clone());
                     let tracked = reg.conn.clone();
                     tokio::spawn(async move {
@@ -349,6 +354,19 @@ impl Engine {
                         loop {
                             let (n, from) = match conn.recv_from(&mut buf).await {
                                 Ok(r) => r,
+                                // An ICMP error reported on a connected
+                                // socket: one stray one must not restart the
+                                // flow (a new outbound port breaks ICE).
+                                Err(e)
+                                    if matches!(
+                                        e.kind(),
+                                        io::ErrorKind::ConnectionRefused
+                                            | io::ErrorKind::HostUnreachable
+                                            | io::ErrorKind::NetworkUnreachable
+                                    ) =>
+                                {
+                                    continue;
+                                }
                                 Err(_) => return,
                             };
                             last.store(now_ms(epoch), Ordering::Relaxed);
@@ -392,12 +410,22 @@ impl Engine {
                         reg.conn.add_up(payload.len());
                         if let Err(e) = conn.send_to(&payload, &target).await {
                             debug!(dest = %target, error = %e, "udp send failed");
+                            if matches!(
+                                e.kind(),
+                                io::ErrorKind::BrokenPipe
+                                    | io::ErrorKind::NotConnected
+                                    | io::ErrorKind::ConnectionAborted
+                                    | io::ErrorKind::ConnectionReset
+                            ) {
+                                break Ok(());
+                            }
                         }
                     }
                 };
                 let result = tokio::select! {
                     biased;
                     r = forward => r,
+                    _ = &mut reader => Ok(()),
                     _ = cancelled.wait() => Ok(()),
                 };
                 reader.abort();

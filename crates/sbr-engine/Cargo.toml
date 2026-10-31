@@ -44,7 +44,7 @@ serde_json.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
 hyper = { version = "1", features = ["client", "server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 http-body-util = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
 redb = "4"

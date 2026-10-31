@@ -23,8 +23,9 @@ use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address
 use tokio::sync::{Notify, watch};
 
 /// TCP receive buffer (the window we advertise). Allocated zeroed, so the OS
-/// commits pages only as the ring is actually used; idle or small flows stay
-/// cheap even on iOS.
+/// commits pages only as the ring is used. A flow that moves more than the
+/// ring's size cycles through all of it, and the pages then stay committed
+/// until the socket closes, so a long-lived connection costs the full ring.
 #[cfg(any(target_os = "ios", target_os = "tvos", target_os = "watchos"))]
 pub const TCP_RX_BUFFER: usize = 256 * 1024;
 #[cfg(not(any(target_os = "ios", target_os = "tvos", target_os = "watchos")))]

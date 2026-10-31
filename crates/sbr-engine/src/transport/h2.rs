@@ -46,6 +46,7 @@ impl H2Pool {
             .initial_window_size(STREAM_WINDOW)
             .initial_connection_window_size(CONN_WINDOW)
             .max_frame_size(64 * 1024)
+            .max_header_list_size(crate::transport::MAX_RESPONSE_HEADERS)
             .enable_push(false)
             .handshake::<_, Bytes>(s)
             .await
