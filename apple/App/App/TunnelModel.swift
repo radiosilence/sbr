@@ -398,7 +398,10 @@ final class TunnelModel: ObservableObject {
         // (memory, crash) instead of leaving traffic outside it.
         let rules = autoConnect ? OnDemand.rules(trusted: trustedNetworks) : strict ? OnDemand.rules(trusted: []) : nil
         m.onDemandRules = rules
-        m.isOnDemandEnabled = rules != nil && (onDemand ?? (manager == nil || m.isOnDemandEnabled || isOn))
+        // A first install arms auto-connect, which the user asked for; strict
+        // alone only arms on demand once the tunnel is on.
+        let armed = m.isOnDemandEnabled || isOn || (autoConnect && manager == nil)
+        m.isOnDemandEnabled = rules != nil && (onDemand ?? armed)
         try await m.saveToPreferences()
         // A freshly saved manager must be reloaded before it can start.
         try await m.loadFromPreferences()
@@ -464,17 +467,38 @@ final class TunnelModel: ObservableObject {
             _ = try? await session.send(.erase)
             return
         }
-        guard let manager, manager.connection.status == .disconnected else { return }
+        guard let manager else { return }
+        let failed = "the tunnel's own files (cache, rule-sets, logs) could not be erased; try again"
+        guard manager.connection.status == .disconnected else {
+            errorMessage = failed
+            return
+        }
         await disarmOnDemand(manager)
         do {
             try manager.connection.startVPNTunnel(options: [SbrStartOption.erase: NSNumber(value: true)])
         } catch {
+            errorMessage = failed
             return
         }
         // Starting is asynchronous: wait for it to begin (a cold extension
         // launch takes a while), then to end.
-        _ = await Self.wait(manager.connection, seconds: 10) { $0 != .disconnected }
-        _ = await Self.wait(manager.connection, seconds: 10) { $0 == .disconnected || $0 == .invalid }
+        let began = await Self.wait(manager.connection, seconds: 10) { $0 != .disconnected }
+        let ended = await Self.wait(manager.connection, seconds: 10) { $0 == .disconnected || $0 == .invalid }
+        if !began || !ended { errorMessage = failed }
+    }
+
+    /// Take the profile out of the VPN configuration: the macOS system
+    /// extension build carries it there inline, credentials included, and
+    /// anything that starts the tunnel (Settings, a control, an intent)
+    /// would connect with it.
+    private func clearProfile(_ m: NETunnelProviderManager) async {
+        guard let proto = m.protocolConfiguration as? NETunnelProviderProtocol else { return }
+        var pc = proto.providerConfiguration ?? [:]
+        for key in [SbrProviderKey.config, SbrProviderKey.remote, SbrProviderKey.stored] { pc[key] = nil }
+        proto.providerConfiguration = pc
+        m.protocolConfiguration = proto
+        try? await m.saveToPreferences()
+        try? await m.loadFromPreferences()
     }
 
     private func disarmOnDemand(_ m: NETunnelProviderManager) async {
@@ -506,6 +530,7 @@ final class TunnelModel: ObservableObject {
         if let manager {
             // Armed on demand would keep starting a tunnel whose profile is gone.
             await disarmOnDemand(manager)
+            await clearProfile(manager)
             if isOn { manager.connection.stopVPNTunnel() }
             _ = await Self.wait(manager.connection, seconds: 10) { $0 == .disconnected || $0 == .invalid }
         }

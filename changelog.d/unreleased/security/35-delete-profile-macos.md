@@ -1,0 +1,1 @@
+- **Deleting the active profile clears it from the VPN configuration.** The macOS system extension build kept the deleted profile there inline, credentials included, and anything that started the tunnel connected with it.
