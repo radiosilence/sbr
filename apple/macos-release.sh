@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
 # Build, package and notarise the Developer ID macOS app (SbrMac, with its
-# system extension), in three steps that CI runs as separate jobs:
+# system extension), in three steps:
 #
 #   apple/macos-release.sh build [build-number]  archive, export, verify:
 #                                                apple/build/macos/sbr.app.zip
-#   apple/macos-release.sh package [--notarise]  from that zip, notarise and
-#                                                staple the app if asked, then
-#                                                make and sign the disk image:
+#   apple/macos-release.sh package               make and sign the disk image
+#                                                from that zip:
 #                                                apple/build/macos/sbr-<version>.dmg
 #   apple/macos-release.sh notarise-dmg          notarise and staple the image
 #
-# Each step works on the bytes the previous one left, so re-running a failed
-# notarisation submits nothing new: notarise.sh takes up the submission of
-# the same name, and a name is the file's content hash.
+# CI runs build and package before the release is published and notarise-dmg
+# after it, so Apple's queue holds up nothing. The image's notarisation covers
+# the app inside it. Re-running a failed notarisation submits nothing new:
+# notarise.sh takes up the submission of the same name, and a name is the
+# file's content hash.
 #
 # build needs apple/SbrCore.xcframework (build-xcframework.sh) and the
 # "sbr mac Developer ID" and "sbr mac tunnel Developer ID" profiles installed
 # (tools/fetch-profiles.py); build and package need a Developer ID Application
-# identity in a keychain; notarising needs APPLE_API_KEY_PATH,
+# identity in a keychain; notarise-dmg needs APPLE_API_KEY_PATH,
 # APPLE_API_KEY_ID and APPLE_API_ISSUER_ID.
 set -euo pipefail
 cd "$(dirname "$0")/App"
@@ -116,15 +117,8 @@ package)
   [ -f "$zip" ] || { echo "$zip is missing: run the build step" >&2; exit 1; }
   rm -rf "$out/sbr.app" "$out/dmg"
   ditto -x -k "$zip" "$out"
-  app="$out/sbr.app"
-  if [ "${1:-}" = --notarise ]; then
-    notarise "$zip"
-    xcrun stapler staple "$app"
-    xcrun stapler validate "$app"
-    spctl --assess --type exec -vv "$app"
-  fi
   mkdir -p "$out/dmg"
-  ditto "$app" "$out/dmg/sbr.app"
+  ditto "$out/sbr.app" "$out/dmg/sbr.app"
   ln -s /Applications "$out/dmg/Applications"
   hdiutil create -quiet -volname sbr -srcfolder "$out/dmg" -fs HFS+ -format UDZO -ov "$dmg"
   codesign --force --timestamp --sign "$(identity)" "$dmg"
@@ -141,7 +135,7 @@ notarise-dmg)
   ;;
 
 *)
-  echo "usage: apple/macos-release.sh build [build-number] | package [--notarise] | notarise-dmg" >&2
+  echo "usage: apple/macos-release.sh build [build-number] | package | notarise-dmg" >&2
   exit 2
   ;;
 esac

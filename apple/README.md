@@ -291,7 +291,8 @@ apple/build-xcframework.sh          # on macOS with Xcode
 - tvOS is a Rust tier-3 target with no prebuilt std. The script builds it with
   `cargo +nightly build -Zbuild-std=std,panic_unwind`, so you need
   `rustup toolchain install nightly --component rust-src`. `SBR_SKIP_TVOS=1`
-  skips it. `SBR_SKIP_CATALYST=1` skips Catalyst.
+  skips it. `SBR_SKIP_CATALYST=1` skips Catalyst and `SBR_SKIP_IOS=1` the iOS
+  slices.
 - Release builds use fat LTO with one codegen unit, and the script prints each
   slice's size. The archives are not run through `strip`: it corrupts aws-lc's
   assembly objects and the app then fails to link. Xcode strips the final binary.
@@ -336,16 +337,17 @@ sing-box, Xray and hysteria from Homebrew so the interop tests run), and the
 `Apple` job, which builds the xcframework (no Catalyst) and the app unsigned
 for iOS, tvOS and macOS. A push to `main` that passes then calls `ios.yml`,
 which archives the app against that xcframework and uploads it to TestFlight; `ios.yml` can also be run
-by hand to retry an upload. A pull request's newer push cancels its older run; on `main` a run always finishes and only the newest waiting commit runs next. Pull requests
+by hand to retry an upload. A pull request's newer push cancels its older run, and so does a newer push to `main` unless the older one may release. Pull requests
 never upload.
 
 A push that changes the workspace version (a merged release pull request),
-or a manual run with **release** ticked, also calls `macos.yml`: `build` archives `SbrMac` against the same
-xcframework and exports it with Developer ID signing, `package` notarises and
-staples the app and makes the disk image, and `notarise-dmg` notarises and
-staples that, after which CI/CD publishes the GitHub release. A release pull
-request runs `build` and `package` without notarising. See the root README's
-"Releases".
+or a manual run on `main` while that version is unreleased, also runs the
+`Release (macOS)` job alongside the checks: it builds the macOS slice of the
+xcframework, then `apple/macos-release.sh build` archives `SbrMac` and exports
+it with Developer ID signing and `package` makes the signed disk image. Once
+the checks pass, CI/CD publishes the GitHub release with that image, and the
+`Notarise` job then runs `notarise-dmg` and replaces the release's copy with
+the stapled one. See the root README's "Releases".
 
 These jobs use these repository secrets, the same names kōan uses:
 
