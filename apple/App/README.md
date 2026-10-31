@@ -10,7 +10,7 @@ lowercase interface text, square corners, hairlines and a single mint accent
 
 ```sh
 cd apple
-./build-xcframework.sh              # SBR_SKIP_TVOS=1 without a nightly toolchain
+./build-xcframework.sh              # SBR_SKIP_TVOS=1 to leave out tvOS
 cd App
 mise exec -- xcodegen generate      # team: DEVELOPMENT_TEAM in project.yml
 open Sbr.xcodeproj

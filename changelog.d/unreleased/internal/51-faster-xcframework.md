@@ -1,0 +1,1 @@
+- **Faster xcframework builds.** tvOS builds on stable Rust with its prebuilt std instead of nightly `-Zbuild-std`, the unused Intel simulator slices are gone, and every target builds in one cargo invocation so their LTO passes overlap.
