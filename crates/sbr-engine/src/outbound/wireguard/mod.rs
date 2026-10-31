@@ -113,15 +113,16 @@ impl WireGuard {
         if let Some(r) = self.current() {
             return Ok(r.shared.clone());
         }
-        let mut slot = self.running.lock().unwrap();
-        if let Some(old) = slot.as_ref() {
-            if old.started.elapsed() < RESTART_AFTER {
-                return Err(io::Error::other("wireguard: device stopped"));
+        {
+            let mut slot = self.running.lock().unwrap();
+            if let Some(old) = slot.as_ref() {
+                if old.started.elapsed() < RESTART_AFTER {
+                    return Err(io::Error::other("wireguard: device stopped"));
+                }
+                warn!(tag = %self.tag, "wireguard: device stopped, restarting");
             }
-            warn!(tag = %self.tag, "wireguard: device stopped, restarting");
+            slot.take();
         }
-        slot.take();
-        drop(slot);
         let r = Arc::new(self.start().await?);
         *self.running.lock().unwrap() = Some(r.clone());
         Ok(r.shared.clone())
