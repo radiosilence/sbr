@@ -130,10 +130,10 @@ pub struct Degraded {
     pub until: Instant,
 }
 
-#[derive(Debug, Clone)]
 /// Events kept per leaf: far more distinct destinations than a burst needs.
 const MAX_EVENTS: usize = 64;
 
+#[derive(Debug, Clone)]
 struct Event {
     at: Instant,
     signal: Signal,
