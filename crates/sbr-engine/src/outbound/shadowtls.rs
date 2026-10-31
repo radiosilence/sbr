@@ -520,20 +520,35 @@ struct Framed {
     wpos: usize,
 }
 
-const RBUF: usize = 2 * (HEADER + 65535);
+/// Longest record body a v3 server sends: its own frames are a TLS
+/// plaintext record plus the tag, and the records it forwards from the
+/// cover server are TLS 1.3 ciphertext (RFC 8446 §5.2). v2 relays whatever
+/// the server wraps, so it keeps the full 16-bit length.
+const V3_MAX_RECORD: usize = MAX_PLAINTEXT + 256;
 
 impl Framed {
     fn new(inner: Stream, mode: Mode) -> Self {
+        // Two records, so one can be parsed while the next arrives. The ring
+        // is cycled through in any long transfer, after which all of it stays
+        // committed for the connection's life.
+        let rbuf = 2 * (HEADER + Self::max_record(&mode));
         Self {
             inner,
             mode,
-            rbuf: vec![0u8; RBUF].into_boxed_slice(),
+            rbuf: vec![0u8; rbuf].into_boxed_slice(),
             rhead: 0,
             rfill: 0,
             pstart: 0,
             pend: 0,
             wbuf: Vec::with_capacity(MAX_PLAINTEXT + 64),
             wpos: 0,
+        }
+    }
+
+    fn max_record(mode: &Mode) -> usize {
+        match mode {
+            Mode::V2 { .. } => u16::MAX as usize,
+            Mode::V3 { .. } => V3_MAX_RECORD,
         }
     }
 
@@ -680,6 +695,12 @@ impl AsyncRead for Framed {
             }
             let h = &this.rbuf[this.rhead..];
             let len = u16::from_be_bytes([h[3], h[4]]) as usize;
+            if len > Self::max_record(&this.mode) {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "shadowtls: record too long",
+                )));
+            }
             ready!(this.poll_fill(cx, HEADER + len))?;
             this.take_record(len)?;
         }
