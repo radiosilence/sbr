@@ -69,7 +69,10 @@ impl Session {
     /// The request goes out now; its response is awaited by the first read,
     /// as sing-mux's late connection does.
     pub async fn open(&self) -> io::Result<H2Stream> {
-        let mut send = self.send.clone().ready().await.map_err(h2_err)?;
+        let mut send = tokio::time::timeout(super::TIMEOUT, self.send.clone().ready())
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "h2mux: no stream capacity"))?
+            .map_err(h2_err)?;
         let req = http::Request::builder()
             .method(http::Method::CONNECT)
             .uri("localhost")

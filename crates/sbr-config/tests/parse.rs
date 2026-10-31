@@ -161,9 +161,9 @@ fn v2ray_family_rejections() {
         r#"{{"outbounds":[{{"type":"vless",{base},"multiplex":{{"enabled":true,"brutal":{{"enabled":true,"up_mbps":0,"down_mbps":10}}}}}}]}}"#
     ));
     assert!(e.starts_with("outbounds[0].multiplex.brutal.up_mbps"), "{e}");
-    let o = Options::parse(&format!(
-        r#"{{"outbounds":[{{"type":"shadowsocks","server":"a.com","server_port":1,"method":"none","multiplex":{{"enabled":true,"protocol":"smux","padding":true}}}}]}}"#
-    ))
+    let o = Options::parse(
+        r#"{"outbounds":[{"type":"shadowsocks","server":"a.com","server_port":1,"method":"none","multiplex":{"enabled":true,"protocol":"smux","padding":true}}]}"#,
+    )
     .unwrap();
     let OutboundKind::Shadowsocks(ss) = &o.outbounds[0].kind else {
         panic!()

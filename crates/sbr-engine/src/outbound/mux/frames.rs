@@ -254,9 +254,28 @@ impl Session {
             ..Default::default()
         }));
         self.streams.lock().unwrap().insert(id, state.clone());
-        let r = match self.proto {
-            Proto::Smux => self.control(SMUX_SYN, 0, id, 0).await,
-            Proto::Yamux => self.control(YAMUX_WINDOW_UPDATE, FLAG_SYN, id, 0).await,
+        let mut syn = Vec::with_capacity(12);
+        match self.proto {
+            Proto::Smux => header(&mut syn, self.proto, SMUX_SYN, 0, id, 0),
+            Proto::Yamux => header(&mut syn, self.proto, YAMUX_WINDOW_UPDATE, FLAG_SYN, id, 0),
+        }
+        // Waiting for the writer is bounded (a dead connection holds it
+        // forever); the write itself is not, since half a frame would
+        // corrupt the session.
+        let r = match tokio::time::timeout(OPEN_TIMEOUT, self.writer.lock()).await {
+            Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "mux: session writer stalled")),
+            Ok(mut w) => {
+                let r = async {
+                    w.write_all(&syn).await?;
+                    w.flush().await
+                }
+                .await;
+                drop(w);
+                if r.is_err() {
+                    self.close();
+                }
+                r
+            }
         };
         if let Err(e) = r {
             self.streams.lock().unwrap().remove(&id);

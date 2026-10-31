@@ -122,8 +122,8 @@ struct Client {
     sessions: Mutex<Vec<Arc<Entry>>>,
     /// Serialises session creation, as sing-mux's client lock does.
     dialing: tokio::sync::Mutex<()>,
-    /// Session dials started, and the last one that failed.
-    dials: AtomicU64,
+    /// Session dials finished, and the last one that failed.
+    dials_done: AtomicU64,
     failure: Mutex<Option<(u64, io::ErrorKind, String)>>,
 }
 
@@ -151,7 +151,7 @@ impl Mux {
                 brutal: m.brutal.map(|(up, down)| (up as u64 * 125_000, down as u64 * 125_000)),
                 sessions: Mutex::new(Vec::new()),
                 dialing: tokio::sync::Mutex::new(()),
-                dials: AtomicU64::new(0),
+                dials_done: AtomicU64::new(0),
                 failure: Mutex::new(None),
             }),
             tcp,
@@ -182,7 +182,7 @@ impl Client {
 
     /// A session with a stream counted against it.
     async fn offer(self: &Arc<Self>) -> io::Result<StreamGuard> {
-        let seen = self.dials.load(Ordering::Acquire);
+        let seen = self.dials_done.load(Ordering::Acquire);
         let _dialing = self.dialing.lock().await;
         let picked = {
             let mut sessions = self.sessions.lock().unwrap();
@@ -205,10 +205,10 @@ impl Client {
                 {
                     return Err(io::Error::new(*kind, msg.clone()));
                 }
-                let n = self.dials.fetch_add(1, Ordering::AcqRel) + 1;
                 let r = tokio::time::timeout(TIMEOUT, self.new_session())
                     .await
                     .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "mux: session dial timed out")));
+                let n = self.dials_done.fetch_add(1, Ordering::AcqRel) + 1;
                 let e = match r {
                     Ok(e) => e,
                     Err(e) => {
@@ -254,13 +254,8 @@ impl Client {
     async fn open_stream(self: &Arc<Self>) -> io::Result<Stream> {
         let mut last = None;
         for _ in 0..2 {
-            let guard = match self.offer().await {
-                Ok(g) => g,
-                Err(e) => {
-                    last = Some(e);
-                    continue;
-                }
-            };
+            // A failed dial is final: a second one would fail the same way.
+            let guard = self.offer().await?;
             // Not cancelled by a timeout: a frame half written would corrupt
             // the session. A failure leaves the session to its own checks
             // (closed, SYN not acknowledged, idle), since other streams on

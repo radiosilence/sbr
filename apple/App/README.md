@@ -82,13 +82,13 @@ personal rules, trusted networks and saved logs, and has the tunnel delete
 its own files (cache file, rule-set cache, session logs). Those sit in the
 extension's container, out of the app's reach, so a disconnected tunnel is
 started with `SbrStartOption.erase`, which deletes them and stops without
-connecting. The app stays installed.
+connecting. The app stays installed. Keychain items outlive deleting the app
+on iOS, so erase before deleting it. What erasing leaves behind is listed in
+`docs/threat-model.md` under "Device seizure".
 
 Deleting the active profile stops the tunnel, disarms on demand, deletes the
 tunnel's files and its downloaded copy of the profile, and keeps the VPN
-configuration, so activating another profile needs no new system prompt. Keychain items outlive deleting the app on iOS,
-so erase before deleting it. What erasing leaves behind is listed in
-`docs/threat-model.md` under "Device seizure".
+configuration, so activating another profile needs no new system prompt.
 
 ## Groups
 
