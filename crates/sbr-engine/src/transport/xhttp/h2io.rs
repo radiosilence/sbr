@@ -18,9 +18,11 @@ use tracing::debug;
 use super::super::ServerDialer;
 
 /// Go's `http2.Transport` defaults are 4 MiB per stream and 1 GiB per
-/// connection; the connection window here bounds memory on iOS instead.
-const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
-const CONN_WINDOW: u32 = 16 * 1024 * 1024;
+/// connection. The connection window is what the server may park unread
+/// across all streams; with XMUX opening several connections it is kept to
+/// 4 MiB where memory is capped (the iOS extension's ~50 MB).
+const STREAM_WINDOW: u32 = if crate::MOBILE { 2 } else { 4 } * 1024 * 1024;
+const CONN_WINDOW: u32 = if crate::MOBILE { 4 } else { 16 } * 1024 * 1024;
 const MAX_WRITE: usize = 64 * 1024;
 
 pub fn h2_err(e: h2::Error) -> io::Error {
@@ -55,6 +57,7 @@ impl H2Conn {
             .initial_window_size(STREAM_WINDOW)
             .initial_connection_window_size(CONN_WINDOW)
             .max_frame_size(64 * 1024)
+            .max_header_list_size(crate::transport::MAX_RESPONSE_HEADERS)
             .enable_push(false)
             .handshake::<_, Bytes>(s)
             .await
@@ -126,10 +129,13 @@ pub async fn send_body(send: &mut SendStream<Bytes>, mut data: Bytes) -> io::Res
     }
     while !data.is_empty() {
         send.reserve_capacity(data.len());
-        let cap = poll_fn(|cx| send.poll_capacity(cx))
-            .await
-            .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))?
-            .map_err(h2_err)?;
+        let cap = super::progress("upload", async {
+            poll_fn(|cx| send.poll_capacity(cx))
+                .await
+                .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))?
+                .map_err(h2_err)
+        })
+        .await?;
         if cap == 0 {
             continue;
         }

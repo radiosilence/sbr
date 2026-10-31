@@ -28,8 +28,8 @@ use tokio::sync::mpsc;
 use super::Upstream;
 use super::quic::brutal::{BrutalSwitch, SwitchableFactory};
 use super::quic::{
-    DEFAULT_IDLE, Dialer, Hop, Packet, PinnedUdp, Pool, Pooled, Sessions, Tuning, UDP_QUEUE, Usage, UseGuard,
-    get_varint, io_err, parse_host_port, put_varint, recv_into, transport,
+    DEFAULT_IDLE, Dialer, EndpointSlot, Hop, Packet, PinnedUdp, Pool, Pooled, Sessions, Tuning, UDP_QUEUE, Usage,
+    UseGuard, get_varint, io_err, parse_host_port, put_varint, recv_into, transport,
 };
 
 const TCP_REQUEST: u64 = 0x401;
@@ -71,13 +71,13 @@ pub struct Hysteria2 {
 
 struct Session {
     conn: Connection,
-    endpoint: Endpoint,
+    endpoint: EndpointSlot,
     usage: Arc<Usage>,
     udp_enabled: bool,
     udp: Arc<Sessions<u32>>,
     next_udp: AtomicU32,
     /// Keeps the HTTP/3 control stream open.
-    _h3: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+    _h3: h3::client::SendRequest<super::quic::h3guard::OpenStreams, Bytes>,
 }
 
 impl Pooled for Session {
@@ -148,7 +148,8 @@ impl Hysteria2 {
     ) -> io::Result<Arc<Session>> {
         let fail = |e: &dyn std::fmt::Display| io::Error::other(format!("hysteria2 auth: {e}"));
         let (mut driver, mut send) = h3::client::builder()
-            .build::<_, _, Bytes>(h3_quinn::Connection::new(conn.clone()))
+            .max_field_section_size(crate::transport::MAX_RESPONSE_HEADERS.into())
+            .build::<_, _, Bytes>(super::quic::h3guard::Connection::new(conn.clone()))
             .await
             .map_err(|e| fail(&e))?;
         tokio::spawn(async move {
@@ -205,9 +206,10 @@ impl Hysteria2 {
         if !rx_auto && tx > 0 {
             switch.set(tx);
         }
+        let endpoint: EndpointSlot = Arc::new(Mutex::new(Some(endpoint)));
         let session = Arc::new(Session {
             conn: conn.clone(),
-            endpoint,
+            endpoint: endpoint.clone(),
             usage: Arc::default(),
             udp_enabled,
             udp: Arc::new(Sessions::new()),
@@ -220,6 +222,7 @@ impl Hysteria2 {
         tokio::spawn(super::quic::watch(
             conn,
             session.usage.clone(),
+            endpoint,
             self.quic.idle_timeout.unwrap_or(DEFAULT_IDLE),
             None,
         ));
@@ -261,10 +264,16 @@ impl Outbound for Hysteria2 {
         "hysteria2"
     }
 
-    /// The QUIC connection's smoothed RTT: a real round-trip measurement to
-    /// the server that costs no extra traffic once the session exists.
+    /// The handshake round trip of a connection dialed for the probe and
+    /// closed at once. A pooled connection's RTT can be stale: one whose path
+    /// died still reports its last estimate until quinn times it out.
     fn probe_rtt(&self) -> Option<BoxFuture<'_, io::Result<std::time::Duration>>> {
-        Some(Box::pin(async move { Ok(self.dial().await?.conn.rtt()) }))
+        Some(Box::pin(async move {
+            let s = self.dial().await?;
+            let rtt = s.conn.rtt();
+            s.conn.close(0u32.into(), b"");
+            Ok(rtt)
+        }))
     }
 
     fn migrate(&self) -> Option<BoxFuture<'_, bool>> {
@@ -274,7 +283,11 @@ impl Outbound for Hysteria2 {
         Some(Box::pin(async move {
             let mut ok = true;
             for s in self.pool.live() {
-                ok &= self.dialer.migrate(&s.endpoint, &s.conn).await;
+                // Closed since `live()`: nothing left to move.
+                let Some(endpoint) = s.endpoint.lock().unwrap().clone() else {
+                    continue;
+                };
+                ok &= self.dialer.migrate(&endpoint, &s.conn).await;
             }
             ok
         }))

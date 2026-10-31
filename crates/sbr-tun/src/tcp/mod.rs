@@ -259,16 +259,21 @@ impl AsyncWrite for Stream {
         let own = self.shared.tx_cap.saturating_sub(g.tx.len());
         // The stack-wide cap, but never below one chunk per connection.
         let floor = buf::CHUNK.saturating_sub(g.tx.len());
-        let shared = self.env.pool.headroom().max(g.tx.slack()).max(floor);
-        let free = own.min(shared);
+        let slack = g.tx.slack();
+        let shared = || self.env.pool.headroom().max(slack).max(floor);
+        let mut free = own.min(shared());
         if free == 0 {
             if !g.wr.as_ref().is_some_and(|w| w.will_wake(cx.waker())) {
                 g.wr = Some(cx.waker().clone());
             }
-            if own > 0 {
-                self.env.pool.wait(cx.waker());
+            if own == 0 {
+                return Poll::Pending;
             }
-            return Poll::Pending;
+            self.env.pool.wait(cx.waker());
+            free = own.min(shared());
+            if free == 0 {
+                return Poll::Pending;
+            }
         }
         let n = free.min(data.len());
         g.tx.push(&data[..n]);

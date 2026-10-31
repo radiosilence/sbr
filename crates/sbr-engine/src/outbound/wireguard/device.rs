@@ -276,6 +276,8 @@ impl Egress {
             .name("sbr-wg-egress".into())
             .stack_size(128 * 1024)
             .spawn(move || {
+                #[cfg(unix)]
+                crate::signal_stack::install();
                 // Ends when the device task drops its sender.
                 while let Some(mut out) = rx.blocking_recv() {
                     if let Some(io) = out.io.take() {

@@ -54,7 +54,7 @@ impl Pool {
             return usize::MAX;
         }
         self.limit
-            .saturating_sub(self.used.load(Ordering::Relaxed))
+            .saturating_sub(self.used.load(Ordering::SeqCst))
             .saturating_sub(self.promised.load(Ordering::Relaxed))
     }
 
@@ -67,13 +67,16 @@ impl Pool {
         }
     }
 
-    /// Wake `w` when memory is freed.
+    /// Wake `w` on the next `put`. Callers check `headroom` again after
+    /// this: a `put` between their first check and this call sees no waiter.
+    /// `waiting` and `used` are sequentially consistent so that either the
+    /// `put` sees the waiter or the second check sees the freed chunk.
     pub fn wait(&self, w: &Waker) {
         let mut ws = self.waiters.lock().unwrap();
         if !ws.iter().any(|x| x.will_wake(w)) {
             ws.push(w.clone());
         }
-        self.waiting.store(true, Ordering::Release);
+        self.waiting.store(true, Ordering::SeqCst);
     }
 
     fn get(&self) -> Chunk {
@@ -86,14 +89,14 @@ impl Pool {
     }
 
     fn put(&self, c: Chunk) {
-        self.used.fetch_sub(CHUNK, Ordering::Relaxed);
+        self.used.fetch_sub(CHUNK, Ordering::SeqCst);
         {
             let mut f = self.free.lock().unwrap();
             if f.len() < self.keep {
                 f.push(c);
             }
         }
-        if self.waiting.load(Ordering::Acquire) {
+        if self.waiting.load(Ordering::SeqCst) {
             let ws = {
                 let mut ws = self.waiters.lock().unwrap();
                 self.waiting.store(false, Ordering::Release);

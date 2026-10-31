@@ -312,7 +312,9 @@ impl StreamPacketConn {
         Arc::new(Self {
             framing,
             dest,
-            reader: Mutex::new(BufReader::with_capacity(16 * 1024, r)),
+            // Only the small header reads use this buffer: a payload read at
+            // least this long bypasses it.
+            reader: Mutex::new(BufReader::with_capacity(2048, r)),
             writer: Mutex::new(Writer {
                 w,
                 buf: Vec::with_capacity(2048),
@@ -412,12 +414,22 @@ impl StreamPacketConn {
 async fn read_payload<R: AsyncRead + Unpin>(r: &mut R, out: &mut [u8], len: usize) -> io::Result<usize> {
     if len > out.len() {
         // Too big for the caller: drop it, keep the framing.
-        let mut sink = vec![0u8; len];
-        r.read_exact(&mut sink).await?;
+        discard(r, len).await?;
         return Ok(0);
     }
     r.read_exact(&mut out[..len]).await?;
     Ok(len)
+}
+
+/// Read and drop `len` bytes without allocating them.
+pub(crate) async fn discard<R: AsyncRead + Unpin>(r: &mut R, mut len: usize) -> io::Result<()> {
+    let mut scratch = [0u8; 512];
+    while len > 0 {
+        let n = len.min(scratch.len());
+        r.read_exact(&mut scratch[..n]).await?;
+        len -= n;
+    }
+    Ok(())
 }
 
 /// `PacketConn` facade over a shared [`StreamPacketConn`].

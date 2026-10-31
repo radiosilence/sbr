@@ -24,9 +24,9 @@ use sbr_config::{DomainStrategy, WireGuardEndpoint};
 use sbr_core::dial::{self, DialOptions};
 use sbr_core::dns::Dns;
 use sbr_core::{BoxFuture, BoxPacketConn, Destination, Outbound, PacketConn, Stream};
-use tokio::sync::{OnceCell, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use self::conn::{WgPacketConn, WgTcp, WgUdp};
 use self::device::{Device, PeerSetup, Transport};
@@ -42,18 +42,57 @@ pub struct WireGuard {
     cfg: WireGuardEndpoint,
     upstream: Upstream,
     dns: Arc<dyn Dns>,
-    running: OnceCell<Running>,
+    /// The device, started on first use and again if its task has ended
+    /// (a panic, or every detour connection gone).
+    running: std::sync::Mutex<Option<Arc<Running>>>,
+    starting: tokio::sync::Mutex<()>,
 }
 
 struct Running {
     shared: Arc<Shared>,
     task: JoinHandle<()>,
+    started: std::time::Instant,
+    /// Detour receive tasks: they end only when a datagram finds the device
+    /// gone, so they are stopped with it.
+    _readers: Readers,
 }
 
-impl Drop for WireGuard {
+/// Detour receive tasks, aborted when dropped: with the device, or when
+/// `start` fails after spawning some of them.
+#[derive(Default)]
+struct Readers(Vec<JoinHandle<()>>);
+
+impl Drop for Readers {
     fn drop(&mut self) {
-        if let Some(r) = self.running.get() {
-            r.task.abort();
+        for r in &self.0 {
+            r.abort();
+        }
+    }
+}
+
+/// A device that stopped this soon after starting is not restarted until
+/// this has passed: on a path that fails at once, every connect would
+/// otherwise start it again.
+const RESTART_AFTER: Duration = Duration::from_secs(5);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.task.abort();
+        fail_sockets(&self.shared);
+    }
+}
+
+/// Nothing drives this stack any more: fail the connections on it rather
+/// than leave them waiting for a device that is gone. Aborting and closing
+/// wake their readers and writers.
+fn fail_sockets(shared: &Shared) {
+    let mut st = shared.stack.lock().unwrap_or_else(|e| e.into_inner());
+    for (_, s) in st.sockets.iter_mut() {
+        match s {
+            smoltcp::socket::Socket::Tcp(t) => t.abort(),
+            smoltcp::socket::Socket::Udp(u) => u.close(),
+            #[allow(unreachable_patterns)]
+            _ => {}
         }
     }
 }
@@ -71,16 +110,37 @@ impl WireGuard {
             cfg: cfg.clone(),
             upstream,
             dns,
-            running: OnceCell::new(),
+            running: std::sync::Mutex::new(None),
+            starting: tokio::sync::Mutex::new(()),
         })
     }
 
-    async fn running(&self) -> io::Result<&Arc<Shared>> {
-        let r = self.running.get_or_try_init(|| self.start()).await?;
-        if r.task.is_finished() {
-            return Err(io::Error::other("wireguard: device stopped"));
+    fn current(&self) -> Option<Arc<Running>> {
+        let r = self.running.lock().unwrap();
+        r.as_ref().filter(|r| !r.task.is_finished()).cloned()
+    }
+
+    async fn running(&self) -> io::Result<Arc<Shared>> {
+        if let Some(r) = self.current() {
+            return Ok(r.shared.clone());
         }
-        Ok(&r.shared)
+        let _starting = self.starting.lock().await;
+        if let Some(r) = self.current() {
+            return Ok(r.shared.clone());
+        }
+        {
+            let mut slot = self.running.lock().unwrap();
+            if let Some(old) = slot.as_ref() {
+                if old.started.elapsed() < RESTART_AFTER {
+                    return Err(io::Error::other("wireguard: device stopped"));
+                }
+                warn!(tag = %self.tag, "wireguard: device stopped, restarting");
+            }
+            slot.take();
+        }
+        let r = Arc::new(self.start().await?);
+        *self.running.lock().unwrap() = Some(r.clone());
+        Ok(r.shared.clone())
     }
 
     async fn start(&self) -> io::Result<Running> {
@@ -112,6 +172,7 @@ impl WireGuard {
         }
 
         let mut rebind = None;
+        let mut readers = Readers::default();
         let transport = match &self.upstream {
             Upstream::System(opts, dns) => {
                 for (peer, p) in peers.iter_mut().zip(&cfg.peers) {
@@ -154,14 +215,14 @@ impl WireGuard {
                     let dest = Destination::from_host_port(host, p.port);
                     let conn: Arc<dyn PacketConn> = Arc::from(out.connect_udp(&dest).await?);
                     let (c, tx) = (conn.clone(), tx.clone());
-                    tokio::spawn(async move {
+                    readers.0.push(tokio::spawn(async move {
                         let mut buf = vec![0u8; 65535];
                         while let Ok((n, _)) = c.recv_from(&mut buf).await {
                             if tx.send((i, buf[..n].to_vec())).await.is_err() {
                                 return;
                             }
                         }
-                    });
+                    }));
                     conns.push((conn, dest));
                 }
                 Transport::Detour {
@@ -179,8 +240,21 @@ impl WireGuard {
             public,
             rebind,
         };
-        let task = tokio::spawn(dev.run());
-        Ok(Running { shared, task })
+        let task = {
+            // Fails the connections as soon as the device stops, not only
+            // when a later connect replaces it.
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                dev.run().await;
+                fail_sockets(&shared);
+            })
+        };
+        Ok(Running {
+            shared,
+            task,
+            started: std::time::Instant::now(),
+            _readers: readers,
+        })
     }
 
     /// Resolve with the engine DNS, preferring the families we have
@@ -233,16 +307,16 @@ impl Outbound for WireGuard {
         "wireguard"
     }
 
-    /// The round trip of the last handshake (boringtun times it): a real
-    /// measurement to the peer at the cost of one handshake. A recent one is
-    /// reused, so probing an active endpoint sends nothing.
     fn network_changed(&self) {
-        if let Some(r) = self.running.get() {
+        if let Some(r) = self.current() {
             r.shared.rebind.store(true, Ordering::Relaxed);
             r.shared.kick.notify_one();
         }
     }
 
+    /// The round trip of the last handshake (boringtun times it): a real
+    /// measurement to the peer at the cost of one handshake. A recent one is
+    /// reused, so probing an active endpoint sends nothing.
     fn probe_rtt(&self) -> Option<BoxFuture<'_, io::Result<Duration>>> {
         Some(Box::pin(async move {
             let shared = self.running().await?;
@@ -267,7 +341,7 @@ impl Outbound for WireGuard {
 
     fn connect<'a>(&'a self, dest: &'a Destination) -> BoxFuture<'a, io::Result<Stream>> {
         Box::pin(async move {
-            let shared = self.running().await?.clone();
+            let shared = self.running().await?;
             let ips = Self::resolve_all(self.dns.as_ref(), &self.cfg, dest).await?;
             let timeout = self.cfg.dial.connect_timeout.unwrap_or(Duration::from_secs(10));
             let mut last = None;
@@ -290,7 +364,7 @@ impl Outbound for WireGuard {
 
     fn connect_udp<'a>(&'a self, dest: &'a Destination) -> BoxFuture<'a, io::Result<BoxPacketConn>> {
         Box::pin(async move {
-            let shared = self.running().await?.clone();
+            let shared = self.running().await?;
             let first = Self::resolve_all(self.dns.as_ref(), &self.cfg, dest)
                 .await?
                 .into_iter()

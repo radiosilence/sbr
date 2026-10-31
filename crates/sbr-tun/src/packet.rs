@@ -270,18 +270,26 @@ fn ip_bytes(ip: IpAddr) -> [u8; 16] {
 /// Build a complete IPv4/IPv6 UDP packet into `out` (cleared first).
 /// Families of `src` and `dst` must match.
 pub fn build_udp(out: &mut Vec<u8>, src: SocketAddr, dst: SocketAddr, payload: &[u8]) {
+    build_udp_at(out, 0, src, dst, payload);
+}
+
+/// [`build_udp`] after `headroom` zero bytes, so a device header can go in
+/// front without moving the datagram.
+pub fn build_udp_at(out: &mut Vec<u8>, headroom: usize, src: SocketAddr, dst: SocketAddr, payload: &[u8]) {
     out.clear();
+    out.resize(headroom, 0);
+    let h = headroom;
     let udp_len = 8 + payload.len();
     let mut pseudo = 0u32;
     match (src.ip(), dst.ip()) {
         (IpAddr::V4(s), IpAddr::V4(d)) => {
             let total = 20 + udp_len;
             out.extend_from_slice(&[0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, PROTO_UDP, 0, 0]);
-            wr_len(out, 2, total as u16);
+            wr_len(out, h + 2, total as u16);
             out.extend_from_slice(&s.octets());
             out.extend_from_slice(&d.octets());
-            let ipck = !fold(sum16(&out[..20], 0));
-            wr16(out, 10, ipck);
+            let ipck = !fold(sum16(&out[h..h + 20], 0));
+            wr16(out, h + 10, ipck);
             pseudo = sum16(&s.octets(), pseudo);
             pseudo = sum16(&d.octets(), pseudo);
         }
@@ -513,6 +521,18 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn udp_with_headroom_is_the_same_packet() {
+        for (s, d) in [("1.2.3.4:5", "6.7.8.9:10"), ("[::1]:5", "[::2]:10")] {
+            let (s, d) = (s.parse().unwrap(), d.parse().unwrap());
+            let (mut plain, mut room) = (Vec::new(), vec![9u8; 3]);
+            build_udp(&mut plain, s, d, b"payload");
+            build_udp_at(&mut room, 4, s, d, b"payload");
+            assert_eq!(&room[..4], &[0; 4]);
+            assert_eq!(&room[4..], &plain[..]);
+        }
+    }
 
     /// A TCP SYN with a valid checksum, built by hand.
     fn tcp_syn(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
