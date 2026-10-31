@@ -90,8 +90,7 @@ Severity reflects impact for the intended users: a remote or local denial of ser
 The whole Rust workspace again, for memory and resource leaks (tasks, sockets and timers nothing stops; caches and queues bounded in entries but not bytes), per-connection memory against the iOS extension's ~50 MB, hot-path allocation and copies, and memory safety in `unsafe` code and the C ABI. Two reviewers read every crate independently and then each other's half.
 
 - AddressSanitizer (nightly, `aarch64-apple-darwin`) over the test suites of every crate: no reports.
-- Each fuzz target for ten minutes with `-malloc_limit_mb=128`.
-- `crates/sbr-engine/tests/resources.rs`: 200 proxied connections through two instances under a counting allocator; heap per idle connection after bulk traffic, and tasks, file descriptors and heap after a second identical round, against the first.
+- `crates/sbr-engine/tests/resources.rs`: 200 proxied connections through two instances under a counting allocator: heap per idle connection, what 20 of them still hold after carrying a megabyte each, and tasks, file descriptors and heap after a second identical round, against the first.
 
 ## Findings
 
@@ -108,7 +107,7 @@ All fixed in #27 unless marked otherwise.
 | The DNS cache was bounded in entries and records, not bytes: 64 large TXT records under each of a thousand names. | DNS |
 | Rule-set regexes compiled with the regex crate's 10 MiB defaults. | Routing |
 | The Clash API accepted unlimited connections and never timed out headers (axum sets no hyper timer). | Clash API |
-| Without a Rust `main`, SIGPIPE killed the process: the system stack's TUN listener lacked `SO_NOSIGPIPE`, which accepted connections inherit. | Apple, TUN |
+| Without a Rust `main`, nothing ignores SIGPIPE, and the system stack's TUN listener lacked `SO_NOSIGPIPE`, which accepted connections inherit: writing to a connection the app had reset would kill the extension unless the host ignored SIGPIPE. Inferred from the default disposition, not observed on a device. | Apple, TUN |
 | Crash breadcrumbs: no alternate signal stack outside a Rust `main`, so a stack overflow left none; the host's handlers were discarded; reinstalling raced writers on the old fd. | Apple |
 | The profile fetch callback ran under the instance lock (cancellation) or on the engine thread (result); a host calling back into sbr deadlocked. | C ABI |
 | The userspace TCP memory limit could miss a wakeup between its headroom check and registering a waiter (multi-thread runtimes). | TUN |
@@ -118,6 +117,11 @@ All fixed in #27 unless marked otherwise.
 | An oversized datagram ended a UoT or TUIC-UoT UDP session; VMess UDP split long replies into two datagrams. | UDP |
 | Health events grew with the retry rate of one dead destination and were sorted on every report. | Health |
 | SOCKS5 UDP associations' sockets outlived the association; fetch left its connection driver running on error or timeout. | Inbound, fetch |
-| WireGuard's smoltcp rings stay committed at 512 KiB per connection after any long transfer. | Open: issue to file |
+| WireGuard's smoltcp rings stay committed at 512 KiB per connection after any long transfer. | Open, #28 |
 
-Lower-priority items left as they are: per-datagram allocations in TUIC and hysteria2 sends, the QUIC per-session UDP queue counted in packets, `PinnedUdp`'s linear scan, the WebSocket read buffer's memset per refill, the userspace TCP's SACK block allocation, and the TUN writer's 1 ms retry sleeps on `ENOBUFS`.
+Left as they are, lower priority:
+
+- Memory: a 64 KiB receive buffer per QUIC socket over a detour (`quic/socket.rs`); WireGuard's detour channel of 1024 datagrams; the WebSocket write buffer kept at its largest frame; VMess's 32 KiB read buffer allocated at connect; the QUIC per-session UDP queue counted in packets.
+- Per packet: allocations in TUIC and hysteria2 datagram sends; `PinnedUdp`'s linear scan; the WebSocket read buffer's memset per refill; the userspace TCP's SACK block allocation; the TUN writer's 1 ms retry sleeps on `ENOBUFS`.
+- Hardening: the WebSocket reader's `assume_init` relies on the inner reader filling the buffer it was given, without the pointer check `tokio::io::Take` makes.
+- Coverage: the protocol decoders reachable from a hostile server (VMess, VLESS, Trojan, TUIC, hysteria2, AnyTLS framing) have no fuzz targets. `resources.rs` measures plain SOCKS through two in-process instances, not the TLS or protocol outbounds, and its per-connection figure includes both instances and the test's echo server.
