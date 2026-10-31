@@ -19,8 +19,16 @@ use crate::httpx::MAX_HEAD;
 /// One XMUX slot's idle upload connections.
 #[derive(Default)]
 pub struct H1Conn {
-    idle: Mutex<Vec<(WriteHalf<Stream>, Arc<AtomicBool>)>>,
+    idle: Mutex<Vec<Upload>>,
     dead: AtomicBool,
+}
+
+/// An upload connection. Its socket closes only once both halves are gone,
+/// so dropping it also stops the task reading its responses.
+struct Upload {
+    w: WriteHalf<Stream>,
+    dead: Arc<AtomicBool>,
+    _reader: super::AbortOnDrop,
 }
 
 impl H1Conn {
@@ -37,20 +45,25 @@ impl H1Conn {
         loop {
             let reused = {
                 let mut idle = self.idle.lock().unwrap();
-                idle.retain(|(_, dead)| !dead.load(Ordering::Relaxed));
+                idle.retain(|u| !u.dead.load(Ordering::Relaxed));
                 idle.pop()
             };
             let fresh = reused.is_none();
-            let (mut w, dead) = match reused {
-                Some(c) => c,
+            let mut up = match reused {
+                Some(u) => u,
                 None => {
                     let s = dialer.connect().await?;
                     let (r, w) = tokio::io::split(s);
                     let dead = Arc::new(AtomicBool::new(false));
-                    tokio::spawn(drain_responses(r, dead.clone()));
-                    (w, dead)
+                    let reader = super::AbortOnDrop(tokio::spawn(drain_responses(r, dead.clone())));
+                    Upload {
+                        w,
+                        dead,
+                        _reader: reader,
+                    }
                 }
             };
+            let w = &mut up.w;
             match async {
                 // In pieces, so the deadline is on progress rather than the
                 // whole request.
@@ -62,11 +75,11 @@ impl H1Conn {
             .await
             {
                 Ok(()) => {
-                    self.idle.lock().unwrap().push((w, dead));
+                    self.idle.lock().unwrap().push(up);
                     return Ok(());
                 }
                 Err(e) if fresh => return Err(e),
-                Err(_) => dead.store(true, Ordering::Relaxed),
+                Err(_) => up.dead.store(true, Ordering::Relaxed),
             }
         }
     }
