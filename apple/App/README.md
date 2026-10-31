@@ -39,12 +39,31 @@ the toggle loads and starts the VPN configuration itself. Packet tunnels do not
 run in simulators.
 
 The icon is drawn by `apple/tools/make-icon.swift`; re-run it to regenerate
-`AppIcon.appiconset/icon-1024.png`.
+`AppIcon.appiconset/icon-1024.png`. `make-icon.swift --glyph App/Assets.xcassets`
+regenerates the macOS menu bar glyphs from the same arch.
+
+## macOS menu bar
+
+On macOS sbr is a menu bar app. It has no Dock icon until its window is open,
+and the window opens only when asked (from the menu, by opening the app again,
+or when a profile link arrives), never at launch or login. The status item is
+the arch, with its light while the tunnel is connected. The menu connects and
+disconnects, switches profiles and shows errors from the background.
+
+The app delegate owns the tunnel and profile models, so launching at login
+loads them and keeps the VPN configuration pointed at the active profile with
+no window. **launch at login** registers the app with `SMAppService`. The
+Developer ID build offers it only from `/Applications`, since its system
+extension cannot be activated from anywhere else.
+
+While the system extension waits for approval, connecting reports it and the
+menu links to the settings pane, rather than waiting.
 
 ## Profiles
 
 A profile is a sing-box config. Remote profiles keep their URL and re-download
-when the app comes to the front after `autoUpdateMinutes` (60, as in sing-box).
+when the app comes to the front (on macOS, when its window opens) after
+`autoUpdateMinutes` (60, as in sing-box).
 The app sets no background timers for this. Profiles can be added from:
 
 - a `sing-box://import-remote-profile?url=<encoded>#<name>` link, which is
@@ -80,7 +99,8 @@ Keychain item in the group (profiles, the index and the tunnel's downloaded
 copy), stops and removes the VPN configuration, clears the app's settings,
 personal rules, trusted networks and saved logs, and, if the tunnel is
 connected, has it delete its own files (cache file, rule-set cache, session
-logs). The app stays installed. Keychain items outlive deleting the app on iOS,
+logs). On macOS it also removes the login item. The app stays installed, and so
+does `SbrMac`'s system extension, until the app is deleted. Keychain items outlive deleting the app on iOS,
 so erase before deleting it. What erasing leaves behind is listed in
 `docs/threat-model.md` under "Device seizure".
 

@@ -13,7 +13,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let tunnel = TunnelModel()
     let profiles = ProfileStore()
     let window = MainWindow()
-    private lazy var started = Task { await AppFlow.start(tunnel: tunnel, profiles: profiles) }
+    private lazy var started = Task {
+        await AppFlow.start(tunnel: tunnel, profiles: profiles)
+        // The active profile can change with the window closed: from the
+        // menu, or when a remote profile refreshes. objectWillChange fires
+        // before the change lands, hence the hop; apply ignores the fires
+        // that leave the active profile as it was.
+        tracking = profiles.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [unowned self] _ in
+                Task { await AppFlow.applyActive(tunnel: tunnel, profiles: profiles) }
+            }
+    }
     private var tracking: AnyCancellable?
 
     /// Everything that acts on the tunnel or profiles waits for launch to
@@ -27,17 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        Task {
-            await ready()
-            // The active profile can change with the window closed: from the
-            // menu, or when a remote profile refreshes.
-            tracking = profiles.$activeText.combineLatest(profiles.$activeRemote)
-                .dropFirst()
-                .receive(on: DispatchQueue.main)
-                .sink { [unowned self] _ in
-                    Task { await AppFlow.applyActive(tunnel: tunnel, profiles: profiles) }
-                }
-        }
+        _ = started
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -58,14 +59,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 /// The main window, opened from outside SwiftUI (the delegate) through the
-/// action a SwiftUI view hands it.
+/// action a SwiftUI view hands it. A request that arrives before any view
+/// has done so is kept until one does.
 @MainActor
 final class MainWindow {
     static let id = "main"
-    var openAction: OpenWindowAction?
+    private var openAction: OpenWindowAction?
+    private var requested = false
+
+    func attach(_ action: OpenWindowAction) {
+        openAction = action
+        if requested { open() }
+    }
 
     func open() {
-        openAction?(id: Self.id)
+        guard let openAction else {
+            requested = true
+            return
+        }
+        requested = false
+        openAction(id: Self.id)
         NSApp.activate()
     }
 }
@@ -76,7 +89,10 @@ extension View {
         onAppear {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate()
-            Task { await AppFlow.sync(tunnel: delegate.tunnel, profiles: delegate.profiles) }
+            Task {
+                await delegate.ready()
+                await AppFlow.sync(tunnel: delegate.tunnel, profiles: delegate.profiles)
+            }
         }
         .onDisappear { NSApp.setActivationPolicy(.accessory) }
     }
@@ -98,7 +114,7 @@ struct MenuBarLabel: View {
     var body: some View {
         Image(tunnel.isConnected ? "MenuBarOn" : "MenuBarOff")
             .accessibilityLabel(tunnel.isConnected ? "sbr, connected" : "sbr, disconnected")
-            .onAppear { delegate.window.openAction = openWindow }
+            .onAppear { delegate.window.attach(openWindow) }
     }
 }
 
@@ -107,8 +123,8 @@ struct MenuBarContent: View {
     @EnvironmentObject private var tunnel: TunnelModel
     @EnvironmentObject private var profiles: ProfileStore
     @Environment(\.openWindow) private var openWindow
-    /// SMAppService.Status is not observable; bumped after each change so
-    /// the toggle re-reads it.
+    /// SMAppService.Status is not observable. The menu re-reads it whenever
+    /// the tunnel model changes, and this forces a re-read after the toggle.
     @State private var loginItemRevision = 0
 
     var body: some View {
@@ -152,7 +168,7 @@ struct MenuBarContent: View {
     }
 
     private func open() {
-        delegate.window.openAction = openWindow
+        delegate.window.attach(openWindow)
         delegate.window.open()
     }
 
@@ -181,7 +197,15 @@ struct MenuBarContent: View {
                 get: { status == .enabled },
                 set: { on in
                     Task {
-                        await act { on ? try SMAppService.mainApp.register() : try await SMAppService.mainApp.unregister() }
+                        do {
+                            if on {
+                                try SMAppService.mainApp.register()
+                            } else if SMAppService.mainApp.status == .enabled {
+                                try await SMAppService.mainApp.unregister()
+                            }
+                        } catch {
+                            tunnel.errorMessage = error.localizedDescription
+                        }
                         loginItemRevision += 1
                     }
                 }

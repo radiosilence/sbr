@@ -1,8 +1,9 @@
 // Renders the sbr app icon: a brush-drawn archway on near-black with a mint
-// light at its threshold, in kōan's palette.
-// With --glyph, it instead writes the macOS menu bar glyphs into an asset
-// catalog: the same arch as black-on-clear template PDFs, with the light
-// (MenuBarOn) and without it (MenuBarOff).
+// light at its threshold, in kōan's palette. With --glyph, it instead writes
+// the macOS menu bar glyphs into an asset catalog: the same arch as
+// black-on-clear template PDFs, with the light (MenuBarOn) and without it
+// (MenuBarOff).
+//
 // Usage: swift apple/tools/make-icon.swift <out.png> [size]
 //        swift apple/tools/make-icon.swift --glyph <Assets.xcassets>
 import CoreGraphics

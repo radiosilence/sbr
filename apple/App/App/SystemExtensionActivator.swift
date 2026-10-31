@@ -17,6 +17,9 @@ final class SystemExtensionActivator: NSObject, OSSystemExtensionRequestDelegate
 
     static let approvalNeeded = SbrError("allow sbr's network extension in System Settings, then connect again")
 
+    /// Called whenever `awaitingApproval` changes, including when the user
+    /// allows the extension long after the request that asked.
+    static var approvalChanged: (() -> Void)?
     static var awaitingApproval: Bool { pending != nil }
 
     static func activate(identifier: String) async throws {
@@ -39,7 +42,10 @@ final class SystemExtensionActivator: NSObject, OSSystemExtensionRequestDelegate
     }
 
     private func finish(_ result: Result<Void, Error>) {
-        if Self.pending === self { Self.pending = nil }
+        if Self.pending === self {
+            Self.pending = nil
+            Self.approvalChanged?()
+        }
         continuation?.resume(with: result)
         continuation = nil
     }
@@ -55,6 +61,7 @@ final class SystemExtensionActivator: NSObject, OSSystemExtensionRequestDelegate
     nonisolated func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
         MainActor.assumeIsolated {
             Self.pending = self
+            Self.approvalChanged?()
             continuation?.resume(throwing: Self.approvalNeeded)
             continuation = nil
         }

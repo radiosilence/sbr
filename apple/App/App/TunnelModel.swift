@@ -147,6 +147,11 @@ final class TunnelModel: ObservableObject {
     var isConnected: Bool { status == .connected }
 
     func load() async {
+        #if SBR_SYSTEM_EXTENSION
+        SystemExtensionActivator.approvalChanged = { [weak self] in
+            self?.needsApproval = SystemExtensionActivator.awaitingApproval
+        }
+        #endif
         do {
             let all = try await NETunnelProviderManager.loadAllFromPreferences()
             manager = all.first {
@@ -347,7 +352,6 @@ final class TunnelModel: ObservableObject {
     private func install(onDemand: Bool? = nil) async throws {
         guard config != nil else { throw SbrError("no profile selected") }
         #if SBR_SYSTEM_EXTENSION
-        defer { needsApproval = SystemExtensionActivator.awaitingApproval }
         try await SystemExtensionActivator.activate(identifier: AppConfig.tunnelBundleIdentifier)
         #endif
         let m = manager ?? NETunnelProviderManager()
