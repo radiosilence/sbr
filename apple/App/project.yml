@@ -231,6 +231,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID).mac.tunnel
+        # A system extension's bundle is named for its identifier, which is
+        # where the system looks for it inside the app.
+        PRODUCT_NAME: $(PRODUCT_BUNDLE_IDENTIFIER)
         CODE_SIGN_ENTITLEMENTS: SystemExtension/SystemExtension.entitlements
         ENABLE_HARDENED_RUNTIME: YES
       configs:
