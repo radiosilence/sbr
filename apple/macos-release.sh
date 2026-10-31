@@ -119,10 +119,17 @@ package)
   [ -f "$zip" ] || { echo "$zip is missing: run the build step" >&2; exit 1; }
   rm -rf "$out/sbr.app" "$out/dmg"
   ditto -x -k "$zip" "$out"
-  mkdir -p "$out/dmg"
-  ditto "$out/sbr.app" "$out/dmg/sbr.app"
-  ln -s /Applications "$out/dmg/Applications"
-  hdiutil create -quiet -volname sbr -srcfolder "$out/dmg" -fs HFS+ -format UDZO -ov "$dmg"
+  # The window's background at 1x and 2x, paired into one TIFF, and the
+  # volume icon from the app icon's macOS sizes, named as an .iconset's are.
+  mkdir -p "$out/dmg/AppIcon.iconset"
+  swift ../tools/make-icon.swift --dmg-background App/Resources/geist-mono.woff2 "$out/dmg"
+  tiffutil -cathidpicheck "$out/dmg/background.png" "$out/dmg/background@2x.png" -out "$out/dmg/background.tiff" >/dev/null
+  cp App/Assets.xcassets/AppIcon.appiconset/icon_*.png "$out/dmg/AppIcon.iconset/"
+  iconutil -c icns "$out/dmg/AppIcon.iconset" -o "$out/dmg/AppIcon.icns"
+  rm -f "$dmg"
+  uvx --from dmgbuild==1.6.7 dmgbuild -s ../dmg/settings.py \
+    -D app="$out/sbr.app" -D background="$out/dmg/background.tiff" -D volume_icon="$out/dmg/AppIcon.icns" \
+    sbr "$dmg"
   codesign --force --timestamp --sign "$(identity)" "$dmg"
   echo "packaged $dmg"
   ;;

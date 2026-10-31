@@ -198,6 +198,7 @@ targets:
         # Its own profiles, apart from the App Store build's on the same Mac.
         SBR_KEYCHAIN_GROUP: $(AppIdentifierPrefix)$(SBR_BUNDLE_ID).mac
         CODE_SIGN_ENTITLEMENTS: App/App-macOS-SystemExtension.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_OBJC_BRIDGING_HEADER: App/Bridging.h
         OTHER_LDFLAGS: $(inherited) -lresolv
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) SBR_SYSTEM_EXTENSION

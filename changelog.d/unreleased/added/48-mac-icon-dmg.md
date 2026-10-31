@@ -1,0 +1,1 @@
+- **Mac app icon and disk image layout.** The Developer ID macOS app has an icon drawn for macOS's unmasked tile, and its disk image opens to a laid-out window with the app beside an Applications link, instead of a bare folder.

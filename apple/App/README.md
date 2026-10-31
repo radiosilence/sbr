@@ -49,8 +49,13 @@ the toggle loads and starts the VPN configuration itself. Packet tunnels do not
 run in simulators.
 
 The icon is drawn by `apple/tools/make-icon.swift`; re-run it to regenerate
-`AppIcon.appiconset/icon-1024.png`. `make-icon.swift --glyph App/Assets.xcassets`
-regenerates the macOS menu bar glyphs from the same arch.
+`AppIcon.appiconset/icon-1024.png`. macOS draws app icons unmasked, so
+`make-icon.swift --mac App/Assets.xcassets/AppIcon.appiconset` renders the
+macOS sizes into the same set: the artwork on the standard rounded tile, with
+the icon grid's transparent margin and drop shadow. `make-icon.swift --glyph
+App/Assets.xcassets` regenerates the macOS menu bar glyphs from the same arch,
+and `--dmg-background` draws the disk image window's background, which
+`apple/macos-release.sh package` renders at build time.
 
 ## macOS menu bar
 
