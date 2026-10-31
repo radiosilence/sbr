@@ -28,7 +28,7 @@ use serde_json::Value;
 
 pub use dns::*;
 pub use experimental::{CacheFileOptions, ClashApiOptions, Experimental, split_host_port};
-pub use proxies::{AnyTlsOutbound, ShadowTlsOutbound, UdpOverTcp};
+pub use proxies::{AnyTlsOutbound, ShadowTlsOutbound, SshOutbound, UdpOverTcp};
 pub use proxy::{PacketEncoding, TrojanOutbound, V2rayCommon, VlessOutbound, VmessOutbound};
 pub use quic::{Hysteria2Outbound, QuicOptions, TuicCongestion, TuicOutbound, TuicUdpRelay};
 pub use route::*;
@@ -176,6 +176,7 @@ pub enum OutboundKind {
     UrlTest(UrlTest),
     ShadowTls(ShadowTlsOutbound),
     AnyTls(AnyTlsOutbound),
+    Ssh(SshOutbound),
     /// From `endpoints[]`; endpoints share the outbound tag namespace and
     /// are appended after the outbounds.
     WireGuard(Box<WireGuardEndpoint>),
@@ -198,6 +199,7 @@ impl OutboundKind {
             Self::UrlTest(_) => "urltest",
             Self::ShadowTls(_) => "shadowtls",
             Self::AnyTls(_) => "anytls",
+            Self::Ssh(_) => "ssh",
             Self::WireGuard(_) => "wireguard",
         }
     }
@@ -439,6 +441,7 @@ impl Options {
                 OutboundKind::Tuic(t) => Some(&t.dial),
                 OutboundKind::ShadowTls(s) => Some(&s.dial),
                 OutboundKind::AnyTls(s) => Some(&s.dial),
+                OutboundKind::Ssh(s) => Some(&s.dial),
                 OutboundKind::WireGuard(w) => Some(&w.dial),
                 OutboundKind::Selector(g) => {
                     for t in &g.outbounds {
@@ -962,6 +965,7 @@ fn parse_outbound(mut o: Obj, i: usize, diag: &mut Diag) -> Result<Outbound> {
         "tuic" => OutboundKind::Tuic(quic::parse_tuic(&mut o, diag)?),
         "shadowtls" => OutboundKind::ShadowTls(proxies::parse_shadowtls(&mut o, diag)?),
         "anytls" => OutboundKind::AnyTls(proxies::parse_anytls(&mut o, diag)?),
+        "ssh" => OutboundKind::Ssh(proxies::parse_ssh(&mut o, diag)?),
         "wireguard" => {
             return Err(Error::at(
                 &o.sub("type"),

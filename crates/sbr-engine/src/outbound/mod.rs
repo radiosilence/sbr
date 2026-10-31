@@ -11,6 +11,7 @@ pub(crate) mod quic;
 mod shadowsocks;
 mod shadowtls;
 mod socks;
+mod ssh;
 mod tlsmini;
 mod trojan;
 mod tuic;
@@ -180,6 +181,7 @@ fn server_of(kind: &OutboundKind) -> Option<(&sbr_config::ServerAddr, &Dial)> {
         OutboundKind::Shadowsocks(s) => Some((&s.server, &s.dial)),
         OutboundKind::ShadowTls(s) => Some((&s.server, &s.dial)),
         OutboundKind::AnyTls(a) => Some((&a.server, &a.dial)),
+        OutboundKind::Ssh(s) => Some((&s.server, &s.dial)),
         OutboundKind::Trojan(c) => Some((&c.common.server, &c.common.dial)),
         OutboundKind::Vless(c) => Some((&c.common.server, &c.common.dial)),
         OutboundKind::Vmess(c) => Some((&c.common.server, &c.common.dial)),
@@ -299,6 +301,9 @@ impl Builder<'_> {
                 Arc::new(shadowtls::ShadowTls::new(tag, s, self.upstream(&s.dial)?).map_err(invalid)?)
             }
             OutboundKind::AnyTls(a) => Arc::new(anytls::AnyTls::new(tag, a, self.upstream(&a.dial)?).map_err(invalid)?),
+            OutboundKind::Ssh(s) => {
+                Arc::new(ssh::Ssh::new(tag, s, self.upstream(&s.dial)?, self.ctx).map_err(invalid)?)
+            }
             OutboundKind::UrlTest(g) => {
                 let members = g.outbounds.iter().map(|t| self.dep(t)).collect::<Result<Vec<_>, _>>()?;
                 let u = UrlTest::new(tag.clone(), members, g, self.ctx.groups.clone()).map_err(invalid)?;

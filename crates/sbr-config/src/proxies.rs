@@ -131,3 +131,79 @@ pub(crate) fn parse_anytls(o: &mut Obj, diag: &mut Diag) -> Result<AnyTlsOutboun
         client_metadata: o.string("client_metadata")?,
     })
 }
+
+/// sing-box `ssh` outbound.
+#[derive(Debug, Clone)]
+pub struct SshOutbound {
+    pub server: ServerAddr,
+    pub dial: Dial,
+    pub user: String,
+    pub password: Option<String>,
+    /// PEM text: `private_key` (lines joined) or the file at `private_key_path`.
+    pub private_key: Option<String>,
+    pub private_key_path: Option<String>,
+    pub private_key_passphrase: Option<String>,
+    /// `authorized_keys`-format lines (`ssh-ed25519 AAAA…`).
+    pub host_key: Vec<String>,
+    pub host_key_algorithms: Vec<String>,
+    pub client_version: Option<String>,
+}
+
+pub(crate) fn parse_ssh(o: &mut Obj, diag: &mut Diag) -> Result<SshOutbound> {
+    let server: String = o.req("server")?;
+    if server.is_empty() {
+        return Err(Error::at(&o.sub("server"), "empty server address"));
+    }
+    let server_port = o.opt::<u16>("server_port")?.filter(|&p| p != 0).unwrap_or(22);
+    let dial = parse_dial(o, diag)?;
+    let private_key: Vec<String> = o.list("private_key")?;
+    let private_key = (!private_key.is_empty()).then(|| private_key.join("\n"));
+    let private_key_path = o.string("private_key_path")?;
+    if private_key.is_some() && private_key_path.is_some() {
+        return Err(Error::at(
+            &o.sub("private_key_path"),
+            "private_key and private_key_path are mutually exclusive",
+        ));
+    }
+    let host_key: Vec<String> = o.list("host_key")?;
+    let host_key: Vec<String> = host_key
+        .into_iter()
+        .map(|k| k.trim().to_owned())
+        .filter(|k| !k.is_empty())
+        .collect();
+    for (i, k) in host_key.iter().enumerate() {
+        if k.split_whitespace().count() < 2 {
+            return Err(Error::at(
+                &format!("{}[{i}]", o.sub("host_key")),
+                "expected an authorized_keys line: \"<algorithm> <base64> [comment]\"",
+            ));
+        }
+    }
+    if host_key.is_empty() {
+        diag.warnings.push(format!(
+            "{}: no host_key, so any server key is accepted and the server can be impersonated",
+            o.path()
+        ));
+    }
+    let client_version = o.string("client_version")?;
+    if let Some(v) = &client_version
+        && (!v.starts_with("SSH-2.0-") || v.contains(['\r', '\n']) || v.len() > 253)
+    {
+        return Err(Error::at(
+            &o.sub("client_version"),
+            "must start with \"SSH-2.0-\", fit in 253 bytes and contain no line breaks",
+        ));
+    }
+    Ok(SshOutbound {
+        server: ServerAddr { server, server_port },
+        dial,
+        user: o.string("user")?.unwrap_or_else(|| "root".into()),
+        password: o.string("password")?,
+        private_key,
+        private_key_path,
+        private_key_passphrase: o.string("private_key_passphrase")?,
+        host_key,
+        host_key_algorithms: o.list("host_key_algorithms")?,
+        client_version,
+    })
+}
