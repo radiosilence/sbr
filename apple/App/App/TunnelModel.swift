@@ -121,10 +121,21 @@ final class TunnelModel: ObservableObject {
         rules = next
         UserDefaults.standard.set(SbrPersonalRules.encode(next), forKey: "personalRules")
         guard manager != nil, config != nil else { return }
+        await saveAndReload()
+    }
+
+    /// Save the VPN configuration and hand a running tunnel the profile and
+    /// rules. The running tunnel takes them even when saving failed; the
+    /// next connect saves again (installFailed).
+    private func saveAndReload() async {
         do {
             try await install()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        do {
             if isConnected, let session {
-                groups = try await session.send(.reload(config: config, remote: remote, logLevel: logLevel, rules: next))
+                groups = try await session.send(.reload(config: config, remote: remote, logLevel: logLevel, rules: rules))
                     .groups ?? groups
             }
         } catch {
@@ -196,21 +207,7 @@ final class TunnelModel: ObservableObject {
         self.stored = stored
         profileStrict = config.map(Sbr.strictRoute) ?? false
         guard manager != nil, config != nil else { return }
-        do {
-            try await install()
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-        // A running tunnel takes the new profile even when saving it failed;
-        // the next connect saves it again (installFailed).
-        do {
-            if isConnected, let session {
-                groups = try await session.send(.reload(config: config, remote: remote, logLevel: logLevel, rules: rules))
-                    .groups ?? groups
-            }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        await saveAndReload()
     }
 
     func select(group: String, member: String) async {
