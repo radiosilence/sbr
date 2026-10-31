@@ -247,9 +247,13 @@ fn tun_dns_in_cleartext_outside_the_tunnel_warns() {
     )
     .unwrap();
     let w: Vec<_> = o.warnings.iter().filter(|w| w.starts_with("dns.servers")).collect();
-    assert_eq!(w.len(), 1, "{w:?}");
+    assert_eq!(w.len(), 2, "{w:?}");
     assert!(
         w[0].starts_with("dns.servers[0] (plain): sends queries in cleartext"),
+        "{w:?}"
+    );
+    assert!(
+        w[1].starts_with("dns.servers[3] (via-direct): sends queries in cleartext"),
         "{w:?}"
     );
 }
