@@ -95,7 +95,9 @@ impl UotConn {
         };
         let (r, w) = tokio::io::split(stream);
         Ok(Self {
-            reader: Mutex::new(BufReader::with_capacity(16 * 1024, r)),
+            // Only the small header reads use this buffer: a payload read at
+            // least this long bypasses it.
+            reader: Mutex::new(BufReader::with_capacity(2048, r)),
             writer: Mutex::new(Writer {
                 w,
                 buf: Vec::with_capacity(2048),
@@ -126,13 +128,17 @@ impl PacketConn for UotConn {
     fn recv_from<'a>(&'a self, buf: &'a mut [u8]) -> BoxFuture<'a, io::Result<(usize, Destination)>> {
         Box::pin(async move {
             let mut r = self.reader.lock().await;
-            let from = read_addr(&mut *r).await?;
-            let len = r.read_u16().await? as usize;
-            if len > buf.len() {
-                return Err(socks5::invalid("UoT: datagram larger than the receive buffer"));
+            loop {
+                let from = read_addr(&mut *r).await?;
+                let len = r.read_u16().await? as usize;
+                if len > buf.len() {
+                    // Too big for the caller: drop it and keep the session.
+                    super::proto::discard(&mut *r, len).await?;
+                    continue;
+                }
+                r.read_exact(&mut buf[..len]).await?;
+                return Ok((len, from));
             }
-            r.read_exact(&mut buf[..len]).await?;
-            Ok((len, from))
         })
     }
 }

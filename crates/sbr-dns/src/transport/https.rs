@@ -90,7 +90,12 @@ impl Https {
         if alpn.as_deref() != Some(b"h2") {
             return Err(io::Error::other("DoH server did not negotiate HTTP/2"));
         }
-        let (send, conn) = h2::client::handshake(stream).await.map_err(h2err)?;
+        // h2's default header limit is 16 MiB; a DNS answer's headers are tiny.
+        let (send, conn) = h2::client::Builder::new()
+            .max_header_list_size(16 * 1024)
+            .handshake(stream)
+            .await
+            .map_err(h2err)?;
         let dead = Arc::new(AtomicBool::new(false));
         {
             let dead = dead.clone();

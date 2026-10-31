@@ -15,11 +15,11 @@ use h3::client::{RequestStream, SendRequest};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::OnceCell;
 
-use crate::outbound::quic::{self, Dialer, Tuning, Usage, UseGuard, io_err};
+use crate::outbound::quic::{self, Dialer, Tuning, Usage, UseGuard, h3guard, io_err};
 
-type Send3 = SendRequest<h3_quinn::OpenStreams, Bytes>;
+type Send3 = SendRequest<h3guard::OpenStreams, Bytes>;
 type ReqSend = RequestStream<h3_quinn::SendStream<Bytes>, Bytes>;
-type ReqRecv = RequestStream<h3_quinn::RecvStream, Bytes>;
+type ReqRecv = RequestStream<h3guard::RecvStream, Bytes>;
 type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 /// quic-go's default idle timeout, which the Xray server applies.
@@ -34,7 +34,6 @@ const CONN_WINDOW: u64 = 16 << 20;
 struct Session {
     send: Send3,
     usage: Arc<Usage>,
-    _endpoint: quinn::Endpoint,
 }
 
 #[derive(Default)]
@@ -69,7 +68,8 @@ impl H3Conn {
                 .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "xhttp: QUIC handshake timed out"))?
                 .map_err(io_err)?;
             let (mut driver, send) = h3::client::builder()
-                .build::<_, _, Bytes>(h3_quinn::Connection::new(conn.clone()))
+                .max_field_section_size(crate::transport::MAX_RESPONSE_HEADERS.into())
+                .build::<_, _, Bytes>(h3guard::Connection::new(conn.clone()))
                 .await
                 .map_err(io_err)?;
             let dead = self.dead.clone();
@@ -81,14 +81,10 @@ impl H3Conn {
             let (dead, watched) = (self.dead.clone(), conn.clone());
             let u = usage.clone();
             tokio::spawn(async move {
-                quic::watch(watched, u, IDLE, None).await;
+                quic::watch(watched, u, Arc::new(std::sync::Mutex::new(Some(endpoint))), IDLE, None).await;
                 dead.store(true, Ordering::Relaxed);
             });
-            Ok(Session {
-                send,
-                usage,
-                _endpoint: endpoint,
-            })
+            Ok(Session { send, usage })
         }
         .await;
         if r.is_err() {
@@ -281,10 +277,14 @@ pub async fn post(
     req: http::Request<()>,
     body: Bytes,
 ) -> io::Result<(ReqRecv, UseGuard)> {
-    let (mut tx, rx, guard) = conn.request(dialer, keepalive, req).await?;
-    if !body.is_empty() {
-        tx.send_data(body).await.map_err(io_err)?;
+    use super::progress;
+    let (mut tx, rx, guard) = progress("upload request", conn.request(dialer, keepalive, req)).await?;
+    // In pieces, so the deadline is on progress rather than the whole body.
+    let mut body = body;
+    while !body.is_empty() {
+        let piece = body.split_to(body.len().min(16 * 1024));
+        progress("upload", async { tx.send_data(piece).await.map_err(io_err) }).await?;
     }
-    tx.finish().await.map_err(io_err)?;
+    progress("upload", async { tx.finish().await.map_err(io_err) }).await?;
     Ok((rx, guard))
 }
