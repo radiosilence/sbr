@@ -793,6 +793,48 @@ mod tests {
         Codec::new(SEC_AES128GCM, option, &[1; 16], &[2; 16], &[3; 16], &[4; 16], may_wrap)
     }
 
+    /// A chunk larger than the read buffer grows it; once read, the buffer
+    /// shrinks back and later chunks still parse.
+    #[tokio::test]
+    async fn read_buffer_shrinks_after_a_large_chunk() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (client, mut server) = tokio::io::duplex(1 << 20);
+        let mut s = VmessStream {
+            inner: client,
+            wcodec: codec(false, false),
+            rcodec: codec(false, false),
+            header: None,
+            wbuf: Vec::new(),
+            wpos: 0,
+            read_flushes: false,
+            resp_key: [0; 16],
+            resp_nonce: [0; 16],
+            rstate: ReadState::Len,
+            rbuf: vec![0; RBUF],
+            rpos: 0,
+            rend: 0,
+            chunk: MAX_CHUNK,
+            datagrams: false,
+        };
+        let mut w = codec(false, false);
+        let big = vec![7u8; 40_000];
+        let mut wire = Vec::new();
+        for chunk in [&big[..], b"second", b"third"] {
+            w.encode(chunk, &mut wire).unwrap();
+        }
+        server.write_all(&wire).await.unwrap();
+        let mut got = Vec::new();
+        let mut buf = vec![0u8; 16 * 1024];
+        while got.len() < big.len() + 11 {
+            let n = s.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(&got[..big.len()], &big[..]);
+        assert_eq!(&got[big.len()..], b"secondthird");
+        assert_eq!(s.rbuf.len(), RBUF);
+    }
+
     /// The 65,536th chunk is the last one: the next would reuse chunk 0's
     /// nonce, so without TLS both directions stop there.
     #[test]
