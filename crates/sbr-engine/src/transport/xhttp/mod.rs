@@ -31,7 +31,7 @@ use bytes::{Bytes, BytesMut};
 use sbr_config::{PaddingMethod, Placement, Range, TlsOutbound, Xhttp, XhttpMode};
 use sbr_core::{Destination, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, WriteHalf};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 use tracing::debug;
 
 use self::browser::{Headers, padding, request_headers, set};
@@ -576,7 +576,7 @@ impl XhttpClient {
             let shared = Arc::new(UpShared {
                 st: Mutex::new(UpState {
                     buf: BytesMut::new(),
-                    cap: max,
+                    cap: if crate::MOBILE { max.min(MOBILE_UP_BUFFER) } else { max },
                     closed: false,
                     err: None,
                     waker: None,
@@ -610,6 +610,24 @@ fn session_id(c: &Xhttp) -> String {
     b[8] = (b[8] & 0x3f) | 0x80;
     let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
     format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
+/// Upload bytes buffered per packet-up stream where memory is capped (the
+/// iOS extension). Posts are cut from what is buffered, so they get smaller
+/// rather than the buffer reaching `scMaxEachPostBytes` (1 MB by default)
+/// with another in flight.
+const MOBILE_UP_BUFFER: usize = 256 * 1024;
+/// Packet-up POSTs whose responses are still awaited, per stream. Without a
+/// bound, a server that takes the bodies but delays the responses gathers
+/// one task and one HTTP stream per post interval.
+const MAX_POSTS_IN_FLIGHT: usize = 8;
+/// Deadline for sending one packet-up POST, and for its response. A server
+/// that stops reading would otherwise hold the upload task, and the buffered
+/// bytes, until the connection dies.
+const POST_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn timed_out(what: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, format!("xhttp: {what} timed out"))
 }
 
 struct UpState {
@@ -687,6 +705,7 @@ async fn packet_uploader(ep: Arc<Endpoint>, mut slot: SlotRef, session: String, 
     let interval = ep.cfg.sc_min_posts_interval_ms.or(Range::new(30, 30));
     let mut last: Option<Instant> = None;
     let mut seq: u64 = 0;
+    let in_flight = Arc::new(Semaphore::new(MAX_POSTS_IN_FLIGHT));
     loop {
         let chunk = loop {
             let notified = shared.notify.notified();
@@ -716,62 +735,73 @@ async fn packet_uploader(ep: Arc<Endpoint>, mut slot: SlotRef, session: String, 
             tokio::time::sleep_until((t + wait).into()).await;
         }
         last = Some(Instant::now());
+        let Ok(permit) = in_flight.clone().acquire_owned().await else {
+            return;
+        };
         if !slot.take_request() {
             slot = ep.slot();
         }
         let (req, body) = ep.packet_request(&session, seq, chunk);
         seq += 1;
-        let r = match &slot.conn {
-            Conn::H2(c) => {
-                let len = body.len();
-                let has_len = len > 0 || matches!(req.method.as_str(), "POST" | "PUT" | "PATCH");
-                async {
-                    let hreq = ep.h2_request(&req, has_len.then_some(len))?;
-                    let (resp, mut send) = c.request(&ep.dialer, ep.keepalive, hreq, body.is_empty()).await?;
-                    if !body.is_empty() {
-                        h2io::send_body(&mut send, body).await?;
+        let r = tokio::time::timeout(POST_TIMEOUT, async {
+            match &slot.conn {
+                Conn::H2(c) => {
+                    let len = body.len();
+                    let has_len = len > 0 || matches!(req.method.as_str(), "POST" | "PUT" | "PATCH");
+                    async {
+                        let hreq = ep.h2_request(&req, has_len.then_some(len))?;
+                        let (resp, mut send) = c.request(&ep.dialer, ep.keepalive, hreq, body.is_empty()).await?;
+                        if !body.is_empty() {
+                            h2io::send_body(&mut send, body).await?;
+                        }
+                        let shared = shared.clone();
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            let r = tokio::time::timeout(POST_TIMEOUT, h2io::drain(resp)).await;
+                            if let Err(e) = r.unwrap_or_else(|_| Err(timed_out("upload response"))) {
+                                shared.fail(format!("xhttp upload: {e}"));
+                            }
+                        });
+                        Ok::<_, io::Error>(())
                     }
-                    let shared = shared.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = h2io::drain(resp).await {
-                            shared.fail(format!("xhttp upload: {e}"));
-                        }
-                    });
-                    Ok::<_, io::Error>(())
+                    .await
                 }
-                .await
-            }
-            Conn::H3(c) => {
-                let len = body.len();
-                let has_len = len > 0 || matches!(req.method.as_str(), "POST" | "PUT" | "PATCH");
-                async {
-                    let hreq = ep.h2_request(&req, has_len.then_some(len))?;
-                    let d = ep.quic.as_ref().expect("HTTP/3 endpoint has a QUIC dialer");
-                    let (rx, guard) = h3io::post(c, d, ep.keepalive, hreq, body).await?;
-                    let shared = shared.clone();
-                    tokio::spawn(async move {
-                        let _guard = guard;
-                        if let Err(e) = h3io::drain(rx).await {
-                            shared.fail(format!("xhttp upload: {e}"));
-                        }
-                    });
-                    Ok::<_, io::Error>(())
+                Conn::H3(c) => {
+                    let len = body.len();
+                    let has_len = len > 0 || matches!(req.method.as_str(), "POST" | "PUT" | "PATCH");
+                    async {
+                        let hreq = ep.h2_request(&req, has_len.then_some(len))?;
+                        let d = ep.quic.as_ref().expect("HTTP/3 endpoint has a QUIC dialer");
+                        let (rx, guard) = h3io::post(c, d, ep.keepalive, hreq, body).await?;
+                        let shared = shared.clone();
+                        tokio::spawn(async move {
+                            let (_guard, _permit) = (guard, permit);
+                            let r = tokio::time::timeout(POST_TIMEOUT, h3io::drain(rx)).await;
+                            if let Err(e) = r.unwrap_or_else(|_| Err(timed_out("upload response"))) {
+                                shared.fail(format!("xhttp upload: {e}"));
+                            }
+                        });
+                        Ok::<_, io::Error>(())
+                    }
+                    .await
                 }
-                .await
+                Conn::H1(c) => {
+                    let len = body.len();
+                    let has_len = len > 0 || matches!(req.method.as_str(), "POST" | "PUT" | "PATCH");
+                    let kind = if has_len {
+                        h1::BodyKind::Length(len)
+                    } else {
+                        h1::BodyKind::None
+                    };
+                    let mut bytes = ep.h1_head(&req, kind, false);
+                    bytes.extend_from_slice(&body);
+                    drop(permit);
+                    c.post(&ep.dialer, &bytes).await
+                }
             }
-            Conn::H1(c) => {
-                let len = body.len();
-                let has_len = len > 0 || matches!(req.method.as_str(), "POST" | "PUT" | "PATCH");
-                let kind = if has_len {
-                    h1::BodyKind::Length(len)
-                } else {
-                    h1::BodyKind::None
-                };
-                let mut bytes = ep.h1_head(&req, kind, false);
-                bytes.extend_from_slice(&body);
-                c.post(&ep.dialer, &bytes).await
-            }
-        };
+        })
+        .await;
+        let r = r.unwrap_or_else(|_| Err(timed_out("upload")));
         if let Err(e) = r {
             slot.mark_closed();
             debug!(error = %e, "xhttp upload failed");
