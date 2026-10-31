@@ -84,3 +84,5 @@ sbr contacts only endpoints the config names. Never add a built-in default URL (
 ## Untrusted input
 
 Local apps, servers, the network and remote rule-sets are all hostile (`docs/security-audit.md`). A panic or an unbounded allocation kills the iOS extension and with it the tunnel, so every length field is checked before use and every table, queue and buffer driven by input has a cap in bytes, not only in entries. New parsers of untrusted bytes get a target in `fuzz/` (`cargo +nightly fuzz run -O <target>`).
+
+Library defaults are inputs too: h2 accepts 16 MiB of response headers, h3 buffers any frame other than DATA whole (`outbound/quic/h3guard.rs` refuses long ones), the regex crate compiles up to 10 MiB per set, and axum's `serve` has no connection limit or header timeout. Check what a new client, server or parser does by default, not only the settings you change. Every spawned task needs a path that stops it, and every resource it holds (a socket, an endpoint, a buffer) must be released when its owner closes, not when the next user arrives: `tests/resources.rs` checks tasks, file descriptors and heap after a round of connections.

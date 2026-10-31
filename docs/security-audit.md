@@ -82,3 +82,42 @@ Severity reflects impact for the intended users: a remote or local denial of ser
 - Connection tracking keeps no closed-connection history; the Clash API UI rejects path traversal.
 - At the default log level, destinations appear only in rejection and connect-failure messages, which the Apple log forwarding marks private.
 - `cargo deny`: no advisories or disallowed sources after the `lru` update; only duplicate versions.
+
+# Follow-up: memory, leaks and performance, 31 October 2026
+
+## Scope and method
+
+The whole Rust workspace again, for memory and resource leaks (tasks, sockets and timers nothing stops; caches and queues bounded in entries but not bytes), per-connection memory against the iOS extension's ~50 MB, hot-path allocation and copies, and memory safety in `unsafe` code and the C ABI. Two reviewers read every crate independently and then each other's half.
+
+- AddressSanitizer (nightly, `aarch64-apple-darwin`) over the test suites of every crate: no reports.
+- Each fuzz target for ten minutes with `-malloc_limit_mb=128`.
+- `crates/sbr-engine/tests/resources.rs`: 200 proxied connections through two instances under a counting allocator; heap per idle connection after bulk traffic, and tasks, file descriptors and heap after a second identical round, against the first.
+
+## Findings
+
+All fixed in #27 unless marked otherwise.
+
+| finding | area |
+|---|---|
+| A closed hysteria2, TUIC or xhttp/h3 connection kept its QUIC endpoint until the next dial: UDP socket, driver and port hopper (a re-resolve and rebind every hop interval) ran on an idle device. | QUIC |
+| `probe_rtt` opened an unpooled connection per urltest probe and left it open for the idle timeout; under TUIC 0-RTT it reported quinn's initial estimate, not a measurement. | QUIC |
+| h2 accepted 16 MiB of response headers and h3 any amount; h3 buffers every non-DATA frame whole before its size check. A frame guard under `h3_quinn` now refuses them. | HTTP/2, HTTP/3 |
+| UDP sessions whose outbound connection died stayed alive while the app kept sending, black-holing the flow until it fell silent. | UDP |
+| On a write timeout the AnyTLS session closed only after the writer lock was released, so a queued writer could write after a partial frame, which the server would parse as frames. Writes had no deadline at all before this audit. | AnyTLS |
+| AnyTLS: a 64 KiB write buffer per stream at open; receive queues capped at 32 frames of up to 64 KiB, not in bytes. | AnyTLS |
+| The DNS cache was bounded in entries and records, not bytes: 64 large TXT records under each of a thousand names. | DNS |
+| Rule-set regexes compiled with the regex crate's 10 MiB defaults. | Routing |
+| The Clash API accepted unlimited connections and never timed out headers (axum sets no hyper timer). | Clash API |
+| Without a Rust `main`, SIGPIPE killed the process: the system stack's TUN listener lacked `SO_NOSIGPIPE`, which accepted connections inherit. | Apple, TUN |
+| Crash breadcrumbs: no alternate signal stack outside a Rust `main`, so a stack overflow left none; the host's handlers were discarded; reinstalling raced writers on the old fd. | Apple |
+| The profile fetch callback ran under the instance lock (cancellation) or on the engine thread (result); a host calling back into sbr deadlocked. | C ABI |
+| The userspace TCP memory limit could miss a wakeup between its headroom check and registering a waiter (multi-thread runtimes). | TUN |
+| xhttp packet-up: 1 MB buffered per uploading stream plus one in flight; unbounded response-drain tasks; no deadline on a post. Idle XMUX slots were retired only by the next connection, so h2 keep-alive pings ran on an idle device. The h2 windows were not reduced on iOS. | xhttp |
+| A WireGuard device that stopped never restarted, and its detour readers and connections waited forever. | WireGuard |
+| Per-connection or per-packet waste: 16 KiB UDP-over-stream read buffers, VMess's read buffer kept at 64 KiB and a copy per sealed chunk, ShadowTLS v3's 128 KiB ring, a memmove of every UDP reply into the TUN. | Several |
+| An oversized datagram ended a UoT or TUIC-UoT UDP session; VMess UDP split long replies into two datagrams. | UDP |
+| Health events grew with the retry rate of one dead destination and were sorted on every report. | Health |
+| SOCKS5 UDP associations' sockets outlived the association; fetch left its connection driver running on error or timeout. | Inbound, fetch |
+| WireGuard's smoltcp rings stay committed at 512 KiB per connection after any long transfer. | Open: issue to file |
+
+Lower-priority items left as they are: per-datagram allocations in TUIC and hysteria2 sends, the QUIC per-session UDP queue counted in packets, `PinnedUdp`'s linear scan, the WebSocket read buffer's memset per refill, the userspace TCP's SACK block allocation, and the TUN writer's 1 ms retry sleeps on `ENOBUFS`.
