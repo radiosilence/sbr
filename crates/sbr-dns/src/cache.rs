@@ -24,6 +24,17 @@ const NAME_MAX: usize = 255;
 /// Answers with more records than this are not cached. Real answers carry a
 /// handful; round-robin pools a few dozen.
 const MAX_CACHED_RECORDS: usize = 64;
+/// Wire bytes cached across all entries. Entries are capped in count and
+/// records, but 64 TXT records under each of a thousand names an app makes up
+/// would still be tens of megabytes; a decoded message is larger again.
+const MAX_CACHED_BYTES: usize = if cfg!(any(target_os = "ios", target_os = "tvos", target_os = "visionos")) {
+    1 << 20
+} else {
+    8 << 20
+};
+/// Larger answers are not cached at all, so one cannot evict a large part
+/// of the cache.
+const MAX_CACHED_ANSWER: usize = 8 * 1024;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Key {
@@ -93,10 +104,25 @@ struct Entry {
     addrs: Arc<[IpAddr]>,
     /// `None`: never expires (`disable_expire`).
     expire: Option<Instant>,
+    /// Wire length, counted against [`MAX_CACHED_BYTES`].
+    size: usize,
+}
+
+struct Lru {
+    map: LruCache<u64, (Key, Entry)>,
+    bytes: usize,
+}
+
+impl Lru {
+    fn pop(&mut self, h: &u64) {
+        if let Some((_, e)) = self.map.pop(h) {
+            self.bytes -= e.size;
+        }
+    }
 }
 
 pub struct Cache {
-    lru: Mutex<LruCache<u64, (Key, Entry)>>,
+    lru: Mutex<Lru>,
     hasher: RandomState,
     disable_expire: bool,
     /// `optimistic` timeout: how long past expiry an entry may be served.
@@ -107,7 +133,10 @@ impl Cache {
     pub fn new(capacity: u32, disable_expire: bool, optimistic: Option<Duration>) -> Self {
         let cap = NonZeroUsize::new((capacity as usize).max(1024)).expect("non-zero");
         Self {
-            lru: Mutex::new(LruCache::new(cap)),
+            lru: Mutex::new(Lru {
+                map: LruCache::new(cap),
+                bytes: 0,
+            }),
             hasher: RandomState::new(),
             disable_expire,
             optimistic,
@@ -121,7 +150,7 @@ impl Cache {
     pub fn get(&self, k: &Key, now: Instant) -> Option<Hit> {
         let h = self.hash(k);
         let mut lru = self.lru.lock().unwrap();
-        let (key, e) = lru.get(&h)?;
+        let (key, e) = lru.map.get(&h)?;
         if key != k {
             return None;
         }
@@ -162,15 +191,33 @@ impl Cache {
         if ttl == 0 || records > MAX_CACHED_RECORDS {
             return;
         }
+        let Some(size) = msg.to_vec().ok().map(|w| w.len()).filter(|&n| n <= MAX_CACHED_ANSWER) else {
+            return;
+        };
         let h = self.hash(&k);
         let addrs: Arc<[IpAddr]> = crate::msg::answer_addrs(&msg).into();
         let expire = (!self.disable_expire).then(|| now + Duration::from_secs(ttl as u64));
-        self.lru.lock().unwrap().put(h, (k, Entry { msg, addrs, expire }));
+        let mut lru = self.lru.lock().unwrap();
+        lru.pop(&h);
+        while lru.bytes + size > MAX_CACHED_BYTES {
+            let Some((_, (_, e))) = lru.map.pop_lru() else { break };
+            lru.bytes -= e.size;
+        }
+        lru.bytes += size;
+        let entry = Entry {
+            msg,
+            addrs,
+            expire,
+            size,
+        };
+        if let Some((_, (_, evicted))) = lru.map.push(h, (k, entry)) {
+            lru.bytes -= evicted.size;
+        }
     }
 
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.lru.lock().unwrap().len()
+        self.lru.lock().unwrap().map.len()
     }
 }
 
@@ -302,6 +349,37 @@ mod tests {
         assert_eq!(c.len(), 1024);
         assert!(c.get(&Key::from_str(0, "h0.test", 1, None).unwrap(), t0).is_none());
         assert!(c.get(&Key::from_str(0, "h1099.test", 1, None).unwrap(), t0).is_some());
+    }
+
+    #[test]
+    fn bounded_in_bytes() {
+        let txt = |name: &str, len: usize| {
+            use hickory_proto::rr::{RData, Record, rdata::TXT};
+            let q = msg::query(name, 16).unwrap();
+            let mut m = Message::response(q.metadata.id, q.metadata.op_code);
+            m.add_queries(q.queries.clone());
+            let n = Name::from_ascii(name).unwrap();
+            for _ in 0..len / 200 {
+                m.add_answer(Record::from_rdata(
+                    n.clone(),
+                    60,
+                    RData::TXT(TXT::new(vec!["x".repeat(200)])),
+                ));
+            }
+            Arc::new(m)
+        };
+        let c = Cache::new(0, false, None);
+        let t0 = Instant::now();
+        let k = |i: usize| Key::from_str(0, &format!("t{i}.test"), 16, None).unwrap();
+        c.put(k(0), txt("t0.test", 12_000), 60, t0);
+        assert_eq!(c.len(), 0, "an answer over the per-answer cap is not cached");
+        for i in 0..1000 {
+            c.put(k(i), txt(&format!("t{i}.test"), 7_000), 60, t0);
+        }
+        let lru = c.lru.lock().unwrap();
+        assert!(lru.bytes <= MAX_CACHED_BYTES);
+        assert_eq!(lru.bytes, lru.map.iter().map(|(_, (_, e))| e.size).sum::<usize>());
+        assert!(lru.map.len() < 1000, "older entries evicted for bytes");
     }
 
     #[tokio::test]
