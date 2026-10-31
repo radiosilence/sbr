@@ -277,10 +277,14 @@ pub async fn post(
     req: http::Request<()>,
     body: Bytes,
 ) -> io::Result<(ReqRecv, UseGuard)> {
-    let (mut tx, rx, guard) = conn.request(dialer, keepalive, req).await?;
-    if !body.is_empty() {
-        tx.send_data(body).await.map_err(io_err)?;
+    use super::progress;
+    let (mut tx, rx, guard) = progress("upload request", conn.request(dialer, keepalive, req)).await?;
+    // In pieces, so the deadline is on progress rather than the whole body.
+    let mut body = body;
+    while !body.is_empty() {
+        let piece = body.split_to(body.len().min(16 * 1024));
+        progress("upload", async { tx.send_data(piece).await.map_err(io_err) }).await?;
     }
-    tx.finish().await.map_err(io_err)?;
+    progress("upload", async { tx.finish().await.map_err(io_err) }).await?;
     Ok((rx, guard))
 }

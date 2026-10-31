@@ -129,10 +129,13 @@ pub async fn send_body(send: &mut SendStream<Bytes>, mut data: Bytes) -> io::Res
     }
     while !data.is_empty() {
         send.reserve_capacity(data.len());
-        let cap = poll_fn(|cx| send.poll_capacity(cx))
-            .await
-            .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))?
-            .map_err(h2_err)?;
+        let cap = super::progress("upload", async {
+            poll_fn(|cx| send.poll_capacity(cx))
+                .await
+                .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))?
+                .map_err(h2_err)
+        })
+        .await?;
         if cap == 0 {
             continue;
         }

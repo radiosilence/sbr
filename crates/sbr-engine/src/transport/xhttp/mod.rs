@@ -621,13 +621,22 @@ const MOBILE_UP_BUFFER: usize = 256 * 1024;
 /// bound, a server that takes the bodies but delays the responses gathers
 /// one task and one HTTP stream per post interval.
 const MAX_POSTS_IN_FLIGHT: usize = 8;
-/// Deadline for sending one packet-up POST, and for its response. A server
-/// that stops reading would otherwise hold the upload task, and the buffered
-/// bytes, until the connection dies.
+/// How long a packet-up POST may make no progress: opening it, each wait
+/// for the server to take more of its body, and the wait for its response.
+/// A server that stops reading would otherwise hold the upload task, and
+/// the buffered bytes, until the connection dies. A slow link still makes
+/// progress, so a long post on one is not cut off.
 const POST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn timed_out(what: &str) -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, format!("xhttp: {what} timed out"))
+}
+
+/// `f` with [`POST_TIMEOUT`].
+async fn progress<T>(what: &str, f: impl Future<Output = io::Result<T>>) -> io::Result<T> {
+    tokio::time::timeout(POST_TIMEOUT, f)
+        .await
+        .unwrap_or_else(|_| Err(timed_out(what)))
 }
 
 struct UpState {
@@ -743,65 +752,65 @@ async fn packet_uploader(ep: Arc<Endpoint>, mut slot: SlotRef, session: String, 
         }
         let (req, body) = ep.packet_request(&session, seq, chunk);
         seq += 1;
-        let r = tokio::time::timeout(POST_TIMEOUT, async {
-            match &slot.conn {
-                Conn::H2(c) => {
-                    let len = body.len();
-                    let has_len = len > 0 || matches!(req.method.as_str(), "POST" | "PUT" | "PATCH");
-                    async {
-                        let hreq = ep.h2_request(&req, has_len.then_some(len))?;
-                        let (resp, mut send) = c.request(&ep.dialer, ep.keepalive, hreq, body.is_empty()).await?;
-                        if !body.is_empty() {
-                            h2io::send_body(&mut send, body).await?;
+        let r = match &slot.conn {
+            Conn::H2(c) => {
+                let len = body.len();
+                let has_len = len > 0 || matches!(req.method.as_str(), "POST" | "PUT" | "PATCH");
+                async {
+                    let hreq = ep.h2_request(&req, has_len.then_some(len))?;
+                    let (resp, mut send) = progress(
+                        "upload request",
+                        c.request(&ep.dialer, ep.keepalive, hreq, body.is_empty()),
+                    )
+                    .await?;
+                    if !body.is_empty() {
+                        h2io::send_body(&mut send, body).await?;
+                    }
+                    let shared = shared.clone();
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        let r = tokio::time::timeout(POST_TIMEOUT, h2io::drain(resp)).await;
+                        if let Err(e) = r.unwrap_or_else(|_| Err(timed_out("upload response"))) {
+                            shared.fail(format!("xhttp upload: {e}"));
                         }
-                        let shared = shared.clone();
-                        tokio::spawn(async move {
-                            let _permit = permit;
-                            let r = tokio::time::timeout(POST_TIMEOUT, h2io::drain(resp)).await;
-                            if let Err(e) = r.unwrap_or_else(|_| Err(timed_out("upload response"))) {
-                                shared.fail(format!("xhttp upload: {e}"));
-                            }
-                        });
-                        Ok::<_, io::Error>(())
-                    }
-                    .await
+                    });
+                    Ok::<_, io::Error>(())
                 }
-                Conn::H3(c) => {
-                    let len = body.len();
-                    let has_len = len > 0 || matches!(req.method.as_str(), "POST" | "PUT" | "PATCH");
-                    async {
-                        let hreq = ep.h2_request(&req, has_len.then_some(len))?;
-                        let d = ep.quic.as_ref().expect("HTTP/3 endpoint has a QUIC dialer");
-                        let (rx, guard) = h3io::post(c, d, ep.keepalive, hreq, body).await?;
-                        let shared = shared.clone();
-                        tokio::spawn(async move {
-                            let (_guard, _permit) = (guard, permit);
-                            let r = tokio::time::timeout(POST_TIMEOUT, h3io::drain(rx)).await;
-                            if let Err(e) = r.unwrap_or_else(|_| Err(timed_out("upload response"))) {
-                                shared.fail(format!("xhttp upload: {e}"));
-                            }
-                        });
-                        Ok::<_, io::Error>(())
-                    }
-                    .await
-                }
-                Conn::H1(c) => {
-                    let len = body.len();
-                    let has_len = len > 0 || matches!(req.method.as_str(), "POST" | "PUT" | "PATCH");
-                    let kind = if has_len {
-                        h1::BodyKind::Length(len)
-                    } else {
-                        h1::BodyKind::None
-                    };
-                    let mut bytes = ep.h1_head(&req, kind, false);
-                    bytes.extend_from_slice(&body);
-                    drop(permit);
-                    c.post(&ep.dialer, &bytes).await
-                }
+                .await
             }
-        })
-        .await;
-        let r = r.unwrap_or_else(|_| Err(timed_out("upload")));
+            Conn::H3(c) => {
+                let len = body.len();
+                let has_len = len > 0 || matches!(req.method.as_str(), "POST" | "PUT" | "PATCH");
+                async {
+                    let hreq = ep.h2_request(&req, has_len.then_some(len))?;
+                    let d = ep.quic.as_ref().expect("HTTP/3 endpoint has a QUIC dialer");
+                    let (rx, guard) = h3io::post(c, d, ep.keepalive, hreq, body).await?;
+                    let shared = shared.clone();
+                    tokio::spawn(async move {
+                        let (_guard, _permit) = (guard, permit);
+                        let r = tokio::time::timeout(POST_TIMEOUT, h3io::drain(rx)).await;
+                        if let Err(e) = r.unwrap_or_else(|_| Err(timed_out("upload response"))) {
+                            shared.fail(format!("xhttp upload: {e}"));
+                        }
+                    });
+                    Ok::<_, io::Error>(())
+                }
+                .await
+            }
+            Conn::H1(c) => {
+                let len = body.len();
+                let has_len = len > 0 || matches!(req.method.as_str(), "POST" | "PUT" | "PATCH");
+                let kind = if has_len {
+                    h1::BodyKind::Length(len)
+                } else {
+                    h1::BodyKind::None
+                };
+                let mut bytes = ep.h1_head(&req, kind, false);
+                bytes.extend_from_slice(&body);
+                drop(permit);
+                c.post(&ep.dialer, &bytes).await
+            }
+        };
         if let Err(e) = r {
             slot.mark_closed();
             debug!(error = %e, "xhttp upload failed");

@@ -42,8 +42,9 @@ impl DomainSet {
         if !regex.is_empty() {
             // The default limits (10 MiB compiled, 2 MiB per lazy-DFA cache)
             // let one remote rule-set's patterns take a fifth of the iOS
-            // extension's memory. A pattern over the limit fails the
-            // rule-set's load instead.
+            // extension's memory. Patterns over the size limit fail the
+            // rule-set's load; a set whose lazy DFA outgrows its cache falls
+            // back to slower engines per search instead.
             let (size, dfa) = if MOBILE {
                 (1 << 20, 256 << 10)
             } else {

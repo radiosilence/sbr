@@ -52,8 +52,12 @@ impl H1Conn {
                 }
             };
             match async {
-                w.write_all(request).await?;
-                w.flush().await
+                // In pieces, so the deadline is on progress rather than the
+                // whole request.
+                for piece in request.chunks(16 * 1024) {
+                    super::progress("upload", w.write_all(piece)).await?;
+                }
+                super::progress("upload", w.flush()).await
             }
             .await
             {
