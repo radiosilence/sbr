@@ -15,11 +15,11 @@ use h3::client::{RequestStream, SendRequest};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::OnceCell;
 
-use crate::outbound::quic::{self, Dialer, Tuning, Usage, UseGuard, io_err};
+use crate::outbound::quic::{self, Dialer, Tuning, Usage, UseGuard, h3guard, io_err};
 
-type Send3 = SendRequest<h3_quinn::OpenStreams, Bytes>;
+type Send3 = SendRequest<h3guard::OpenStreams, Bytes>;
 type ReqSend = RequestStream<h3_quinn::SendStream<Bytes>, Bytes>;
-type ReqRecv = RequestStream<h3_quinn::RecvStream, Bytes>;
+type ReqRecv = RequestStream<h3guard::RecvStream, Bytes>;
 type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 /// quic-go's default idle timeout, which the Xray server applies.
@@ -69,7 +69,7 @@ impl H3Conn {
                 .map_err(io_err)?;
             let (mut driver, send) = h3::client::builder()
                 .max_field_section_size(crate::transport::MAX_RESPONSE_HEADERS.into())
-                .build::<_, _, Bytes>(h3_quinn::Connection::new(conn.clone()))
+                .build::<_, _, Bytes>(h3guard::Connection::new(conn.clone()))
                 .await
                 .map_err(io_err)?;
             let dead = self.dead.clone();

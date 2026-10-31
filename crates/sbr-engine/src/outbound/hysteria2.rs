@@ -77,7 +77,7 @@ struct Session {
     udp: Arc<Sessions<u32>>,
     next_udp: AtomicU32,
     /// Keeps the HTTP/3 control stream open.
-    _h3: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+    _h3: h3::client::SendRequest<super::quic::h3guard::OpenStreams, Bytes>,
 }
 
 impl Pooled for Session {
@@ -149,7 +149,7 @@ impl Hysteria2 {
         let fail = |e: &dyn std::fmt::Display| io::Error::other(format!("hysteria2 auth: {e}"));
         let (mut driver, mut send) = h3::client::builder()
             .max_field_section_size(crate::transport::MAX_RESPONSE_HEADERS.into())
-            .build::<_, _, Bytes>(h3_quinn::Connection::new(conn.clone()))
+            .build::<_, _, Bytes>(super::quic::h3guard::Connection::new(conn.clone()))
             .await
             .map_err(|e| fail(&e))?;
         tokio::spawn(async move {

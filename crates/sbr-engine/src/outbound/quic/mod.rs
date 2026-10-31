@@ -8,6 +8,7 @@
 //! reconnect RTT on a phone.
 
 pub(crate) mod brutal;
+pub(crate) mod h3guard;
 mod initial;
 pub(crate) mod socket;
 mod tls;
