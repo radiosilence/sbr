@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 ### Security
 
@@ -11,6 +11,16 @@
 - **DNS servers detoured through a `direct` outbound get the cleartext warning.** They leave the tunnel exactly as servers without a detour do.
 - **SSH connections no longer leak channels or fail after a cancelled connect.** A channel the server confirms after its connect was cancelled is closed; a dial carries on, and keeps its timeout, when the connect that started it is cancelled; a dial overtaken by a network change hands its connects to a fresh one; the idle close no longer closes a connection a new channel has just picked.
 - **Leak protection no longer starts the tunnel by itself.** Changing a setting before the first connect could arm the on-demand rule; it now arms only while the tunnel is on. A failed erase of the tunnel's files is reported instead of passing silently.
+- **WireGuard TCP connections no longer keep fixed buffers committed.** They run on sbr's userspace TCP, whose buffers hold memory only for bytes in flight or unread. On iOS the WireGuard outbound's TCP buffers are capped at 8 MiB in total, where each connection previously kept up to 512 KiB with no overall limit. Loss inside the tunnel is repaired with SACK-based recovery, which smoltcp lacks.
+- **tvOS builds again.** tvOS and watchOS prohibit `sigaltstack`, which the alternate signal stacks from #27 called unconditionally; there they are skipped.
+
+### Tests
+
+- **The direct-detour DNS warning test expects both warnings.** #36 merged before its test change.
+
+### Internal
+
+- **Faster releases.** The macOS release build starts alongside the checks rather than after them, the disk image is notarised once, after the release is published, instead of the app and then the image beforehand, and release pull requests no longer hold two macOS runners for a signing check. A release cancels pending pull request runs and superseded runs on main to free macOS runners.
 
 ## 0.2.0
 
