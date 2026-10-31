@@ -11,24 +11,30 @@ thread_local! {
 }
 
 /// Owns the memory registered with `sigaltstack`.
-struct AltStack(#[allow(dead_code)] Box<[u8]>);
+struct AltStack(Option<Box<[u8]>>);
 
 impl Drop for AltStack {
     fn drop(&mut self) {
-        disable();
+        if !disable() {
+            // Still registered: freeing it would leave signals a stack in
+            // freed memory. Leak it instead.
+            std::mem::forget(self.0.take());
+        }
     }
 }
 
 /// Turn off this thread's alternate stack. Darwin refuses `SS_DISABLE`
 /// with a zeroed stack, so the current one is passed back with the flag.
-fn disable() {
+/// False if it may still be registered.
+fn disable() -> bool {
     // SAFETY: querying and then disabling this thread's alternate stack.
     unsafe {
         let mut ss: libc::stack_t = std::mem::zeroed();
-        if libc::sigaltstack(std::ptr::null(), &mut ss) == 0 {
-            ss.ss_flags = libc::SS_DISABLE;
-            libc::sigaltstack(&ss, std::ptr::null_mut());
+        if libc::sigaltstack(std::ptr::null(), &mut ss) != 0 {
+            return false;
         }
+        ss.ss_flags = libc::SS_DISABLE;
+        libc::sigaltstack(&ss, std::ptr::null_mut()) == 0
     }
 }
 
@@ -64,7 +70,7 @@ pub fn install() {
             libc::sigaltstack(&ss, std::ptr::null_mut()) == 0
         };
         if ok {
-            *a = Some(AltStack(mem));
+            *a = Some(AltStack(Some(mem)));
         }
     });
 }
@@ -76,7 +82,7 @@ mod tests {
         std::thread::spawn(|| {
             // The test harness has a Rust `main`, so std gave this thread a
             // stack already; remove it to exercise what a host thread gets.
-            super::disable();
+            assert!(super::disable());
             let flags = |()| {
                 // SAFETY: querying this thread's alternate stack.
                 unsafe {
