@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.3
+
+### Breaking
+
+- **The SSH outbound no longer supports RSA keys.** RSA client keys, RSA `host_key` pins and RSA `host_key_algorithms` are rejected when the profile loads, and RSA host keys are not negotiated. Support relied on the `rsa` crate, whose private-key operations are not constant-time (RUSTSEC-2023-0071, no fixed release). Use an ed25519 or ECDSA key; a server offering only an RSA host key cannot be reached.
+
+### Internal
+
+- **Faster xcframework builds.** tvOS builds on stable Rust with its prebuilt std instead of nightly `-Zbuild-std`, the unused Intel simulator slices are gone, and every target builds in one cargo invocation so their LTO passes overlap.
+- **Builds use the latest stable Rust.** `rust-version` is removed from the manifests, so dependency resolution targets the toolchain in use instead of holding crates back for an old compiler.
+
 ## 0.2.2
 
 ### Added
