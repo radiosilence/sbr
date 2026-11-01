@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use futures_util::FutureExt;
 use futures_util::future::Shared;
 use russh::client::{self, Handle};
-use russh::keys::{Algorithm, EcdsaCurve, HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
+use russh::keys::{Algorithm, EcdsaCurve, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use russh::{Disconnect, Limits, Preferred, SshId, cipher, compression, kex, mac};
 use sbr_config::SshOutbound;
 use sbr_core::{BoxFuture, Destination, Host, Outbound, Stream};
@@ -97,13 +97,11 @@ const HOST_KEYS: &[Algorithm] = &[
     Algorithm::Ecdsa {
         curve: EcdsaCurve::NistP521,
     },
-    Algorithm::Rsa {
-        hash: Some(HashAlg::Sha512),
-    },
-    Algorithm::Rsa {
-        hash: Some(HashAlg::Sha256),
-    },
 ];
+
+/// RSA would bring in the `rsa` crate, whose private-key operations are not
+/// constant-time (RUSTSEC-2023-0071).
+const RSA_UNSUPPORTED: &str = "RSA keys are not supported; use an ed25519 or ECDSA key";
 
 type DialResult = Result<Arc<Conn>, Arc<io::Error>>;
 
@@ -175,13 +173,16 @@ impl Ssh {
             .transpose()
             .map_err(|e| format!("private_key: {e}"))?
             .map(Arc::new);
+        if key.as_ref().is_some_and(|k| k.algorithm().is_rsa()) {
+            return Err(RSA_UNSUPPORTED.into());
+        }
         if key.is_none() && c.password.is_none() {
             return Err("one of password, private_key or private_key_path is required".into());
         }
         let pins = c
             .host_key
             .iter()
-            .map(|line| parse_host_key(line).ok_or_else(|| format!("host_key {line:?}: not a public key")))
+            .map(|line| parse_host_key(line))
             .collect::<Result<Vec<_>, _>>()?;
         let host_keys = host_key_algorithms(&c.host_key_algorithms, &pins)?;
         let config = client::Config {
@@ -228,31 +229,33 @@ impl Ssh {
 
 /// An `authorized_keys` line, options prefix allowed: the key is the token
 /// after the first token naming its own algorithm.
-fn parse_host_key(line: &str) -> Option<PublicKey> {
+fn parse_host_key(line: &str) -> Result<PublicKey, String> {
     let tokens: Vec<&str> = line.split_whitespace().collect();
-    tokens.windows(2).find_map(|w| {
-        russh::keys::parse_public_key_base64(w[1])
-            .ok()
-            .filter(|k| k.algorithm().as_str() == w[0])
-    })
+    let key = tokens
+        .windows(2)
+        .find_map(|w| {
+            russh::keys::parse_public_key_base64(w[1])
+                .ok()
+                .filter(|k| k.algorithm().as_str() == w[0])
+        })
+        .ok_or_else(|| format!("host_key {line:?}: not a public key"))?;
+    if key.algorithm().is_rsa() {
+        return Err(format!("host_key {line:?}: {RSA_UNSUPPORTED}"));
+    }
+    Ok(key)
 }
 
 /// `host_key_algorithms` when given; otherwise the pinned keys' algorithms
 /// (so a server with several host keys presents the pinned one), or the
 /// OpenSSH order when nothing is pinned.
 fn host_key_algorithms(names: &[String], pins: &[PublicKey]) -> Result<Vec<Algorithm>, String> {
-    let pinned = |a: &Algorithm| {
-        pins.iter().any(|p| match (p.algorithm(), a) {
-            (Algorithm::Rsa { .. }, Algorithm::Rsa { .. }) => true,
-            (pa, a) => &pa == a,
-        })
-    };
+    let pinned = |a: &Algorithm| pins.iter().any(|p| &p.algorithm() == a);
     let algs: Vec<Algorithm> = if !names.is_empty() {
         names
             .iter()
-            .map(|n| {
-                n.parse::<Algorithm>()
-                    .map_err(|e| format!("host_key_algorithms {n:?}: {e}"))
+            .map(|n| match n.parse::<Algorithm>() {
+                Ok(Algorithm::Rsa { .. }) => Err(format!("host_key_algorithms {n:?}: {RSA_UNSUPPORTED}")),
+                r => r.map_err(|e| format!("host_key_algorithms {n:?}: {e}")),
             })
             .collect::<Result<_, _>>()?
     } else if pins.is_empty() {
@@ -284,12 +287,7 @@ impl Dialer {
         // Key first: a signature gives an impostor nothing, a password gives it the password.
         let mut ok = false;
         if let Some(key) = &self.key {
-            let hash = handle
-                .best_supported_rsa_hash()
-                .await
-                .map_err(|e| net(ssh_err(e)))?
-                .flatten();
-            let key = PrivateKeyWithHashAlg::new(key.clone(), hash);
+            let key = PrivateKeyWithHashAlg::new(key.clone(), None);
             ok = handle
                 .authenticate_publickey(&self.user, key)
                 .await

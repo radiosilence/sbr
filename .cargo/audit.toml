@@ -1,8 +1,0 @@
-[advisories]
-ignore = [
-    # Marvin (rsa, via russh for the SSH outbound). The attack recovers a key
-    # from the timing of many private-key operations; sbr makes one RSA
-    # signature per SSH connection, and only with an RSA client key. Host key
-    # checks use the public key. No fixed rsa release exists yet.
-    "RUSTSEC-2023-0071",
-]
