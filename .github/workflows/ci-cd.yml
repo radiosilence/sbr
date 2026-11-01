@@ -327,9 +327,9 @@ jobs:
 
   # ── CD ──────────────────────────────────────────────────────────────────
 
-  # Every push to main that passes uploads an iOS build: the version stays and
-  # the build number (the time) rises, so testers always have main. On a
-  # release push it waits for `Release (macOS)`, whose xcframework it takes.
+  # Every push to main that passes uploads an iOS and a tvOS build: the
+  # version stays and the build number (the time) rises, so testers always
+  # have main. On a release push it waits for `Release (macOS)`, whose xcframework it takes.
   # Nothing waits on it; a failed upload is retried alone from ios.yml's
   # manual dispatch.
   testflight:
@@ -345,8 +345,8 @@ jobs:
   # rather than after `Checks`: it is the longest job in a release and
   # publishes nothing, so it builds while the checks run, and the publishing
   # waits for both. It builds the xcframework itself, from the `Apple` job's
-  # cache, with the iOS slices TestFlight needs, since a release push skips
-  # that job.
+  # cache, with the iOS and tvOS slices TestFlight needs, since a release push
+  # skips that job.
   macos-release:
     name: Release (macOS)
     runs-on: macos-latest
@@ -358,14 +358,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
         with:
           toolchain: stable
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim,aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-tvos,aarch64-apple-tvos-sim
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: apple
           save-if: false
       - run: apple/build-xcframework.sh
         env:
-          SBR_SKIP_TVOS: "1"
           SBR_SKIP_CATALYST: "1"
       - run: tar czf "$RUNNER_TEMP/SbrCore.xcframework.tar.gz" -C apple SbrCore.xcframework
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

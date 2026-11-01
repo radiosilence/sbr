@@ -1,11 +1,11 @@
-name: iOS
+name: TestFlight
 
-# Archives the iOS app, signs it for the App Store and uploads it to
-# TestFlight (apple/testflight.sh).
+# Archives the iOS and tvOS apps, signs them for the App Store and uploads
+# them to TestFlight (apple/testflight.sh).
 #
 # Called by CI/CD on every push to main that passes, with the xcframework its
-# `Apple` job built. Runnable by hand to retry an upload, in which case it
-# builds the iOS slice of the xcframework itself.
+# `Apple` job (or `Release (macOS)`) built. Runnable by hand to retry an
+# upload, in which case it builds the xcframework itself.
 on:
   workflow_call:
   workflow_dispatch:
@@ -39,15 +39,24 @@ jobs:
           fi
 
   testflight:
-    name: TestFlight (ios)
+    name: TestFlight (${{ matrix.platform }})
     needs: signable
     if: needs.signable.outputs.ready == 'true'
     runs-on: macos-latest
     timeout-minutes: 60
-    # One upload at a time; a pending one replaced by a later push's is the
-    # same version with newer code.
+    # One platform failing to upload leaves the other's build standing.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ios
+            profiles: '"sbr App Store" "sbr tunnel App Store" "sbr widgets App Store"'
+          - platform: tvos
+            profiles: '"sbr tvOS App Store" "sbr tunnel tvOS App Store"'
+    # One upload per platform at a time; a pending one replaced by a later
+    # push's is the same version with newer code.
     concurrency:
-      group: testflight-ios
+      group: testflight-${{ matrix.platform }}
       cancel-in-progress: false
     env:
       SBR_BUILD: ${{ needs.signable.outputs.build }}
@@ -74,7 +83,7 @@ jobs:
       - if: steps.xcframework.outcome != 'success'
         run: apple/build-xcframework.sh
         env:
-          SBR_SKIP_TVOS: "1"
+          SBR_SKIP_TVOS: ${{ matrix.platform == 'ios' && '1' || '0' }}
           SBR_SKIP_CATALYST: "1"
       - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
         with:
@@ -87,7 +96,7 @@ jobs:
           key="$RUNNER_TEMP/AuthKey.p8"
           printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$key"
           echo "APPLE_API_KEY_PATH=$key" >> "$GITHUB_ENV"
-      # Release builds for iOS sign manually (apple/App/project.yml), so the
+      # Release builds for iOS and tvOS sign manually (apple/App/project.yml), so the
       # archive needs the Apple Distribution identity the profiles name, in a
       # keychain of its own.
       - name: Import the Apple Distribution certificate
@@ -112,11 +121,12 @@ jobs:
           security find-identity -v -p codesigning "$keychain" | grep -q "Apple Distribution" \
             || { echo "::error::no Apple Distribution identity in IOS_CERTIFICATE_P12"; exit 1; }
       - name: Install the provisioning profiles
-        run: uv run apple/tools/fetch-profiles.py "sbr App Store" "sbr tunnel App Store" "sbr widgets App Store"
+        run: eval "uv run apple/tools/fetch-profiles.py $PROFILES"
         env:
+          PROFILES: ${{ matrix.profiles }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
-      - run: apple/testflight.sh "$SBR_BUILD"
+      - run: apple/testflight.sh ${{ matrix.platform }} "$SBR_BUILD"
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}

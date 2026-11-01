@@ -316,13 +316,14 @@ configuration. See [`TunnelCheck/README.md`](TunnelCheck/README.md).
 
 ```sh
 APPLE_API_KEY_PATH=AuthKey.p8 APPLE_API_KEY_ID=... APPLE_API_ISSUER_ID=... \
-  apple/testflight.sh [build-number]
+  apple/testflight.sh ios|tvos [build-number]
 ```
 
-`testflight.sh` archives the iOS app in Release, exports it with
-`app-store-connect` and uploads it. iOS Release signs manually with the Apple
-Distribution certificate and the "sbr App Store" and "sbr tunnel App Store"
-profiles (`App/project.yml`), so the result does not depend on which Apple ID
+`testflight.sh` archives the iOS or tvOS app in Release, exports it with
+`app-store-connect` and uploads it. Release signs manually with the Apple
+Distribution certificate and the platform's App Store profiles ("sbr App
+Store", "sbr tunnel App Store" and "sbr widgets App Store" on iOS; "sbr tvOS
+App Store" and "sbr tunnel tvOS App Store" on tvOS; `App/project.yml`), so the result does not depend on which Apple ID
 Xcode is signed in with. `tools/fetch-profiles.py` installs those profiles from
 App Store Connect on a machine that lacks them. The build number defaults to the
 UTC time as `YYYYMMDDHHMM`, because App Store Connect accepts only rising build
@@ -336,14 +337,14 @@ Homebrew's `rsync` breaks its copy step.
 everything that needs a Mac on one runner: clippy and the tests (with
 sing-box, Xray and hysteria from Homebrew so the interop tests run), then the
 xcframework (no Catalyst) and the app unsigned for iOS, tvOS and macOS. A push to `main` that passes then calls `ios.yml`,
-which archives the app against that xcframework and uploads it to TestFlight; `ios.yml` can also be run
+which archives the app for iOS and tvOS against that xcframework and uploads both to TestFlight; `ios.yml` can also be run
 by hand to retry an upload. A pull request's newer push cancels its older run, and so does a newer push to `main` unless the older one may release. Pull requests
 never upload.
 
 A push that changes the workspace version (a merged release pull request),
 or a manual run on `main` while that version is unreleased, also runs the
 `Release (macOS)` job alongside the checks, in place of the `Apple` job, which
-its pull request already ran: it builds the xcframework without tvOS (and
+its pull request already ran: it builds the xcframework without Catalyst (and
 keeps it for TestFlight), then `apple/macos-release.sh build` archives `SbrMac` and exports
 it with Developer ID signing and `package` makes the signed disk image. The
 image is built with dmgbuild (`apple/dmg/settings.py`, run through `uvx`),
