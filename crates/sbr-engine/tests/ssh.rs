@@ -55,9 +55,7 @@ struct Sshd {
     child: Child,
     port: u16,
     host_pub: String,
-    rsa_host_pub: String,
     user_key: PathBuf,
-    rsa_user_key: PathBuf,
     _dir: tempdir::Dir,
 }
 
@@ -81,21 +79,18 @@ async fn sshd(bin: &Path) -> Sshd {
     let dir = std::env::temp_dir().join(format!("sbr-sshd-{}-{}", std::process::id(), fastrand::u64(..)));
     std::fs::create_dir_all(&dir).unwrap();
     let (host_key, host_pub) = keygen(&dir, "host_ed25519", "ed25519");
-    let (rsa_host_key, rsa_host_pub) = keygen(&dir, "host_rsa", "rsa");
     let (user_key, user_pub) = keygen(&dir, "user_ed25519", "ed25519");
-    let (rsa_user_key, rsa_user_pub) = keygen(&dir, "user_rsa", "rsa");
     let auth = dir.join("authorized_keys");
-    std::fs::write(&auth, format!("{user_pub}\n{rsa_user_pub}\n")).unwrap();
+    std::fs::write(&auth, format!("{user_pub}\n")).unwrap();
     let port = free_port();
     let cfg = dir.join("sshd_config");
     std::fs::write(
         &cfg,
         format!(
-            "Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nHostKey {}\nAuthorizedKeysFile {}\n\
+            "Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nAuthorizedKeysFile {}\n\
              PasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\n\
              AllowTcpForwarding yes\nPidFile {}\nLogLevel ERROR\n",
             host_key.display(),
-            rsa_host_key.display(),
             auth.display(),
             dir.join("sshd.pid").display(),
         ),
@@ -117,9 +112,7 @@ async fn sshd(bin: &Path) -> Sshd {
         child,
         port,
         host_pub,
-        rsa_host_pub,
         user_key,
-        rsa_user_key,
         _dir: tempdir::Dir(dir),
     }
 }
@@ -163,12 +156,32 @@ async fn ssh_ed25519_pinned_bulk() {
 }
 
 #[tokio::test]
-async fn ssh_rsa_user_key_and_rsa_host_pin() {
-    let bin = need_sshd!();
-    let d = sshd(&bin).await;
-    let sbr = sbr_via(&ssh_outbound(&d, &d.rsa_user_key, &d.rsa_host_pub)).await;
-    let s = socks_connect(port(&sbr, "in"), echo().await).await;
-    bulk_echo(s, 1 << 20).await;
+async fn ssh_rsa_keys_are_refused() {
+    let _ = need_sshd!();
+    let dir = std::env::temp_dir().join(format!("sbr-rsa-{}-{}", std::process::id(), fastrand::u64(..)));
+    std::fs::create_dir_all(&dir).unwrap();
+    let _dir = tempdir::Dir(dir.clone());
+    let (ed_key, ed_pub) = keygen(&dir, "ed25519", "ed25519");
+    let (rsa_key, rsa_pub) = keygen(&dir, "rsa", "rsa");
+    let outbound = |key: &Path, extra: &str| {
+        format!(
+            r#"{{"type":"ssh","tag":"ssh","server":"127.0.0.1","server_port":22,"user":"u","private_key_path":"{}"{extra}}}"#,
+            key.display()
+        )
+    };
+    for ob in [
+        outbound(&rsa_key, &format!(r#","host_key":["{ed_pub}"]"#)),
+        outbound(&ed_key, &format!(r#","host_key":["{rsa_pub}"]"#)),
+        outbound(&ed_key, r#","host_key_algorithms":["rsa-sha2-256"]"#),
+    ] {
+        let json = format!(r#"{{"outbounds":[{ob}]}}"#);
+        let o = sbr_engine::sbr_config::Options::parse(&json).unwrap();
+        let err = match sbr_engine::Instance::start(&o, sbr_engine::Settings::default()).await {
+            Ok(_) => panic!("accepted: {ob}"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("RSA keys are not supported"), "{err}");
+    }
 }
 
 #[tokio::test]
