@@ -69,6 +69,7 @@ Severity reflects impact for the intended users: a remote or local denial of ser
 | TUIC domains over 255 bytes spilled into the port field. | Fixed, edf6c58 |
 | ShadowTLS tag comparisons were not constant-time; tlsmini's `insecure` verifier skipped handshake signatures. | Fixed, edf6c58 |
 | An invalid TUIC uuid was echoed into errors that reach logs. | Fixed, edf6c58 |
+| `rsa` 0.10 (via `russh`, SSH outbound) is open to Marvin timing attacks (RUSTSEC-2023-0071). sbr's only RSA private-key operation is one signature per SSH connection with an RSA client key, far short of the observations the attack needs; host key checks use the public key. No fixed release exists. | Accepted; ignored in `.cargo/audit.toml` until `rsa` ships a constant-time release, #52 |
 | DNS answers matched by ID only; TTLs unclamped; quadratic `truncate_to`; unbounded `getaddrinfo` pool use. SS-2022 UDP replay window reset; TUIC association ID wrap; SOCKS5 UDP source unchecked; REALITY ignoring some `tls` fields; silent packet-loop panic. | #20 |
 
 ## Checked and sound
