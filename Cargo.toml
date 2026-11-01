@@ -6,7 +6,6 @@ members = ["crates/*"]
 version = "0.2.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-rust-version = "1.91"
 
 [workspace.dependencies]
 sbr-config = { path = "crates/sbr-config" }
