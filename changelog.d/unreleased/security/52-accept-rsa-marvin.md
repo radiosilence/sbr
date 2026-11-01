@@ -1,0 +1,1 @@
+- **`cargo audit` accepts RUSTSEC-2023-0071.** The Marvin timing attack on the `rsa` crate, used by the SSH outbound, needs far more RSA private-key operations than the one signature sbr makes per connection, and no fixed release exists. The reasoning is recorded in `docs/security-audit.md`.
