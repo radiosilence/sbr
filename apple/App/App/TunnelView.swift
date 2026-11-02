@@ -92,6 +92,12 @@ struct TunnelView: View {
                 Text(stop).font(.sbr(.fine)).foregroundStyle(Color.sbrBad)
             }
         }
+        #if os(tvOS)
+        // Full width, so moving up from a group's test button, at the far
+        // right, lands on connect rather than finding nothing above it.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .focusSection()
+        #endif
     }
 
     /// Where traffic goes right now: the leaf of the route's outermost
