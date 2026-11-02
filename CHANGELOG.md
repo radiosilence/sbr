@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.4
+
+### Internal
+
+- **TestFlight gets tvOS builds.** Every push to `main` that passes uploads the tvOS app alongside the iOS one; tvOS builds had only been uploaded by hand.
+
 ## 0.2.3
 
 ### Breaking
