@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.5
+
+### Fixed
+
+- **tvOS: focus reaches connect from a group.** Moving up from a group's test button lands on connect/disconnect instead of stopping.
+
 ## 0.2.4
 
 ### Internal
