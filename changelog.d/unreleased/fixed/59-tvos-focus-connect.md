@@ -1,0 +1,1 @@
+- **tvOS: focus reaches connect from a group.** Moving up from a group's test button lands on connect/disconnect instead of stopping.
