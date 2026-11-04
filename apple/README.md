@@ -356,7 +356,7 @@ the checks pass, CI/CD publishes the GitHub release with that image, and the
 the app inside it (sysextd refuses the system extension of an app carrying no
 ticket once Gatekeeper has passed it, so a ticket on the image alone is not
 enough) and notarises and staples a remade image around it; the job replaces
-the release's copy with that one, and writes `Casks/sbr.rb` in radiosilence/homebrew-sbr. See the root README's "Releases".
+the release's copy with that one, and writes `Casks/sbr.rb` in radiosilence/homebrew-tap. See the root README's "Releases".
 
 These jobs use these repository secrets, the same names kōan uses:
 
@@ -368,7 +368,7 @@ These jobs use these repository secrets, the same names kōan uses:
 | `IOS_CERTIFICATE_PASSWORD` | its password |
 | `MACOS_CERTIFICATE_P12` | base64 of the Developer ID Application certificate (`.p12`) |
 | `MACOS_CERTIFICATE_PASSWORD` | its password |
-| `RELEASE_TOKEN` | a token with `contents: write` on this repository and radiosilence/homebrew-sbr, which creates the release and its tag and updates the cask |
+| `RELEASE_TOKEN` | a token with `contents: write` on this repository and radiosilence/homebrew-tap, which creates the release and its tag and updates the cask |
 
 Without the key or the certificate, the TestFlight job is skipped. The macOS
 release jobs fail instead: a release must not quietly ship without its disk

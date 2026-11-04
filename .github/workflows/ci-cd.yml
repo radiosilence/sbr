@@ -457,7 +457,7 @@ jobs:
   # Apple's notary, apart from the release: everything else is out by the time
   # this starts, and its queue can take hours. It notarises and staples the
   # disk image, whose ticket covers the app inside, replaces the release's
-  # copy with it, then moves the Homebrew cask (radiosilence/homebrew-sbr) to
+  # copy with it, then moves the Homebrew cask (radiosilence/homebrew-tap) to
   # it. Failing or timing out fails this job alone; re-running it
   # waits on the submission already made (apple/tools/notarise.sh) rather than
   # submitting again.
@@ -508,7 +508,7 @@ jobs:
             exit 1
           fi
           sha=$(shasum -a 256 "apple/build/macos/sbr-$VERSION.dmg" | awk '{print $1}')
-          git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/radiosilence/homebrew-sbr.git" "$RUNNER_TEMP/tap"
+          git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/radiosilence/homebrew-tap.git" "$RUNNER_TEMP/tap"
           cd "$RUNNER_TEMP/tap"
           mkdir -p Casks
           cat > Casks/sbr.rb <<CASK
