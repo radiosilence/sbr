@@ -1,0 +1,1 @@
+- **macOS: the network extension activates after a reinstall.** The app now carries its own notarisation ticket, so macOS can verify the system extension of a copy put back from the Bin, where it used to fail with "code signature invalid". When verification still fails, sbr says to reinstall from the disk image.

@@ -17,6 +17,9 @@ final class SystemExtensionActivator: NSObject, OSSystemExtensionRequestDelegate
 
     static let approvalNeeded = SbrError("allow sbr's network extension in System Settings, then connect again")
     static let rebootNeeded = SbrError("restart your Mac to finish installing sbr's network extension")
+    /// macOS found no notarisation ticket for the extension, offline or
+    /// online. A fresh copy from the disk image carries one.
+    static let notVerified = SbrError("macOS could not verify sbr's network extension. move sbr to the bin, install it again from the disk image, then connect")
 
     /// Called whenever `awaitingApproval` changes, including when the user
     /// allows the extension long after the request that asked, with the
@@ -80,7 +83,8 @@ final class SystemExtensionActivator: NSObject, OSSystemExtensionRequestDelegate
     }
 
     nonisolated func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
-        MainActor.assumeIsolated { finish(.failure(error)) }
+        let failure = (error as? OSSystemExtensionError)?.code == .codeSignatureInvalid ? Self.notVerified : error
+        MainActor.assumeIsolated { finish(.failure(failure)) }
     }
 }
 #endif

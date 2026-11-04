@@ -15,10 +15,12 @@
 //!   a byte, a request with no answer at all for [`STALL`], a failed connect.
 //!   A burst of them from [`BURST`] distinct destinations within [`WINDOW`]
 //!   degrades the leaf; distinct destinations, so one dead website cannot.
-//!   A clean close before any data is the weakest of these (servers and
-//!   push endpoints do it on purpose, and a starved relay tears flows down
-//!   the same way), so a burst made only with closes asks for a probe and
-//!   degrades only if that fails. Closes are ignored outright while the
+//!   A clean close before any data and a failed connect are the weakest of
+//!   these: servers and push endpoints close on purpose, a starved relay
+//!   tears flows down the same way, and through a proxy a failed connect is
+//!   as often the destination's fault (a dead host, an IPv6 address the exit
+//!   cannot reach) as the path's. A burst made only of these asks for a
+//!   probe and degrades only if that fails. Closes are ignored outright while the
 //!   leaf is moving [`PROOF_BYTES`] for other connections.
 //!   *Soft* signals are what a freeze looks like but a long poll does too: the
 //!   remote silent for [`STALL`] mid-TLS-record, or while the client waits.
@@ -106,6 +108,12 @@ impl Signal {
     fn hard(self) -> bool {
         !matches!(self, Self::Waiting | Self::MidRecord)
     }
+
+    /// Hard, but as likely the remote's doing as the path's: a burst of
+    /// these degrades only once a probe through the leaf fails.
+    fn needs_confirming(self) -> bool {
+        matches!(self, Self::Closed | Self::Connect)
+    }
 }
 
 /// What a data probe found.
@@ -173,8 +181,9 @@ pub struct Record {
     soft_probe: bool,
     last_triggered: Option<Instant>,
     false_alarm: Option<Instant>,
-    /// The running probe decides a burst of closes.
-    confirming: bool,
+    /// The running probe decides a burst of closes and failed connects, and
+    /// this is the reason given should it fail.
+    confirming: Option<Signal>,
     last_carried: Option<Instant>,
 }
 
@@ -208,14 +217,15 @@ impl Record {
                 dest: dest.to_owned(),
                 conn,
             });
-            if self.distinct(|e| e.signal != Signal::Closed) >= BURST {
+            if self.distinct(|e| !e.signal.needs_confirming()) >= BURST {
                 self.degrade(now, signal);
                 out.degraded = true;
                 return out;
             }
             if self.distinct(|_| true) >= BURST {
                 if self.claim_probe(now, false) {
-                    self.confirming = true;
+                    let connect = self.events.iter().any(|e| e.signal == Signal::Connect);
+                    self.confirming = Some(if connect { Signal::Connect } else { Signal::Closed });
                     out.confirm = true;
                 }
                 return out;
@@ -274,7 +284,7 @@ impl Record {
     /// A probe was abandoned before it finished.
     pub fn abort_probe(&mut self) {
         self.probing = false;
-        self.confirming = false;
+        self.confirming = None;
     }
 
     pub fn probe_done(&mut self, now: Instant, v: Verdict) -> Change {
@@ -308,8 +318,11 @@ impl Record {
                 self.degrade(now, reason);
                 Change::Degraded
             }
-            Verdict::Unreachable if confirming && self.degraded.is_none() => {
-                self.degrade(now, Signal::Closed);
+            Verdict::Unreachable
+                if self.degraded.is_none()
+                    && let Some(reason) = confirming =>
+            {
+                self.degrade(now, reason);
                 Change::Degraded
             }
             // Without a conclusive probe the handshake probe is the best
@@ -671,9 +684,9 @@ mod tests {
         assert!(!r.report(t + S, Signal::Reset, "1", Some(2)).degraded);
         assert!(!r.report(t + S, Signal::Closed, "1", Some(3)).degraded);
         assert!(!r.report(t + 2 * S, Signal::NoResponse, "2", Some(4)).degraded);
-        assert!(r.report(t + 3 * S, Signal::Connect, "3", None).degraded);
+        assert!(r.report(t + 3 * S, Signal::Reset, "3", None).degraded);
         let d = r.degraded().unwrap();
-        assert_eq!(d.reason, Signal::Connect);
+        assert_eq!(d.reason, Signal::Reset);
         assert_eq!(d.until, t + 3 * S + BACKOFF_BASE);
     }
 
@@ -848,6 +861,28 @@ mod tests {
         let later = t + 2 * PROBE_COOLDOWN;
         assert!(!r.report(later, Signal::Closed, "d", Some(4)).confirm);
         assert!(r.degraded().is_none());
+    }
+
+    #[test]
+    fn connect_failures_wait_for_a_probe() {
+        let t = Instant::now();
+        // Dead destinations through a working proxy: the probe passes.
+        let mut r = Record::default();
+        assert!(r.report(t, Signal::Connect, "a", None).probe);
+        r.probe_done(t, Verdict::Inconclusive);
+        r.report(t + S, Signal::Connect, "b", None);
+        let o = r.report(t + PROBE_COOLDOWN, Signal::Connect, "c", None);
+        assert!(!o.degraded && o.confirm);
+        assert_eq!(r.probe_done(t + PROBE_COOLDOWN, Verdict::Pass), Change::None);
+        assert!(r.degraded().is_none());
+        // The proxy itself unreachable: the probe fails too.
+        let mut r = Record::default();
+        r.report(t, Signal::Connect, "a", None);
+        r.probe_done(t, Verdict::Inconclusive);
+        r.report(t + S, Signal::Closed, "b", Some(1));
+        assert!(r.report(t + PROBE_COOLDOWN, Signal::Connect, "c", None).confirm);
+        assert_eq!(r.probe_done(t + PROBE_COOLDOWN, Verdict::Unreachable), Change::Degraded);
+        assert_eq!(r.degraded().unwrap().reason, Signal::Connect);
     }
 
     #[test]

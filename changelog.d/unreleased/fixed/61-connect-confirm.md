@@ -1,0 +1,1 @@
+- **Failed connects no longer block a working proxy.** A burst of failed connects through a member now triggers a probe and blocks the member only if that fails, as a burst of early closes already did; dead destinations had been enough to mark a working proxy "blocked: can't connect".

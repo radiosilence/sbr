@@ -7,18 +7,25 @@
 #   apple/macos-release.sh package               make and sign the disk image
 #                                                from that zip:
 #                                                apple/build/macos/sbr-<version>.dmg
-#   apple/macos-release.sh notarise-dmg          notarise and staple the image
+#   apple/macos-release.sh notarise-dmg          notarise the image, staple the
+#                                                app, then remake, notarise and
+#                                                staple the image
 #
 # CI runs build and package before the release is published and notarise-dmg
-# after it, so Apple's queue holds up nothing. The image's notarisation covers
-# the app inside it. Re-running a failed notarisation submits nothing new:
+# after it, so Apple's queue holds up nothing. Notarising the image covers the
+# app inside it, but its ticket stays with the image. The app needs its own
+# stapled: sysextd will not activate the system extension without one, and it
+# does not look a ticket up online for an app Gatekeeper already passed, such
+# as one put back from the Bin. So the image is notarised, the app taken out
+# and stapled, and the image made again around it and notarised in turn.
+# Re-running a failed notarisation submits nothing new for the first image:
 # notarise.sh takes up the submission of the same name, and a name is the
-# file's content hash.
+# file's content hash. The remade image hashes differently each time.
 #
 # build needs apple/SbrCore.xcframework (build-xcframework.sh) and the
 # "sbr mac Developer ID" and "sbr mac tunnel Developer ID" profiles installed
 # (tools/fetch-profiles.py); build and package need a Developer ID Application
-# identity in a keychain; notarise-dmg needs APPLE_API_KEY_PATH,
+# identity in a keychain; notarise-dmg needs that too, and APPLE_API_KEY_PATH,
 # APPLE_API_KEY_ID and APPLE_API_ISSUER_ID.
 set -euo pipefail
 cd "$(dirname "$0")/App"
@@ -47,6 +54,23 @@ notarise() {
   cp "$file" "$named"
   ../tools/notarise.sh "$named"
   rm "$named"
+}
+
+# The signed disk image, from $out/sbr.app.
+make_dmg() {
+  rm -rf "$out/dmg"
+  # The window's background at 1x and 2x, paired into one TIFF, and the
+  # volume icon from the app icon's macOS sizes, named as an .iconset's are.
+  mkdir -p "$out/dmg/AppIcon.iconset"
+  swift ../tools/make-icon.swift --dmg-background App/Resources/geist-mono.woff2 "$out/dmg"
+  tiffutil -cathidpicheck "$out/dmg/background.png" "$out/dmg/background@2x.png" -out "$out/dmg/background.tiff" >/dev/null
+  cp App/Assets.xcassets/AppIcon.appiconset/icon_*.png "$out/dmg/AppIcon.iconset/"
+  iconutil -c icns "$out/dmg/AppIcon.iconset" -o "$out/dmg/AppIcon.icns"
+  rm -f "$dmg"
+  uvx --from dmgbuild==1.6.7 dmgbuild -s ../dmg/settings.py \
+    -D app="$out/sbr.app" -D background="$out/dmg/background.tiff" -D volume_icon="$out/dmg/AppIcon.icns" \
+    sbr "$dmg"
+  codesign --force --timestamp --sign "$(identity)" "$dmg"
 }
 
 case "$step" in
@@ -117,25 +141,28 @@ PLIST
 
 package)
   [ -f "$zip" ] || { echo "$zip is missing: run the build step" >&2; exit 1; }
-  rm -rf "$out/sbr.app" "$out/dmg"
+  rm -rf "$out/sbr.app"
   ditto -x -k "$zip" "$out"
-  # The window's background at 1x and 2x, paired into one TIFF, and the
-  # volume icon from the app icon's macOS sizes, named as an .iconset's are.
-  mkdir -p "$out/dmg/AppIcon.iconset"
-  swift ../tools/make-icon.swift --dmg-background App/Resources/geist-mono.woff2 "$out/dmg"
-  tiffutil -cathidpicheck "$out/dmg/background.png" "$out/dmg/background@2x.png" -out "$out/dmg/background.tiff" >/dev/null
-  cp App/Assets.xcassets/AppIcon.appiconset/icon_*.png "$out/dmg/AppIcon.iconset/"
-  iconutil -c icns "$out/dmg/AppIcon.iconset" -o "$out/dmg/AppIcon.icns"
-  rm -f "$dmg"
-  uvx --from dmgbuild==1.6.7 dmgbuild -s ../dmg/settings.py \
-    -D app="$out/sbr.app" -D background="$out/dmg/background.tiff" -D volume_icon="$out/dmg/AppIcon.icns" \
-    sbr "$dmg"
-  codesign --force --timestamp --sign "$(identity)" "$dmg"
+  make_dmg
   echo "packaged $dmg"
   ;;
 
 notarise-dmg)
   [ -f "$dmg" ] || { echo "$dmg is missing: run the package step" >&2; exit 1; }
+  notarise "$dmg"
+  # The app's ticket exists once the image holding it is accepted. Stapling
+  # adds a file the app's signature leaves out, so the signature still holds;
+  # the system extension inside cannot take one of its own without breaking
+  # the app's seal, and is covered by the app's.
+  mount=$(mktemp -d)
+  hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg" >/dev/null
+  rm -rf "$out/sbr.app"
+  ditto "$mount/sbr.app" "$out/sbr.app"
+  hdiutil detach "$mount" >/dev/null
+  xcrun stapler staple "$out/sbr.app"
+  xcrun stapler validate "$out/sbr.app"
+  codesign --verify --deep --strict "$out/sbr.app"
+  make_dmg
   notarise "$dmg"
   xcrun stapler staple "$dmg"
   xcrun stapler validate "$dmg"
