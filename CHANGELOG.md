@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.6
+
+### Fixed
+
+- **Failed connects no longer block a working proxy.** A burst of failed connects through a member now triggers a probe and blocks the member only if that fails, as a burst of early closes already did; dead destinations had been enough to mark a working proxy "blocked: can't connect".
+- **macOS: the network extension activates after a reinstall.** The app now carries its own notarisation ticket, so macOS can verify the system extension of a copy put back from the Bin, where it used to fail with "code signature invalid". When verification still fails, sbr says to reinstall from the disk image.
+
 ## 0.2.5
 
 ### Fixed
