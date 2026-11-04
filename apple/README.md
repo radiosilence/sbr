@@ -352,8 +352,11 @@ which writes the Finder window's layout into `.DS_Store` directly rather than
 scripting Finder, so it lays out the same on a runner with no logged-in
 session. Once
 the checks pass, CI/CD publishes the GitHub release with that image, and the
-`Notarise` job then runs `notarise-dmg`, replaces the release's copy with
-the stapled one, and writes `Casks/sbr.rb` in radiosilence/homebrew-sbr. See the root README's "Releases".
+`Notarise` job then runs `notarise-dmg`, which notarises the image, staples
+the app inside it (sysextd refuses the system extension of an app carrying no
+ticket once Gatekeeper has passed it, so a ticket on the image alone is not
+enough) and notarises and staples a remade image around it; the job replaces
+the release's copy with that one, and writes `Casks/sbr.rb` in radiosilence/homebrew-sbr. See the root README's "Releases".
 
 These jobs use these repository secrets, the same names kōan uses:
 

@@ -28,7 +28,7 @@ The App Store and TestFlight route uses the app extension on every platform.
 Developer ID distribution outside the store needs the system extension, which
 the user approves once in System Settings › General › Login Items &
 Extensions. `apple/macos-release.sh` archives `SbrMac` and packages it as a
-disk image (`--notarise` also notarises and staples it); CI runs it for each
+disk image (`notarise-dmg` notarises it and staples the app and the image); CI runs it for each
 release. Its Release configuration signs manually with the "sbr mac Developer
 ID" and "sbr mac tunnel Developer ID" profiles (bundle IDs `cc.blit.sbr.mac`
 and `cc.blit.sbr.mac.tunnel`), so archiving it locally needs them installed:

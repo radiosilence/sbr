@@ -464,7 +464,7 @@ jobs:
   notarise:
     name: Notarise (macOS)
     runs-on: macos-latest
-    timeout-minutes: 190
+    timeout-minutes: 300
     needs: [changes, publish-release]
     if: ${{ !cancelled() && needs.publish-release.result == 'success' }}
     env:
@@ -482,6 +482,12 @@ jobs:
           test -n "$APPLE_API_KEY_P8" || { echo "::error::set the APPLE_API_* secrets"; exit 1; }
           printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+      # notarise-dmg remakes and signs the image around the stapled app.
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: ./.github/actions/developer-id
+        with:
+          certificate-p12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          certificate-password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
       - run: apple/macos-release.sh notarise-dmg
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
@@ -532,4 +538,6 @@ jobs:
           git commit -m "Update sbr to v${VERSION}"
           git push
       - if: always()
-        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
+        run: |
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
