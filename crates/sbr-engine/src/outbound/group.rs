@@ -704,6 +704,25 @@ impl UrlTest {
         }
     }
 
+    /// The member to try after `failed` could not connect: the one selection
+    /// picks now that `failed` has no history, if it was measured.
+    fn fallback(&self, failed: &Arc<dyn Outbound>) -> Option<usize> {
+        let (i, measured) = self.select();
+        (measured && !Arc::ptr_eq(&self.members[i], failed)).then_some(i)
+    }
+
+    /// Member `i` connected where the selected `failed` did not.
+    fn switch_after_failure(&self, i: usize, failed: &str) {
+        let _g = self.update.lock().unwrap();
+        if self.selected.swap(i, Ordering::Relaxed) == i {
+            return;
+        }
+        info!(group = %self.tag, outbound = self.members[i].tag(), failed, "urltest switched after a failed connect");
+        if self.interrupt {
+            self.env.tracker.close_through(&self.tag);
+        }
+    }
+
     /// Re-select; true if the group switched.
     pub fn perform_update_check(&self) -> bool {
         let _g = self.update.lock().unwrap();
@@ -895,11 +914,33 @@ impl Outbound for UrlTest {
             // sing-box drops the member's history so the next check re-probes
             // it. A connect cut short by the caller's deadline counts too.
             let mut failed = ForgetOnDrop(Some((&self.env, member.tag())));
-            let r = member.connect(dest).await;
-            if r.is_ok() {
-                failed.0 = None;
+            let err = match member.connect(dest).await {
+                Ok(s) => {
+                    failed.0 = None;
+                    return Ok(s);
+                }
+                Err(e) => e,
+            };
+            drop(failed);
+            // A blocked member would otherwise fail every connection until the
+            // next check. One more attempt goes to the member the group would
+            // pick without it; the group moves there only if that works, so a
+            // dead destination, which fails on both, does not rotate the group.
+            let Some(i) = self.fallback(&member) else {
+                return Err(err);
+            };
+            let next = self.members[i].clone();
+            let mut failed = ForgetOnDrop(Some((&self.env, next.tag())));
+            match next.connect(dest).await {
+                Ok(s) => {
+                    failed.0 = None;
+                    // Before the caller registers the connection, whose chain
+                    // is read from the group's selection.
+                    self.switch_after_failure(i, member.tag());
+                    Ok(s)
+                }
+                Err(_) => Err(err),
             }
-            r
         })
     }
     fn connect_udp<'a>(&'a self, dest: &'a Destination) -> BoxFuture<'a, io::Result<BoxPacketConn>> {

@@ -6,8 +6,9 @@
 //!   records, or both; `fragment_split` (an sbr extension) varies the number,
 //!   size and spacing of the pieces per connection.
 //! - Noticing a connection cut before the server sent a byte (a reset or
-//!   close in answer to the ClientHello), which is what SNI filtering looks
-//!   like from the client, so the automatic mode can turn fragmentation on.
+//!   close in answer to the ClientHello, or [`SILENT_HELLO`] of silence after
+//!   it), which is what SNI filtering looks like from the client, so the
+//!   automatic mode can turn fragmentation on.
 //! - Record-at-a-time reads, which XTLS Vision needs: when the server
 //!   switches a VLESS connection to "direct" mode, everything after the TLS
 //!   record carrying that command is raw inner traffic. Feeding rustls one
@@ -26,6 +27,13 @@ use sbr_config::{FragmentSplit, Range};
 use sbr_core::Stream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::Sleep;
+
+/// Silence after the ClientHello that counts as a cut. Some filters drop the
+/// flow instead of resetting it (Egypt's, measured by OONI in 2023 and
+/// 2025), which would otherwise wait out the whole handshake timeout and
+/// leave fragmentation off. A server answers a ClientHello within a round
+/// trip; this leaves room for a couple of retransmissions on a poor link.
+pub const SILENT_HELLO: Duration = Duration::from_secs(6);
 
 /// sing-box `C.TLSFragmentFallbackDelay`.
 pub const FRAGMENT_FALLBACK_DELAY: Duration = Duration::from_millis(500);
@@ -76,8 +84,10 @@ pub struct TlsIo {
     frag: Option<Fragmenter>,
     reader: RecordReader,
     /// Set if the connection is reset or closed before the first byte from
-    /// the server arrives; dropped once one does.
+    /// the server arrives, or nothing arrives for [`SILENT_HELLO`]; dropped
+    /// once a byte does.
     cut_early: Option<Arc<AtomicBool>>,
+    silence: Option<Pin<Box<Sleep>>>,
 }
 
 impl TlsIo {
@@ -88,6 +98,7 @@ impl TlsIo {
             frag: frag.map(|opts| Fragmenter { opts, plan: None }),
             reader: RecordReader::default(),
             cut_early: None,
+            silence: None,
         }
     }
 
@@ -132,9 +143,26 @@ impl AsyncRead for TlsIo {
             return this.reader.poll_read(&mut this.inner, cx, out);
         };
         let before = out.filled().len();
-        let r = ready!(this.reader.poll_read(&mut this.inner, cx, out));
+        let r = match this.reader.poll_read(&mut this.inner, cx, out) {
+            Poll::Ready(r) => r,
+            Poll::Pending => {
+                // Armed at the first read, which follows the ClientHello.
+                let silence = this
+                    .silence
+                    .get_or_insert_with(|| Box::pin(tokio::time::sleep(SILENT_HELLO)));
+                ready!(silence.as_mut().poll(cx));
+                flag.store(true, Ordering::Relaxed);
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "no answer to the ClientHello",
+                )));
+            }
+        };
         match &r {
-            Ok(()) if out.filled().len() > before => this.cut_early = None,
+            Ok(()) if out.filled().len() > before => {
+                this.cut_early = None;
+                this.silence = None;
+            }
             Ok(()) if out.remaining() > 0 => flag.store(true, Ordering::Relaxed),
             Err(e) if is_cut(e) => flag.store(true, Ordering::Relaxed),
             _ => {}

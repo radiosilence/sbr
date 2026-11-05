@@ -1,0 +1,1 @@
+- **Automatic fragmentation also reacts to silence.** A ClientHello with no answer for 6 s now counts as a cut, as a reset does, so filters that drop blocked flows instead of resetting them (Egypt's often do) turn fragmentation on; such a handshake used to wait out the 15 s timeout and fail.
