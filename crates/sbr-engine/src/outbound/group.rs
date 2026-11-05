@@ -716,7 +716,7 @@ impl UrlTest {
     /// The measured member selection would pick with `failed` left out.
     fn select_without(&self, failed: usize) -> Option<usize> {
         match self.pick(Some(failed)) {
-            (i, true) if i != failed => Some(i),
+            (i, true) => Some(i),
             _ => None,
         }
     }
@@ -939,11 +939,13 @@ impl Outbound for UrlTest {
             let Some(i) = self.select_without(failed_at) else {
                 return Err(err);
             };
+            // The leaf that failed, before a nested group can move on.
+            let failed_leaf = real_tag(member.as_ref());
             match self.members[i].connect(dest).await {
                 Ok(s) => {
                     // The member that failed is not otherwise reported: the
                     // connection as a whole succeeded.
-                    self.env.report(&real_tag(member.as_ref()), Signal::Connect, dest, None);
+                    self.env.report(&failed_leaf, Signal::Connect, dest, None);
                     // Before the caller registers the connection, whose chain
                     // is read from the group's selection.
                     let _g = self.update.lock().unwrap();

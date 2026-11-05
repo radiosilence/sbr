@@ -1,8 +1,8 @@
 //! ClientHello fragmentation against a model SNI filter
-//! (`common/sni_censor.rs`): the automatic mode, against resets and silence, configured fragmentation,
-//! and the `route-options` form for connections routed `direct`; and the
-//! ClientHello as it leaves the client, segment by segment, for
-//! `fragment_split`.
+//! (`common/sni_censor.rs`): the automatic mode against resets and silence,
+//! configured fragmentation, and the `route-options` form for connections
+//! routed `direct`; and the ClientHello as it leaves the client, segment by
+//! segment, for `fragment_split`.
 
 mod common;
 
