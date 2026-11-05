@@ -87,7 +87,15 @@ pub struct TlsIo {
     /// the server arrives, or nothing arrives for [`SILENT_HELLO`]; dropped
     /// once a byte does.
     cut_early: Option<Arc<AtomicBool>>,
-    silence: Option<Pin<Box<Sleep>>>,
+    /// Whether silence counts as a cut, and once the ClientHello is written,
+    /// the deadline for the server's first byte.
+    silence: Silence,
+}
+
+enum Silence {
+    Off,
+    Waiting,
+    Armed(Pin<Box<Sleep>>),
 }
 
 impl TlsIo {
@@ -98,13 +106,17 @@ impl TlsIo {
             frag: frag.map(|opts| Fragmenter { opts, plan: None }),
             reader: RecordReader::default(),
             cut_early: None,
-            silence: None,
+            silence: Silence::Off,
         }
     }
 
-    /// Report a cut before the server's first byte through `flag`.
-    pub fn watch_cut(mut self, flag: Arc<AtomicBool>) -> Self {
+    /// Report a cut before the server's first byte through `flag`; with
+    /// `silence`, [`SILENT_HELLO`] without one after the ClientHello is a cut.
+    pub fn watch_cut(mut self, flag: Arc<AtomicBool>, silence: bool) -> Self {
         self.cut_early = Some(flag);
+        if silence {
+            self.silence = Silence::Waiting;
+        }
         self
     }
 
@@ -146,11 +158,10 @@ impl AsyncRead for TlsIo {
         let r = match this.reader.poll_read(&mut this.inner, cx, out) {
             Poll::Ready(r) => r,
             Poll::Pending => {
-                // Armed at the first read, which follows the ClientHello.
-                let silence = this
-                    .silence
-                    .get_or_insert_with(|| Box::pin(tokio::time::sleep(SILENT_HELLO)));
-                ready!(silence.as_mut().poll(cx));
+                let Silence::Armed(deadline) = &mut this.silence else {
+                    return Poll::Pending;
+                };
+                ready!(deadline.as_mut().poll(cx));
                 flag.store(true, Ordering::Relaxed);
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -161,7 +172,7 @@ impl AsyncRead for TlsIo {
         match &r {
             Ok(()) if out.filled().len() > before => {
                 this.cut_early = None;
-                this.silence = None;
+                this.silence = Silence::Off;
             }
             Ok(()) if out.remaining() > 0 => flag.store(true, Ordering::Relaxed),
             Err(e) if is_cut(e) => flag.store(true, Ordering::Relaxed),
@@ -201,6 +212,11 @@ impl AsyncWrite for TlsIo {
             && is_cut(e)
         {
             flag.store(true, Ordering::Relaxed);
+        }
+        // The first write is the ClientHello, whole once it returns (the
+        // fragmenter holds it until every piece is out).
+        if r.is_ok() && matches!(this.silence, Silence::Waiting) {
+            this.silence = Silence::Armed(Box::pin(tokio::time::sleep(SILENT_HELLO)));
         }
         Poll::Ready(r)
     }

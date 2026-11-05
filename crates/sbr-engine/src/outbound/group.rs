@@ -670,10 +670,19 @@ impl UrlTest {
     /// more than `tolerance`. Returns (index, measured).
     /// Degraded members are skipped while any healthy member has answered.
     fn select(&self) -> (usize, bool) {
+        self.pick(None)
+    }
+
+    /// [`Self::select`] with member `skip` treated as unmeasured.
+    fn pick(&self, skip: Option<usize>) -> (usize, bool) {
         let state: Vec<(Option<Delay>, bool)> = self
             .members
             .iter()
-            .map(|m| {
+            .enumerate()
+            .map(|(i, m)| {
+                if skip == Some(i) {
+                    return (None, false);
+                }
                 let t = real_tag(m.as_ref());
                 (self.env.history(&t), self.env.health.degraded(&t).is_some())
             })
@@ -704,20 +713,20 @@ impl UrlTest {
         }
     }
 
-    /// The member to try after `failed` could not connect: the one selection
-    /// picks now that `failed` has no history, if it was measured.
-    fn fallback(&self, failed: &Arc<dyn Outbound>) -> Option<usize> {
-        let (i, measured) = self.select();
-        (measured && !Arc::ptr_eq(&self.members[i], failed)).then_some(i)
+    /// The measured member selection would pick with `failed` left out.
+    fn select_without(&self, failed: usize) -> Option<usize> {
+        match self.pick(Some(failed)) {
+            (i, true) if i != failed => Some(i),
+            _ => None,
+        }
     }
 
-    /// Member `i` connected where the selected `failed` did not.
-    fn switch_after_failure(&self, i: usize, failed: &str) {
-        let _g = self.update.lock().unwrap();
+    /// Select member `i` in place of a set one. Callers hold `update`.
+    fn switch_to(&self, i: usize) {
         if self.selected.swap(i, Ordering::Relaxed) == i {
             return;
         }
-        info!(group = %self.tag, outbound = self.members[i].tag(), failed, "urltest switched after a failed connect");
+        info!(group = %self.tag, outbound = self.members[i].tag(), "urltest switched");
         if self.interrupt {
             self.env.tracker.close_through(&self.tag);
         }
@@ -728,15 +737,11 @@ impl UrlTest {
         let _g = self.update.lock().unwrap();
         let (i, measured) = self.select();
         let cur = self.selected.load(Ordering::Relaxed);
-        if cur == usize::MAX || (measured && i != cur) {
+        if cur == usize::MAX {
             self.selected.store(i, Ordering::Relaxed);
-            if cur != usize::MAX {
-                info!(group = %self.tag, outbound = self.members[i].tag(), "urltest switched");
-                if self.interrupt {
-                    self.env.tracker.close_through(&self.tag);
-                }
-                return true;
-            }
+        } else if measured && i != cur {
+            self.switch_to(i);
+            return true;
         }
         false
     }
@@ -926,17 +931,25 @@ impl Outbound for UrlTest {
             // next check. One more attempt goes to the member the group would
             // pick without it; the group moves there only if that works, so a
             // dead destination, which fails on both, does not rotate the group.
-            let Some(i) = self.fallback(&member) else {
+            // The fallback's history is left alone either way: its failure may
+            // be the destination's, and the caller's deadline may cut it short.
+            let Some(failed_at) = self.members.iter().position(|m| Arc::ptr_eq(m, &member)) else {
                 return Err(err);
             };
-            let next = self.members[i].clone();
-            let mut failed = ForgetOnDrop(Some((&self.env, next.tag())));
-            match next.connect(dest).await {
+            let Some(i) = self.select_without(failed_at) else {
+                return Err(err);
+            };
+            match self.members[i].connect(dest).await {
                 Ok(s) => {
-                    failed.0 = None;
+                    // The member that failed is not otherwise reported: the
+                    // connection as a whole succeeded.
+                    self.env.report(&real_tag(member.as_ref()), Signal::Connect, dest, None);
                     // Before the caller registers the connection, whose chain
                     // is read from the group's selection.
-                    self.switch_after_failure(i, member.tag());
+                    let _g = self.update.lock().unwrap();
+                    if self.selected.load(Ordering::Relaxed) == failed_at {
+                        self.switch_to(i);
+                    }
                     Ok(s)
                 }
                 Err(_) => Err(err),
