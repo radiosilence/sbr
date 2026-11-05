@@ -82,39 +82,48 @@ async fn sshd(bin: &Path) -> Sshd {
     let (user_key, user_pub) = keygen(&dir, "user_ed25519", "ed25519");
     let auth = dir.join("authorized_keys");
     std::fs::write(&auth, format!("{user_pub}\n")).unwrap();
-    let port = free_port();
-    let cfg = dir.join("sshd_config");
-    std::fs::write(
-        &cfg,
-        format!(
-            "Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nAuthorizedKeysFile {}\n\
-             PasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\n\
-             AllowTcpForwarding yes\nPidFile {}\nLogLevel ERROR\n",
-            host_key.display(),
-            auth.display(),
-            dir.join("sshd.pid").display(),
-        ),
-    )
-    .unwrap();
-    let child = Command::new(bin)
-        .args(["-D", "-e", "-f"])
-        .arg(&cfg)
-        .stdin(Stdio::null())
-        .spawn()
-        .expect("spawn sshd");
-    for _ in 0..100 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-            break;
+    // free_port releases the port before sshd binds it, so another test can
+    // take it in between; sshd then exits, and is started on a fresh port.
+    for _ in 0..5 {
+        let port = free_port();
+        let cfg = dir.join("sshd_config");
+        std::fs::write(
+            &cfg,
+            format!(
+                "Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nAuthorizedKeysFile {}\n\
+                 PasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\n\
+                 AllowTcpForwarding yes\nPidFile {}\nLogLevel ERROR\n",
+                host_key.display(),
+                auth.display(),
+                dir.join("sshd.pid").display(),
+            ),
+        )
+        .unwrap();
+        let mut child = Command::new(bin)
+            .args(["-D", "-e", "-f"])
+            .arg(&cfg)
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("spawn sshd");
+        for _ in 0..100 {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+                return Sshd {
+                    child,
+                    port,
+                    host_pub,
+                    user_key,
+                    _dir: tempdir::Dir(dir),
+                };
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = child.kill();
+        let _ = child.wait();
     }
-    Sshd {
-        child,
-        port,
-        host_pub,
-        user_key,
-        _dir: tempdir::Dir(dir),
-    }
+    panic!("sshd did not start listening");
 }
 
 fn user() -> String {

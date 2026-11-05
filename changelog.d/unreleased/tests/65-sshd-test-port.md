@@ -1,0 +1,1 @@
+- **SSH tests start their sshd reliably.** The test sshd is restarted on a fresh port when another test takes the one it was given, instead of the test failing with "connection refused".
