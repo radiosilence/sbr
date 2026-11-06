@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use futures::channel::{mpsc, oneshot};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{MainThreadMarker, MainThreadOnly, Message as _, define_class, msg_send};
 use objc2_foundation::{NSBundle, NSError, NSNumber, NSString, NSURL};
 use objc2_system_extensions::{
     OSSystemExtensionErrorCode, OSSystemExtensionErrorDomain, OSSystemExtensionManager, OSSystemExtensionProperties,
