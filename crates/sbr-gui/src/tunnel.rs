@@ -1,6 +1,7 @@
 //! The tunnel as the app sees it: the VPN configuration's status, and while
-//! it is connected, what the extension reports once a second (throughput,
-//! memory, CPU and its groups), kept as a short history for the graphs.
+//! it is connected, what the extension reports four times a second
+//! (throughput, memory, CPU and its groups), kept as a short history for the
+//! graphs, which glide between reports on the GPU.
 //!
 //! The extension only wakes for these messages, so polling stops whenever
 //! the tunnel is down.
@@ -15,9 +16,13 @@ use koan_kit::app::*;
 use crate::ne::{self, Manager, Status};
 use crate::proto::{Group, Request, Stats};
 
-/// Seconds of history the graphs show.
-pub const HISTORY: usize = 120;
-const POLL: Duration = Duration::from_secs(1);
+/// How often the extension is asked for its figures.
+pub const POLL: Duration = Duration::from_millis(250);
+/// Samples across a graph: two minutes.
+pub const HISTORY: usize = 480;
+/// Samples kept: one past the graph's width, which a graph scrolling in the
+/// next sample shows at its left edge.
+pub const KEPT: usize = HISTORY + 1;
 
 /// One poll's rates.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -35,8 +40,10 @@ pub struct Tunnel {
     pub status: Status,
     pub stats: Option<Stats>,
     pub groups: Vec<Group>,
-    /// Oldest first, at most `HISTORY`.
+    /// Oldest first, at most `KEPT`.
     pub history: VecDeque<Sample>,
+    /// Counts samples taken, so a graph knows when to take the next.
+    pub taken: u64,
     /// Groups whose latency test is running.
     pub testing: BTreeSet<String>,
     pub error: Option<String>,
@@ -53,7 +60,8 @@ impl Tunnel {
             status: Status::Invalid,
             stats: None,
             groups: Vec::new(),
-            history: VecDeque::with_capacity(HISTORY),
+            history: VecDeque::with_capacity(KEPT),
+            taken: 0,
             testing: BTreeSet::new(),
             error: None,
             manager: None,
@@ -65,6 +73,7 @@ impl Tunnel {
             tunnel.status = Status::On;
             tunnel.groups = crate::demo::groups();
             tunnel.history = crate::demo::history().into();
+            tunnel.taken = 1;
         } else {
             tunnel._tasks.push(cx.spawn(async move |this, cx| {
                 let Some(id) = ne::tunnel_bundle_id() else {
@@ -136,6 +145,7 @@ impl Tunnel {
                         t.groups.clear();
                         t.stats = None;
                         t.history.clear();
+                        t.taken += 1;
                     }
                     cx.notify();
                 });
@@ -144,10 +154,11 @@ impl Tunnel {
     }
 
     fn push(&mut self, sample: Sample) {
-        if self.history.len() == HISTORY {
+        if self.history.len() == KEPT {
             self.history.pop_front();
         }
         self.history.push_back(sample);
+        self.taken += 1;
     }
 
     /// The next poll's requests, or none while the tunnel is down.
@@ -176,6 +187,7 @@ impl Tunnel {
             self.status = if on { Status::On } else { Status::Off };
             if !on {
                 self.history.clear();
+                self.taken += 1;
             }
             cx.notify();
             return;

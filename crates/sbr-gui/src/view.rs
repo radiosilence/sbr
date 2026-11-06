@@ -13,13 +13,18 @@ use crate::tunnel::{Sample, Tunnel};
 
 pub struct TunnelPage {
     tunnel: Entity<Tunnel>,
+    chart: graph::LiveChart,
     _observe: Subscription,
 }
 
 impl TunnelPage {
     pub fn new(tunnel: Entity<Tunnel>, cx: &mut Context<Self>) -> Self {
         let _observe = cx.observe(&tunnel, |_, _, cx| cx.notify());
-        Self { tunnel, _observe }
+        Self {
+            tunnel,
+            chart: graph::LiveChart::new(),
+            _observe,
+        }
     }
 }
 
@@ -43,10 +48,19 @@ impl Render for TunnelPage {
             window,
             cx,
         );
+        let (taken, history) = {
+            let t = self.tunnel.read(cx);
+            (t.taken, t.history.clone())
+        };
+        self.chart.update(&history, taken, &look, window, cx);
         let t = self.tunnel.read(cx);
         let on = t.status.is_on();
         let samples: Vec<Sample> = t.history.iter().copied().collect();
         let latest = samples.last().copied().unwrap_or_default();
+        // The figures over the last second, which hold still enough to read.
+        let recent = &samples[samples.len().saturating_sub(4)..];
+        let mean = |f: fn(&Sample) -> f64| recent.iter().map(f).sum::<f64>() / recent.len().max(1) as f64;
+        let (down, up) = (mean(|s| s.down), mean(|s| s.up));
 
         let tunnel = self.tunnel.clone();
         let connect = Button::new("connect", ButtonKind::Bordered)
@@ -81,8 +95,8 @@ impl Render for TunnelPage {
         let figures = div()
             .flex()
             .gap(look.space(Space::Xxl))
-            .child(figure("down", graph::rate(latest.down), Tone::Accent, &look))
-            .child(figure("up", graph::rate(latest.up), Tone::Ink, &look));
+            .child(figure("down", graph::rate(down), Tone::Accent, &look))
+            .child(figure("up", graph::rate(up), Tone::Ink, &look));
 
         let gauges = div()
             .flex()
@@ -127,7 +141,7 @@ impl Render for TunnelPage {
         }
         content = content
             .child(figures)
-            .child(graph::throughput(&samples, look, px(200.0)))
+            .child(self.chart.element(look, px(200.0)))
             .child(gauges);
 
         // One-member selectors are aliases.

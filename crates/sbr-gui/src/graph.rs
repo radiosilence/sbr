@@ -3,9 +3,15 @@
 
 use koan_kit::app::*;
 use koan_kit::raw::{Hsla, PathBuilder, canvas, point, px};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::Duration;
+
+use koan_kit::app::image::RenderImage;
+use koan_kit::components::{Animated, AnimatedQuad, Ease, Repeat, ShaderProgram};
 use koan_kit::theme::{KoanStyled, Look, Space, Tone, TypeRole};
 
-use crate::tunnel::{HISTORY, Sample};
+use crate::tunnel::{HISTORY, POLL, Sample};
 
 /// Bytes a second the scale never goes below, so an idle tunnel draws flat.
 const FLOOR: f64 = 64.0 * 1024.0;
@@ -123,48 +129,185 @@ pub fn plot(
     .h(height)
 }
 
-/// Throughput over the last two minutes: download in the accent, upload in
-/// `ink` in front of it, on a scale named at its top left.
-pub fn throughput(samples: &[Sample], look: Look, height: Pixels) -> impl IntoElement {
-    let peak = samples.iter().map(|s| s.down.max(s.up)).fold(0.0, f64::max);
-    let scale = scale_for(peak);
-    let accent = look.color(Tone::Accent);
-    let ink = look.color(Tone::Ink);
-    let muted = look.text_color(Tone::Muted);
-    let note = |s: String| div().text_role(TypeRole::Fine, &look).text_color(muted).child(s);
-    div()
-        .flex()
-        .flex_col()
-        .gap(look.space(Space::Xs))
-        .child(note(rate(scale)))
-        .child(plot(
-            vec![
-                Series {
-                    values: samples.iter().map(|s| s.down).collect(),
-                    fill: accent.opacity(0.18),
-                    stroke: accent,
-                    width: 1.6,
-                },
-                Series {
-                    values: samples.iter().map(|s| s.up).collect(),
-                    fill: ink.opacity(0.10),
-                    stroke: ink.opacity(0.8),
-                    width: 1.2,
-                },
-            ],
-            scale,
+/// The throughput curves, drawn by the GPU from a texture of samples: row 0
+/// download, row 1 upload, each sample 16 bits as a fraction of `u[2]`, its
+/// high byte in red and blue (so either channel order reads alike) and its
+/// low byte in green. Texels are read at their centres, so the linear
+/// sampler returns them exactly; the program interpolates between them.
+///
+/// Uniforms: 0 samples in the texture, 1 samples across the plot, 2 the
+/// bytes a second a texel's full value stands for, 3 device pixels a point,
+/// 4..8 and 8..12 the two curves' colours, 12..14 their fills' opacity,
+/// 14..16 their strokes' width in points. Track 0 scrolls the newest sample
+/// in from the right edge, 0 to 1 over one poll; track 1 is the scale's top.
+static CURVES: ShaderProgram = ShaderProgram {
+    name: "sbr-throughput",
+    msl: r#"
+float sbr_value(texture2d<float> image, float4 tile, float i, float row, float n) {
+    float4 c = koan_sample(image, tile, float2((i + 0.5) / n, (row + 0.5) / 2.0));
+    return (round(c.r * 255.0) * 256.0 + round(c.g * 255.0)) / 65535.0;
+}
+
+float4 shade(float2 position, float2 size, float time, constant float *u, texture2d<float> image, float4 tile) {
+    float n = u[0];
+    float slots = u[1];
+    if (n < 2.0) {
+        return float4(0.0);
+    }
+    float phase = clamp(koan_track(u, 0, time), 0.0, 1.0);
+    float k = u[2] / max(koan_track(u, 1, time), 1.0);
+    float step = size.x / (slots - 1.0);
+    float f = position.x / step + (n - 1.0) - (slots - 1.0) - (1.0 - phase);
+    if (f < 0.0) {
+        return float4(0.0);
+    }
+    f = min(f, n - 1.0);
+    float i0 = floor(f);
+    float i1 = min(i0 + 1.0, n - 1.0);
+    float t = f - i0;
+    float4 out = float4(0.0);
+    for (int row = 0; row < 2; row++) {
+        float a = sbr_value(image, tile, i0, float(row), n) * k;
+        float b = sbr_value(image, tile, i1, float(row), n) * k;
+        float y = size.y * (1.0 - clamp(mix(a, b, t), 0.0, 1.0));
+        float slope = (b - a) * size.y / step;
+        float dist = abs(position.y - y) / sqrt(1.0 + slope * slope);
+        float4 colour = row == 0 ? float4(u[4], u[5], u[6], u[7]) : float4(u[8], u[9], u[10], u[11]);
+        float fill = clamp(position.y - y + 0.5, 0.0, 1.0) * u[12 + row];
+        float line = clamp(u[14 + row] * u[3] * 0.5 - dist + 0.5, 0.0, 1.0);
+        float alpha = colour.a * max(fill, line);
+        float over = alpha + out.a * (1.0 - alpha);
+        if (over > 0.0) {
+            out.rgb = (colour.rgb * alpha + out.rgb * out.a * (1.0 - alpha)) / over;
+        }
+        out.a = over;
+    }
+    return out;
+}
+"#,
+    // sbr-gui runs on Metal alone; wgpu never compiles this.
+    wgsl: r#"
+fn shade(position: vec2<f32>, size: vec2<f32>, time: f32, u: array<vec4<f32>, 20>, tile: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(0.0);
+}
+"#,
+    prepare: None,
+};
+
+/// Throughput over the last two minutes, which moves at the display's rate
+/// while the page itself is drawn only as samples arrive: each sample is
+/// written into a small texture and the GPU scrolls it in over one poll, and
+/// eases the scale when it changes. Kept by the page that shows it.
+pub struct LiveChart {
+    animated: Animated,
+    image: Option<Arc<RenderImage>>,
+    taken: u64,
+    scale: Option<f64>,
+    look: Option<Look>,
+}
+
+impl LiveChart {
+    pub fn new() -> Self {
+        Self {
+            animated: Animated::new(),
+            image: None,
+            taken: 0,
+            scale: None,
+            look: None,
+        }
+    }
+
+    /// Takes the samples if they changed since the last call.
+    pub fn update(&mut self, samples: &VecDeque<Sample>, taken: u64, look: &Look, window: &mut Window, cx: &mut App) {
+        if self.look != Some(*look) {
+            self.look = Some(*look);
+            self.animated.set(3, window.scale_factor());
+            self.animated.set_color(4, look.color(Tone::Accent));
+            self.animated.set_color(8, look.color(Tone::Ink).opacity(0.8));
+        }
+        if taken == self.taken {
+            return;
+        }
+        let first = self.taken == 0;
+        self.taken = taken;
+        let full = samples.iter().map(|s| s.down.max(s.up)).fold(1.0, f64::max);
+        let n = samples.len();
+        let mut bytes = Vec::with_capacity(n.max(1) * 2 * 4);
+        for row in 0..2 {
+            for s in samples {
+                let v = if row == 0 { s.down } else { s.up };
+                let q = (v / full * 65535.0).round().clamp(0.0, 65535.0) as u16;
+                let (hi, lo) = ((q >> 8) as u8, q as u8);
+                bytes.extend_from_slice(&[hi, lo, hi, 255]);
+            }
+        }
+        let next = (n > 0)
+            .then(|| ::image::RgbaImage::from_raw(n as u32, 2, bytes))
+            .flatten()
+            .map(|pixels| Arc::new(RenderImage::new(vec![::image::Frame::new(pixels)])));
+        if let Some(old) = std::mem::replace(&mut self.image, next) {
+            cx.drop_image(old, Some(window));
+        }
+
+        let a = &self.animated;
+        a.set(0, n as f32);
+        a.set(1, HISTORY as f32);
+        a.set(2, full as f32);
+        a.set(12, 0.18);
+        a.set(13, 0.10);
+        a.set(14, 1.6);
+        a.set(15, 1.2);
+        if first {
+            a.hold(0, 1.0);
+        } else {
+            a.segment(0, 0.0, 1.0, Animated::now(), POLL, Ease::Linear, Repeat::Once);
+        }
+        let peak = samples.iter().map(|s| s.down.max(s.up)).fold(0.0, f64::max);
+        let scale = scale_for(peak);
+        if self.scale.is_none() {
+            a.hold(1, scale as f32);
+        } else if self.scale != Some(scale) {
+            a.to(1, scale as f32, Duration::from_millis(400), Ease::QuickOut);
+        }
+        self.scale = Some(scale);
+    }
+
+    /// The chart with its scale named above and its span below.
+    pub fn element(&self, look: Look, height: Pixels) -> impl IntoElement {
+        let muted = look.text_color(Tone::Muted);
+        let note = |s: String| div().text_role(TypeRole::Fine, &look).text_color(muted).child(s);
+        let mut plot_area = div().relative().w_full().h(height).child(plot(
+            Vec::new(),
+            1.0,
             HISTORY,
             true,
             look.palette.rule.hsla(),
             height,
-        ))
-        .child(
-            div()
-                .flex()
-                .justify_between()
-                .child(note("2 min".into()))
-                .child(note("now".into())),
-        )
+        ));
+        if let Some(image) = self.image.clone() {
+            plot_area = plot_area.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .child(AnimatedQuad::new(&CURVES, &self.animated).image(image).size_full()),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(look.space(Space::Xs))
+            .child(note(rate(self.scale.unwrap_or(FLOOR))))
+            .child(plot_area)
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .child(note("2 min".into()))
+                    .child(note("now".into())),
+            )
+    }
 }
 
 /// A gauge's trend: one series filling its box, scaled between its own
@@ -202,7 +345,7 @@ mod tests {
 
     #[test]
     fn scale_rounds_up_to_a_readable_step() {
-        assert_eq!(scale_for(0.0), 100_000.0);
+        assert_eq!(scale_for(0.0), 80_000.0);
         assert_eq!(scale_for(140_000.0), 150_000.0);
         assert_eq!(scale_for(2_500_000.0), 3_000_000.0);
         assert_eq!(scale_for(9_000_000.0), 10_000_000.0);

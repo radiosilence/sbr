@@ -4,7 +4,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::proto::{Group, Member, Stats};
-use crate::tunnel::{HISTORY, Sample};
+use crate::tunnel::{KEPT, POLL, Sample};
 
 fn noise(seed: u64) -> f64 {
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -13,52 +13,54 @@ fn noise(seed: u64) -> f64 {
     (x >> 11) as f64 / (1u64 << 53) as f64
 }
 
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+/// Ticks of `POLL` since the epoch.
+fn tick() -> u64 {
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    (since.as_millis() / POLL.as_millis()) as u64
 }
 
+/// Noise that moves smoothly from one second to the next.
+fn smooth(seed: u64, tick: u64) -> f64 {
+    let per = 1000 / POLL.as_millis() as u64;
+    let (s, f) = (tick / per, (tick % per) as f64 / per as f64);
+    let f = f * f * (3.0 - 2.0 * f);
+    noise(seed ^ s) * (1.0 - f) + noise(seed ^ (s + 1)) * f
+}
+
+/// The demo's figures at `tick`, as a sample would report them.
+fn sample_at(tick: u64) -> Sample {
+    let secs = tick as f64 * POLL.as_secs_f64();
+    let wave = (secs / 9.0).sin() * 0.5 + 0.5;
+    let burst = 1.0 + 5.0 * (smooth(7, tick / 6) - 0.55).max(0.0) / 0.45;
+    Sample {
+        down: 400_000.0 + 2_400_000.0 * wave * burst * smooth(1, tick),
+        up: 40_000.0 + 260_000.0 * smooth(99, tick),
+        cpu: 0.03 + 0.09 * wave,
+        memory: 14_000_000 + (smooth(5, tick / 8) * 3_000_000.0) as u64,
+        connections: 20 + (smooth(3, tick / 4) * 30.0) as u64,
+    }
+}
+
+/// The next stats report, counting on from `last`.
 pub fn stats(last: Option<&Stats>) -> Stats {
-    stats_at(now(), last)
-}
-
-/// The two minutes before now, as the graphs would have drawn them.
-pub fn history() -> Vec<Sample> {
-    let end = now();
-    let mut last = stats_at(end - HISTORY as u64, None);
-    (end + 1 - HISTORY as u64..=end)
-        .map(|t| {
-            let s = stats_at(t, Some(&last));
-            let sample = Sample {
-                up: (s.uplink_bytes - last.uplink_bytes) as f64,
-                down: (s.downlink_bytes - last.downlink_bytes) as f64,
-                cpu: (s.cpu_time_micros - last.cpu_time_micros) as f64 / 1e6,
-                memory: s.memory_footprint,
-                connections: s.active_connections,
-            };
-            last = s;
-            sample
-        })
-        .collect()
-}
-
-fn stats_at(t: u64, last: Option<&Stats>) -> Stats {
-    let wave = ((t as f64) / 9.0).sin() * 0.5 + 0.5;
-    let burst = if noise(t / 7) > 0.7 { 6.0 } else { 1.0 };
-    let down = (400_000.0 + 2_400_000.0 * wave * burst * noise(t)) as u64;
-    let up = (40_000.0 + 260_000.0 * noise(t + 99)) as u64;
+    let s = sample_at(tick());
+    let dt = POLL.as_secs_f64();
     let prev = last.copied().unwrap_or_default();
     Stats {
-        memory_footprint: 14_000_000 + (noise(t + 5) * 3_000_000.0) as u64,
+        memory_footprint: s.memory,
         memory_available: 0,
-        active_connections: 20 + (noise(t + 3) * 30.0) as u64,
+        active_connections: s.connections,
         udp_sessions: 4,
-        uplink_bytes: prev.uplink_bytes + up,
-        downlink_bytes: prev.downlink_bytes + down,
-        cpu_time_micros: prev.cpu_time_micros + (30_000.0 + 90_000.0 * wave) as u64,
+        uplink_bytes: prev.uplink_bytes + (s.up * dt) as u64,
+        downlink_bytes: prev.downlink_bytes + (s.down * dt) as u64,
+        cpu_time_micros: prev.cpu_time_micros + (s.cpu * dt * 1e6) as u64,
     }
+}
+
+/// The history before now, as the graphs would have drawn it.
+pub fn history() -> Vec<Sample> {
+    let end = tick();
+    (end - KEPT as u64 + 1..=end).map(sample_at).collect()
 }
 
 fn member(tag: &str, kind: &str, delay: Option<u32>) -> Member {
