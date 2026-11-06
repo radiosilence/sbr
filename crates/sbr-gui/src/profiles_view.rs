@@ -12,7 +12,7 @@ use crate::install::Vpn;
 use crate::profile::Profile;
 use crate::profiles::Profiles;
 use crate::swift::Date;
-use crate::ui::{row_height, column, page, problem, text, toolbar};
+use crate::ui::{column, narrow, row_height, page, problem, text, toolbar};
 
 pub struct ProfilesPage {
     profiles: Entity<Profiles>,
@@ -112,6 +112,7 @@ impl Render for ProfilesPage {
             }));
         }
 
+        let narrow = narrow(window);
         let mut list = div().flex().flex_col();
         if store.profiles.is_empty() {
             list = list.child(text(
@@ -124,7 +125,7 @@ impl Render for ProfilesPage {
         for p in &store.profiles {
             let active = store.active_id == Some(p.id);
             let refreshing = store.refreshing.contains(&p.id);
-            list = list.child(self.row(p, active, refreshing, &look));
+            list = list.child(self.row(p, active, refreshing, narrow, &look));
             if active {
                 for w in &store.active_warnings {
                     list = list.child(div().pl(look.space(Space::L)).pb(look.space(Space::S)).child(text(
@@ -137,13 +138,7 @@ impl Render for ProfilesPage {
             }
         }
         let content = content
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(SectionHeading::new("profiles"))
-                    .child(list),
-            )
+            .child(list)
             .child(self.add_section(store.adding, &look, cx.entity()))
             .child(self.rules_section(&look, cx));
         page(toolbar, "profiles", content, &look)
@@ -151,7 +146,9 @@ impl Render for ProfilesPage {
 }
 
 impl ProfilesPage {
-    fn row(&self, p: &Profile, active: bool, refreshing: bool, look: &Look) -> AnyElement {
+    /// The name and where it comes from, its actions beside them; on a
+    /// narrow screen the actions go under.
+    fn row(&self, p: &Profile, active: bool, refreshing: bool, narrow: bool, look: &Look) -> AnyElement {
         let id = p.id;
         let key = |what: &str| SharedString::from(format!("{what}-{id}"));
         let subtitle = match (p.host(), p.updated) {
@@ -217,6 +214,11 @@ impl ProfilesPage {
                 }),
         );
         let profiles = self.profiles.clone();
+        let (actions_under, actions_beside) = if narrow {
+            (Some(actions), None)
+        } else {
+            (None, Some(actions))
+        };
         div()
             .id(key("row"))
             .flex()
@@ -246,9 +248,10 @@ impl ProfilesPage {
                         if active { Tone::Strong } else { Tone::Ink },
                         look,
                     ))
-                    .child(text(subtitle, TypeRole::Meta, Tone::Muted, look)),
+                    .child(text(subtitle, TypeRole::Meta, Tone::Muted, look))
+                    .children(actions_under),
             )
-            .child(actions)
+            .children(actions_beside)
             .into_any_element()
     }
 
