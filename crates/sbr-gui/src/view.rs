@@ -256,10 +256,16 @@ impl TunnelPage {
         } else {
             look.color(Tone::Muted)
         };
-        let share = m.delay.map(|d| d as f32 / slowest as f32).unwrap_or(0.0);
+        // A member failover has dropped has no latency worth drawing: its
+        // last one is from before it failed.
+        let share = match (degraded, m.delay) {
+            (false, Some(d)) => d as f32 / slowest as f32,
+            _ => 0.0,
+        };
+        let why = m.reason.as_deref().map(failure).unwrap_or("down");
         let delay = match (m.delay, degraded, m.retry_in) {
-            (_, true, Some(s)) => format!("down · retry {s}s"),
-            (_, true, None) => "down".into(),
+            (_, true, Some(s)) => format!("{why} · retry {s}s"),
+            (_, true, None) => why.into(),
             (Some(ms), _, _) => format!("{ms} ms"),
             (None, _, _) => "—".into(),
         };
@@ -318,5 +324,17 @@ impl TunnelPage {
                         look,
                     )),
             )
+    }
+}
+
+/// Why failover dropped a member, as the engine reports it, in words.
+fn failure(reason: &str) -> &str {
+    match reason {
+        "no_response" => "no response",
+        "connect" => "can't connect",
+        "reset" => "reset",
+        "closed" => "closed early",
+        "frozen" => "stalled",
+        other => other,
     }
 }
