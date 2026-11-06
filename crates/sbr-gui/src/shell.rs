@@ -77,7 +77,8 @@ impl Shell {
         let logs_page = cx.new(|cx| LogsPage::new(logs.clone(), vpn.clone(), cx));
         let settings_page = cx.new(|cx| SettingsPage::new(vpn.clone(), profiles, logs.clone(), window, cx));
         // The sheet and the question are drawn here, over the page.
-        let _asking = cx.observe(&sheet::asking(cx), |_, _, cx| cx.notify());
+        let asking = sheet::asking(cx);
+        let _asking = cx.observe(&asking, |_, _, cx| cx.notify());
         let mut shell = Self {
             tab: Tab::Tunnel,
             vpn,
