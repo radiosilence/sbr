@@ -1,16 +1,29 @@
 # sbr app
 
-The sbr client for iOS 17+, macOS 15+ and tvOS 17+. It runs sing-box profiles in
+The sbr client for iOS 26+, macOS 15+ and tvOS 17+. It runs sing-box profiles in
 a packet tunnel extension whose provider is Rust (`crates/sbr-tunnel-ext`,
-see `apple/README.md`) and follows kōan's design language: Geist Mono,
-lowercase interface text, square corners, hairlines and a single mint accent
-(see `koan/docs/design/koan-theme.md`).
+see `apple/README.md`).
+
+On iOS and macOS the app is Rust too: `crates/sbr-gui`, written in GPUI with
+kōan's design system, koan-kit, which it takes from the koan repository at
+a pinned revision (with the same GPUI revision koan pins, so one GPUI is
+built). Xcode still builds the bundle, because it provisions, signs and
+archives it with its extensions: the `Sbr` and `SbrMac` targets compile
+only `Gui/main.c`, which calls `sbr_gui_main` in `SbrGui.xcframework`. iOS
+26 is what GPUI's iOS backend requires. tvOS keeps the SwiftUI app
+(`SbrTV`), since GPUI has no tvOS backend.
+
+`SBR_GUI_DEMO=1 cargo run -p sbr-gui --profile gui-dev --features
+runtime-shaders` runs the app on made-up figures at the real poll rates,
+without a tunnel; `--example shot -- out.png [page] [--phone]` draws a page
+offscreen in dark and light. Talking to a real tunnel needs the signed
+bundle.
 
 ## Build
 
 ```sh
 cd apple
-./build-xcframework.sh              # both xcframeworks; SBR_SKIP_TVOS=1 to leave out tvOS
+./build-xcframework.sh              # the three xcframeworks; SBR_SKIP_TVOS=1 to leave out tvOS
 cd App
 mise exec -- xcodegen generate      # team: DEVELOPMENT_TEAM in project.yml
 open Sbr.xcodeproj
@@ -18,8 +31,9 @@ open Sbr.xcodeproj
 
 | target | platforms | what |
 |---|---|---|
-| `Sbr` | iOS, macOS, tvOS | the app |
-| `SbrTunnel` | iOS, macOS, tvOS | packet tunnel **app extension**, embedded in `Sbr` |
+| `Sbr` | iOS, macOS | the app: `sbr-gui` |
+| `SbrTV` | tvOS | the SwiftUI app |
+| `SbrTunnel` | iOS, macOS, tvOS | packet tunnel **app extension**, embedded in `Sbr` and `SbrTV` |
 | `SbrMac` | macOS | the same app for Developer ID distribution |
 | `SbrTunnelSystemExtension` | macOS | the tunnel as a **system extension**, embedded in `SbrMac` |
 | `SbrWidgets` | iOS 18+ | Control Center and Lock Screen toggle (`cc.blit.sbr.widgets`), embedded in `Sbr` |
@@ -61,7 +75,7 @@ and `--dmg-background` draws the disk image window's background, which
 
 On macOS sbr is a menu bar app. It has no Dock icon until its window is open,
 and the window opens only when asked (from the menu, by opening the app again,
-or when a profile link arrives), never at launch or login. The status item is
+or when a profile link arrives), or at launch while there is no profile yet. The status item is
 the arch, with its light while the tunnel is connected. The menu connects and
 disconnects, switches profiles and shows errors from the background. Its commands
 use macOS title case, since the menu is system chrome and sits beside other
