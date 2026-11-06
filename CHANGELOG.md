@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.9
+
+### Fixed
+
+- **The macOS app no longer uses a quarter of a core while its window is open.** The traffic and connection rates animated each change with a rolling-digit transition, which SwiftUI renders on the CPU by redrawing the text layer every frame; at one update a second this kept the app at 25–35% CPU. The figures now change in place, and unchanged groups and stats from the poll are no longer republished.
+
 ## 0.2.8
 
 ### Added
