@@ -1,8 +1,8 @@
 //! ClientHello fragmentation against a model SNI filter
-//! (`common/sni_censor.rs`): the automatic mode, configured fragmentation,
-//! and the `route-options` form for connections routed `direct`; and the
-//! ClientHello as it leaves the client, segment by segment, for
-//! `fragment_split`.
+//! (`common/sni_censor.rs`): the automatic mode against resets and silence,
+//! configured fragmentation, and the `route-options` form for connections
+//! routed `direct`; and the ClientHello as it leaves the client, segment by
+//! segment, for `fragment_split`.
 
 mod common;
 
@@ -133,6 +133,22 @@ async fn auto_splits_records_when_the_filter_reads_one_record() {
         echo_through(&e, target).await.unwrap();
     }
     assert_eq!((c.resets(), c.passed()), (1, 4));
+}
+
+#[tokio::test]
+async fn auto_splits_records_when_the_filter_drops_silently() {
+    let _serial = SERIAL.lock().await;
+    let c = sni_censor::start_silent(https_proxy().await, NAME, Records::First).await;
+    let e = engine(c.port, json!({}));
+    let target = echo().await;
+    // The silent first attempt counts as a cut once SILENT_HELLO passes,
+    // well inside the 15 s handshake timeout, and the retry splits records.
+    let t = std::time::Instant::now();
+    echo_through(&e, target).await.unwrap();
+    assert!(t.elapsed() < Duration::from_secs(12), "{:?}", t.elapsed());
+    assert_eq!((c.resets(), c.passed()), (1, 1));
+    echo_through(&e, target).await.unwrap();
+    assert_eq!((c.resets(), c.passed()), (1, 2));
 }
 
 #[tokio::test]

@@ -269,8 +269,9 @@ const AUTO_MAX: u8 = 2;
 /// `fragment` / `record_fragment` or `fragment_split` as configured apply
 /// to every handshake. With none set, the automatic mode (an sbr extension, on unless
 /// `disable_auto_fragment`) starts unfragmented and steps up when a
-/// handshake is reset or closed before the server sent a byte, which is how
-/// SNI filtering by the GFW and most DPI vendors looks from the client:
+/// handshake is reset or closed before the server sent a byte, or nothing
+/// comes back for [`io::SILENT_HELLO`], which is how SNI filtering by the
+/// GFW and most DPI vendors looks from the client:
 /// first to split TLS records (free; defeats filters that do not reassemble
 /// records), then to split records and TCP segments as well (costs
 /// `fragment_fallback_delay` per handshake where ACKs cannot be observed).
@@ -505,7 +506,7 @@ impl TlsClient {
             return self.handshake(io).await;
         }
         let cut = Arc::new(AtomicBool::new(false));
-        match self.handshake(io.watch_cut(cut.clone())).await {
+        match self.handshake(io.watch_cut(cut.clone(), level < AUTO_MAX)).await {
             Err(e) if cut.load(Ordering::Relaxed) && frag.escalate(level, &self.server_name().unwrap_or_default()) => {
                 Err(stdio::Error::new(e.kind(), Retry(e)))
             }

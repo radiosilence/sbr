@@ -2,8 +2,9 @@
 //! Henan firewall, IEEE S&P 2025; Niere et al., "Circumventing the GFW with
 //! TLS Record Fragmentation", 2023): the censor looks at the first segment
 //! of a connection, finds the server name in the ClientHello, and answers a
-//! blocked name with a reset. It never reassembles TCP segments. Whether it
-//! reassembles TLS records found within that one segment is the knob.
+//! blocked name with a reset, or, as Egypt's filters often do, with silence.
+//! It never reassembles TCP segments. Whether it reassembles TLS records
+//! found within that one segment is the knob.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -23,7 +24,7 @@ pub enum Records {
 
 pub struct SniCensor {
     pub port: u16,
-    /// Connections reset for revealing the name.
+    /// Connections reset (or held silent) for revealing the name.
     pub resets: Arc<AtomicUsize>,
     /// Connections let through.
     pub passed: Arc<AtomicUsize>,
@@ -40,6 +41,15 @@ impl SniCensor {
 
 /// Relays to `upstream`, resetting connections whose first segment reveals `name`.
 pub async fn start(upstream: SocketAddr, name: &'static str, records: Records) -> SniCensor {
+    start_with(upstream, name, records, false).await
+}
+
+/// As [`start`], but a revealing connection is held open and never answered.
+pub async fn start_silent(upstream: SocketAddr, name: &'static str, records: Records) -> SniCensor {
+    start_with(upstream, name, records, true).await
+}
+
+async fn start_with(upstream: SocketAddr, name: &'static str, records: Records, silent: bool) -> SniCensor {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     let resets = Arc::new(AtomicUsize::new(0));
@@ -57,6 +67,10 @@ pub async fn start(upstream: SocketAddr, name: &'static str, records: Records) -
                 }
                 if reveals(&buf[..n], name.as_bytes(), records) {
                     r.fetch_add(1, Ordering::SeqCst);
+                    if silent {
+                        while c.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+                        return;
+                    }
                     #[allow(deprecated)] // Linger 0 is the point: drop sends RST.
                     let _ = c.set_linger(Some(Duration::ZERO));
                     return;

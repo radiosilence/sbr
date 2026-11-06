@@ -22,6 +22,8 @@ const PASS: u8 = 0;
 const FREEZE: u8 = 1;
 const RESET: u8 = 2;
 const BLACKHOLE: u8 = 3;
+/// Reset every new flow before the proxy handshake: the member cannot connect.
+const REFUSE: u8 = 4;
 /// Downstream bytes per flow before the censor freezes it (TSPU: ~16–20 KB).
 const FREEZE_AT: usize = 16 * 1024;
 
@@ -46,6 +48,11 @@ async fn censor(upstream: u16) -> Censor {
         loop {
             let (c, _) = l.accept().await.unwrap();
             let mode = m.load(Ordering::SeqCst);
+            if mode == REFUSE {
+                #[allow(deprecated)] // Linger 0 is the point: drop sends RST.
+                let _ = c.set_linger(Some(Duration::ZERO));
+                continue;
+            }
             tokio::spawn(async move {
                 let Ok(s) = TcpStream::connect(("127.0.0.1", upstream)).await else {
                     return;
@@ -329,6 +336,18 @@ async fn works_through_b(i: &Instance, ctl: SocketAddr) {
         .collect();
     assert!(chains.iter().all(|c| *c == "b"), "new connections avoid a: {chains:?}");
     drop(c);
+}
+
+#[tokio::test]
+async fn failed_connect_is_made_through_the_next_member() {
+    let (i, a, ctl) = setup().await;
+    a.set(REFUSE);
+    // The connect through `a` fails; the same connection goes through `b`,
+    // and the group moves there.
+    let target = echo().await;
+    bulk_echo(socks_connect(port(&i, "in"), target).await, 64 * 1024).await;
+    assert_eq!(api(ctl, "/proxies/auto").await["now"], "b");
+    works_through_b(&i, ctl).await;
 }
 
 #[tokio::test]

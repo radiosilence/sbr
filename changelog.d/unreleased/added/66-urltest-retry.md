@@ -1,0 +1,1 @@
+- **`urltest` retries a failed connect on the next member.** When the selected member cannot connect, the connection is made once more through the member the group would pick without it, and the group switches there if that works, instead of failing every connection until the next check.
