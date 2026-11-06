@@ -511,7 +511,7 @@ impl ProfilesPage {
                 look,
             ))
             .child(
-                div().child(
+                div().flex().child(
                     Button::new("erase", ButtonKind::Bordered)
                         .label(if confirming { "really erase everything" } else { "erase everything" })
                         .destructive(true)

@@ -329,6 +329,10 @@ impl Profiles {
         let Some(url) = profile.remote_url.clone() else {
             return;
         };
+        // The demo's profiles have nowhere to come from.
+        if matches!(self.vault, Vault::Memory(_)) {
+            return;
+        }
         self.refreshing.insert(profile.id);
         cx.notify();
         cx.spawn(async move |this, cx| {

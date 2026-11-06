@@ -71,9 +71,10 @@ impl Render for Shell {
             .flex()
             .flex_col()
             .bg(look.palette.bg.hsla())
-            .child(div().flex_1().min_h_0().child(page))
+            .child(div().flex_1().min_h_0().overflow_hidden().child(page))
             .child(
                 div()
+                    .bg(look.palette.bg.hsla())
                     .border_t(look.hairline)
                     .border_color(look.palette.rule.hsla())
                     .child(tabs),
