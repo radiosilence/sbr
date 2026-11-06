@@ -14,6 +14,8 @@ use crate::tunnel::{Sample, Tunnel};
 pub struct TunnelPage {
     tunnel: Entity<Tunnel>,
     chart: graph::LiveChart,
+    /// Memory, CPU and connections.
+    gauges: [graph::LiveChart; 3],
     _observe: Subscription,
 }
 
@@ -23,6 +25,7 @@ impl TunnelPage {
         Self {
             tunnel,
             chart: graph::LiveChart::default(),
+            gauges: Default::default(),
             _observe,
         }
     }
@@ -52,7 +55,14 @@ impl Render for TunnelPage {
             let t = self.tunnel.read(cx);
             (t.taken, t.history.clone())
         };
-        self.chart.update(&history, taken, &look, window, cx);
+        self.chart
+            .update(taken, &look, window, cx, |look| graph::throughput_lines(&history, look));
+        let series: [fn(&Sample) -> f64; 3] = [|s| s.memory as f64, |s| s.cpu, |s| s.connections as f64];
+        for (gauge, value) in self.gauges.iter_mut().zip(series) {
+            gauge.update(taken, &look, window, cx, |look| {
+                graph::trend_lines(history.iter().map(value).collect(), look)
+            });
+        }
         let t = self.tunnel.read(cx);
         let on = t.status.is_on();
         let samples: Vec<Sample> = t.history.iter().copied().collect();
@@ -104,19 +114,19 @@ impl Render for TunnelPage {
             .child(gauge(
                 "memory",
                 graph::bytes(latest.memory as f64),
-                samples.iter().map(|s| s.memory as f64).collect(),
+                &self.gauges[0],
                 &look,
             ))
             .child(gauge(
                 "cpu",
                 format!("{:.0} %", latest.cpu * 100.0),
-                samples.iter().map(|s| s.cpu).collect(),
+                &self.gauges[1],
                 &look,
             ))
             .child(gauge(
                 "connections",
                 latest.connections.to_string(),
-                samples.iter().map(|s| s.connections as f64).collect(),
+                &self.gauges[2],
                 &look,
             ));
 
@@ -141,7 +151,7 @@ impl Render for TunnelPage {
         }
         content = content
             .child(figures)
-            .child(self.chart.element(look, px(200.0)))
+            .child(graph::throughput(&self.chart, look, px(200.0)))
             .child(gauges);
 
         // One-member selectors are aliases.
@@ -169,7 +179,7 @@ fn figure(name: &str, value: String, tone: Tone, look: &Look) -> Div {
 }
 
 /// A figure with its last two minutes as a line beneath.
-fn gauge(name: &str, value: String, values: Vec<f64>, look: &Look) -> Div {
+fn gauge(name: &str, value: String, chart: &graph::LiveChart, look: &Look) -> Div {
     div()
         .flex_1()
         .flex()
@@ -180,7 +190,7 @@ fn gauge(name: &str, value: String, values: Vec<f64>, look: &Look) -> Div {
         .border_color(look.palette.rule.hsla())
         .child(text(label(name), TypeRole::Meta, Tone::Muted, look))
         .child(text(value, TypeRole::TitleSmall, Tone::Strong, look))
-        .child(graph::trend(values, *look, px(36.0)))
+        .child(chart.quad(px(36.0)))
 }
 
 impl TunnelPage {
