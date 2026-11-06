@@ -18,17 +18,25 @@ pub struct TunnelPage {
     gauges: [graph::LiveChart; 3],
     /// The groups' latency bars.
     bars: graph::Bars,
-    _observe: Subscription,
+    /// The VPN configuration, for whether the system extension waits for
+    /// the user's approval. From the app's models, when they are set up.
+    vpn: Option<Entity<crate::install::Vpn>>,
+    _observe: Vec<Subscription>,
 }
 
 impl TunnelPage {
     pub fn new(tunnel: Entity<Tunnel>, cx: &mut Context<Self>) -> Self {
-        let _observe = cx.observe(&tunnel, |_, _, cx| cx.notify());
+        let vpn = cx.try_global::<crate::AppModels>().map(|m| m.0.vpn.clone());
+        let mut _observe = vec![cx.observe(&tunnel, |_, _, cx| cx.notify())];
+        if let Some(vpn) = &vpn {
+            _observe.push(cx.observe(vpn, |_, _, cx| cx.notify()));
+        }
         Self {
             tunnel,
             chart: graph::LiveChart::default(),
             gauges: Default::default(),
             bars: Default::default(),
+            vpn,
             _observe,
         }
     }
@@ -126,6 +134,27 @@ impl Render for TunnelPage {
             ));
 
         let mut content = crate::ui::column(&look, window).child(status);
+        if let Some(vpn) = self.vpn.clone().filter(|v| v.read(cx).needs_approval) {
+            let allow = Button::new("allow-extension", ButtonKind::Bordered)
+                .label("open system settings")
+                .on_click(move |_, _, cx| vpn.read(cx).open_approval_settings());
+            content = content.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(look.space(Space::M))
+                    .p(look.space(Space::M))
+                    .border(look.hairline)
+                    .border_color(look.color(Tone::Accent))
+                    .child(div().flex_1().child(text(
+                        "allow sbr's network extension in System Settings, then connect again.",
+                        TypeRole::Body,
+                        Tone::Ink,
+                        &look,
+                    )))
+                    .child(allow),
+            );
+        }
         if let Some(error) = t.error.clone() {
             let tunnel = self.tunnel.clone();
             content = content.child(
