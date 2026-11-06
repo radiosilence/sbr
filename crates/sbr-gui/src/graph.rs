@@ -198,6 +198,7 @@ fn shade(position: vec2<f32>, size: vec2<f32>, time: f32, u: array<vec4<f32>, 20
 /// while the page itself is drawn only as samples arrive: each sample is
 /// written into a small texture and the GPU scrolls it in over one poll, and
 /// eases the scale when it changes. Kept by the page that shows it.
+#[derive(Default)]
 pub struct LiveChart {
     animated: Animated,
     image: Option<Arc<RenderImage>>,
@@ -207,16 +208,6 @@ pub struct LiveChart {
 }
 
 impl LiveChart {
-    pub fn new() -> Self {
-        Self {
-            animated: Animated::new(),
-            image: None,
-            taken: 0,
-            scale: None,
-            look: None,
-        }
-    }
-
     /// Takes the samples if they changed since the last call.
     pub fn update(&mut self, samples: &VecDeque<Sample>, taken: u64, look: &Look, window: &mut Window, cx: &mut App) {
         if self.look != Some(*look) {

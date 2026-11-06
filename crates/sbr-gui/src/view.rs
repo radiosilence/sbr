@@ -22,7 +22,7 @@ impl TunnelPage {
         let _observe = cx.observe(&tunnel, |_, _, cx| cx.notify());
         Self {
             tunnel,
-            chart: graph::LiveChart::new(),
+            chart: graph::LiveChart::default(),
             _observe,
         }
     }
