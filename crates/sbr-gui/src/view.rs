@@ -3,8 +3,8 @@
 //! and each selector group with its members' latency.
 
 use koan_kit::app::*;
-use koan_kit::components::{Button, ButtonKind, ScrollArea, SectionHeading, Sparkline, Toolbar, ToolbarTitle};
-use koan_kit::raw::{Hsla, px, size};
+use koan_kit::components::{Button, ButtonKind, ScrollArea, SectionHeading, Toolbar, ToolbarTitle, moves_window};
+use koan_kit::raw::{Hsla, px};
 use koan_kit::theme::{KoanStyled, Look, Space, Tone, TypeRole, label};
 
 use crate::graph;
@@ -33,17 +33,30 @@ fn text(s: impl Into<SharedString>, role: TypeRole, tone: Tone, look: &Look) -> 
 impl Render for TunnelPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
+        let title = moves_window(
+            div()
+                .id("title")
+                .size_full()
+                .flex()
+                .items_center()
+                .child(ToolbarTitle::new("sbr")),
+            window,
+            cx,
+        );
         let t = self.tunnel.read(cx);
         let on = t.status.is_on();
         let samples: Vec<Sample> = t.history.iter().copied().collect();
         let latest = samples.last().copied().unwrap_or_default();
 
         let tunnel = self.tunnel.clone();
-        let connect = Button::new("connect", ButtonKind::Prominent)
+        let connect = Button::new("connect", ButtonKind::Bordered)
             .label(if on { "disconnect" } else { "connect" })
             .on_click(move |_, _, cx| tunnel.update(cx, |t, cx| t.set_on(!on, cx)));
 
-        let toolbar = Toolbar::new().leading(ToolbarTitle::new("sbr")).trailing(connect);
+        let toolbar = Toolbar::new()
+            .under_window_buttons(true)
+            .principal(title)
+            .trailing(connect);
 
         let route = t
             .groups
@@ -114,7 +127,7 @@ impl Render for TunnelPage {
         }
         content = content
             .child(figures)
-            .child(graph::throughput(samples.clone(), look, 180.0))
+            .child(graph::throughput(&samples, look, px(200.0)))
             .child(gauges);
 
         // One-member selectors are aliases.
@@ -143,8 +156,6 @@ fn figure(name: &str, value: String, tone: Tone, look: &Look) -> Div {
 
 /// A figure with its last two minutes as a line beneath.
 fn gauge(name: &str, value: String, values: Vec<f64>, look: &Look) -> Div {
-    let peak = values.iter().copied().fold(0.0, f64::max).max(f64::EPSILON);
-    let centred: Vec<f64> = values.iter().map(|v| v / peak * 2.0 - 1.0).collect();
     div()
         .flex_1()
         .flex()
@@ -155,7 +166,7 @@ fn gauge(name: &str, value: String, values: Vec<f64>, look: &Look) -> Div {
         .border_color(look.palette.rule.hsla())
         .child(text(label(name), TypeRole::Meta, Tone::Muted, look))
         .child(text(value, TypeRole::TitleSmall, Tone::Strong, look))
-        .child(Sparkline::new(centred, 1.0, look.color(Tone::Accent)).size(size(px(160.0), px(28.0))))
+        .child(graph::trend(values, *look, px(36.0)))
 }
 
 impl TunnelPage {

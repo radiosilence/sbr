@@ -4,6 +4,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::proto::{Group, Member, Stats};
+use crate::tunnel::{HISTORY, Sample};
 
 fn noise(seed: u64) -> f64 {
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -12,11 +13,38 @@ fn noise(seed: u64) -> f64 {
     (x >> 11) as f64 / (1u64 << 53) as f64
 }
 
-pub fn stats(last: Option<&Stats>) -> Stats {
-    let t = SystemTime::now()
+fn now() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_secs()
+}
+
+pub fn stats(last: Option<&Stats>) -> Stats {
+    stats_at(now(), last)
+}
+
+/// The two minutes before now, as the graphs would have drawn them.
+pub fn history() -> Vec<Sample> {
+    let end = now();
+    let mut last = stats_at(end - HISTORY as u64, None);
+    (end + 1 - HISTORY as u64..=end)
+        .map(|t| {
+            let s = stats_at(t, Some(&last));
+            let sample = Sample {
+                up: (s.uplink_bytes - last.uplink_bytes) as f64,
+                down: (s.downlink_bytes - last.downlink_bytes) as f64,
+                cpu: (s.cpu_time_micros - last.cpu_time_micros) as f64 / 1e6,
+                memory: s.memory_footprint,
+                connections: s.active_connections,
+            };
+            last = s;
+            sample
+        })
+        .collect()
+}
+
+fn stats_at(t: u64, last: Option<&Stats>) -> Stats {
     let wave = ((t as f64) / 9.0).sin() * 0.5 + 0.5;
     let burst = if noise(t / 7) > 0.7 { 6.0 } else { 1.0 };
     let down = (400_000.0 + 2_400_000.0 * wave * burst * noise(t)) as u64;

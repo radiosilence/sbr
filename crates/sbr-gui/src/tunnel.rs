@@ -64,6 +64,7 @@ impl Tunnel {
         if demo {
             tunnel.status = Status::On;
             tunnel.groups = crate::demo::groups();
+            tunnel.history = crate::demo::history().into();
         } else {
             tunnel._tasks.push(cx.spawn(async move |this, cx| {
                 let Some(id) = ne::tunnel_bundle_id() else {
