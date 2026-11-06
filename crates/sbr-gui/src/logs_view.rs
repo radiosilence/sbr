@@ -50,7 +50,7 @@ impl Render for LogsPage {
                 let on = *on;
                 vpn.update(cx, |v, cx| v.set_verbose(on, cx))
             });
-        let mut content = column(&look).child(verbose);
+        let mut content = column(&look, window).child(verbose);
 
         let note = match (connected, logs.lines.is_empty()) {
             (true, true) => Some("nothing yet."),

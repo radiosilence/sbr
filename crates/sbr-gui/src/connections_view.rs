@@ -16,7 +16,7 @@ use crate::connections::{Connections, Live};
 use crate::graph;
 use crate::install::Vpn;
 use crate::proto::Connection;
-use crate::ui::{age, column, page, problem, text, toolbar};
+use crate::ui::{age, column, narrow, row_height, page, problem, text, toolbar};
 
 pub struct ConnectionsPage {
     connections: Entity<Connections>,
@@ -108,7 +108,7 @@ impl Render for ConnectionsPage {
             "off".into()
         };
 
-        let mut content = column(&look);
+        let mut content = column(&look, window);
         if let Some(e) = c.error.clone() {
             let connections = self.connections.clone();
             content = content.child(problem("connections-problem", e, &look, move |cx| {
@@ -142,8 +142,9 @@ impl Render for ConnectionsPage {
         // Rates are drawn against the busiest connection listed, on a
         // square-root scale so slow ones still show.
         let peak = shown.iter().map(|l| l.up.max(l.down)).fold(1.0, f64::max);
+        let narrow = narrow(window);
         for live in shown {
-            list = list.child(self.row(live, peak, &look));
+            list = list.child(self.row(live, peak, narrow, &look));
         }
         content = content.child(list);
         page(toolbar, "connections", content, &look)
@@ -161,7 +162,9 @@ fn bar(share: f64, tone: Tone, look: &Look) -> Div {
 }
 
 impl ConnectionsPage {
-    fn row(&self, live: &Live, peak: f64, look: &Look) -> Stateful<Div> {
+    /// Host, chips and totals, with the rates beside them; on a narrow
+    /// screen the rates run full width under the chips.
+    fn row(&self, live: &Live, peak: f64, narrow: bool, look: &Look) -> Stateful<Div> {
         let c = &live.connection;
         let active = live.active();
         let mut chips = div().flex().flex_wrap().gap(look.space(Space::Xs));
@@ -173,7 +176,8 @@ impl ConnectionsPage {
             chips = chips.child(Badge::new(hop.clone()));
         }
         let rates = div()
-            .w(look.sized(180.0))
+            .when(narrow, |r| r.w_full())
+            .when(!narrow, |r| r.w(look.sized(180.0)))
             .flex()
             .flex_col()
             .gap(px(3.0))
@@ -185,6 +189,7 @@ impl ConnectionsPage {
                 if active { Tone::Accent } else { Tone::Muted },
                 look,
             ));
+        let (under, beside) = if narrow { (Some(rates), None) } else { (None, Some(rates)) };
         let totals = format!(
             "↓ {} ↑ {} · {}",
             graph::bytes(c.download as f64),
@@ -201,6 +206,7 @@ impl ConnectionsPage {
             .items_center()
             .gap(look.space(Space::M))
             .py(look.space(Space::M))
+            .min_h(row_height(look))
             .border_b(look.hairline)
             .border_color(look.palette.rule.hsla())
             .cursor_pointer()
@@ -211,7 +217,7 @@ impl ConnectionsPage {
             .child(
                 div()
                     .w(px(2.0))
-                    .h(px(40.0))
+                    .self_stretch()
                     .when(active, |b| b.bg(look.color(Tone::Accent))),
             )
             .child(
@@ -223,9 +229,10 @@ impl ConnectionsPage {
                     .gap(look.space(Space::Xs))
                     .child(text(c.host().to_owned(), TypeRole::Body, Tone::Strong, look).truncate())
                     .child(chips)
-                    .child(text(totals, TypeRole::Meta, Tone::Muted, look)),
+                    .child(text(totals, TypeRole::Meta, Tone::Muted, look))
+                    .children(under),
             )
-            .child(rates)
+            .children(beside)
             .child(
                 Button::new(SharedString::from(format!("close-{close_id}")), ButtonKind::Compact)
                     .label("close")

@@ -11,7 +11,7 @@ use crate::diagnose::Diagnose;
 use crate::install::Vpn;
 use crate::logs::Logs;
 use crate::profiles::Profiles;
-use crate::ui::{column, page, problem, text, toolbar};
+use crate::ui::{row_height, column, page, problem, text, toolbar};
 
 pub struct SettingsPage {
     vpn: Entity<Vpn>,
@@ -83,7 +83,7 @@ impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
         let toolbar = toolbar("settings", window, cx);
-        let mut content = column(&look);
+        let mut content = column(&look, window);
         if let Some(e) = self.vpn.read(cx).error.clone() {
             let vpn = self.vpn.clone();
             content = content.child(problem("settings-problem", e, &look, move |cx| {
@@ -131,6 +131,7 @@ impl SettingsPage {
                     .flex()
                     .items_center()
                     .py(look.space(Space::S))
+                    .min_h(row_height(look))
                     .border_b(look.hairline)
                     .border_color(look.palette.rule.hsla())
                     .child(

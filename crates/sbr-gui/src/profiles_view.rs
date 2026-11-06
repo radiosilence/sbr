@@ -12,7 +12,7 @@ use crate::install::Vpn;
 use crate::profile::Profile;
 use crate::profiles::Profiles;
 use crate::swift::Date;
-use crate::ui::{column, page, problem, text, toolbar};
+use crate::ui::{row_height, column, page, problem, text, toolbar};
 
 pub struct ProfilesPage {
     profiles: Entity<Profiles>,
@@ -97,7 +97,7 @@ impl Render for ProfilesPage {
             .on_click(move |_, _, cx| vpn.update(cx, |v, cx| v.refresh_profiles(cx)));
         let toolbar = toolbar("profiles", window, cx).trailing(refresh);
 
-        let mut content = column(&look);
+        let mut content = column(&look, window);
         let store = self.profiles.read(cx);
         if let Some(e) = store.problem.clone() {
             let profiles = self.profiles.clone();
@@ -223,6 +223,7 @@ impl ProfilesPage {
             .items_center()
             .gap(look.space(Space::M))
             .py(look.space(Space::M))
+            .min_h(row_height(look))
             .border_b(look.hairline)
             .border_color(look.palette.rule.hsla())
             .cursor_pointer()
@@ -301,6 +302,7 @@ impl ProfilesPage {
                     .items_center()
                     .gap(look.space(Space::M))
                     .py(look.space(Space::S))
+                    .min_h(row_height(look))
                     .border_b(look.hairline)
                     .border_color(look.palette.rule.hsla())
                     .child(
