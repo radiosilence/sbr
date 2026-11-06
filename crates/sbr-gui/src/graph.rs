@@ -133,7 +133,10 @@ pub fn plot(
 /// download, row 1 upload, each sample 16 bits as a fraction of `u[2]`, its
 /// high byte in red and blue (so either channel order reads alike) and its
 /// low byte in green. Texels are read at their centres, so the linear
-/// sampler returns them exactly; the program interpolates between them.
+/// sampler returns them exactly. The program draws a monotone cubic through
+/// them, which rounds peaks off without overshooting, and strokes it by each
+/// pixel's distance to the curve, so the line keeps its width at any slope
+/// and does not shimmer as it scrolls.
 ///
 /// Uniforms: 0 samples in the texture, 1 samples across the plot, 2 the
 /// bytes a second a texel's full value stands for, 3 device pixels a point,
@@ -144,8 +147,30 @@ static CURVES: ShaderProgram = ShaderProgram {
     name: "sbr-throughput",
     msl: r#"
 float sbr_value(texture2d<float> image, float4 tile, float i, float row, float n) {
+    i = clamp(i, 0.0, n - 1.0);
     float4 c = koan_sample(image, tile, float2((i + 0.5) / n, (row + 0.5) / 2.0));
     return (round(c.r * 255.0) * 256.0 + round(c.g * 255.0)) / 65535.0;
+}
+
+// A monotone cubic's tangent at b (Fritsch and Butland): flat at a peak or
+// a trough, so the curve rounds them off without passing beyond them.
+float sbr_tangent(float a, float b, float c) {
+    float d0 = b - a;
+    float d1 = c - b;
+    return d0 * d1 <= 0.0 ? 0.0 : 2.0 * d0 * d1 / (d0 + d1);
+}
+
+float sbr_curve(float p1, float p2, float m1, float m2, float t) {
+    float t2 = t * t;
+    float t3 = t2 * t;
+    return (2.0 * t3 - 3.0 * t2 + 1.0) * p1 + (t3 - 2.0 * t2 + t) * m1
+        + (3.0 * t2 - 2.0 * t3) * p2 + (t3 - t2) * m2;
+}
+
+float sbr_segment(float2 p, float2 a, float2 b) {
+    float2 ab = b - a;
+    float h = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+    return length(p - a - ab * h);
 }
 
 float4 shade(float2 position, float2 size, float time, constant float *u, texture2d<float> image, float4 tile) {
@@ -157,24 +182,49 @@ float4 shade(float2 position, float2 size, float time, constant float *u, textur
     float phase = clamp(koan_track(u, 0, time), 0.0, 1.0);
     float k = u[2] / max(koan_track(u, 1, time), 1.0);
     float step = size.x / (slots - 1.0);
-    float f = position.x / step + (n - 1.0) - (slots - 1.0) - (1.0 - phase);
-    if (f < 0.0) {
+    // Sample i stands at x = (i - shift) * step.
+    float shift = (n - 1.0) - (slots - 1.0) - (1.0 - phase);
+    float f = position.x / step + shift;
+    if (f < -1.0) {
         return float4(0.0);
     }
-    f = min(f, n - 1.0);
-    float i0 = floor(f);
-    float i1 = min(i0 + 1.0, n - 1.0);
-    float t = f - i0;
+    float i0 = floor(clamp(f, 0.0, n - 1.0));
+    float t = clamp(f - i0, 0.0, 1.0);
     float4 out = float4(0.0);
     for (int row = 0; row < 2; row++) {
-        float a = sbr_value(image, tile, i0, float(row), n) * k;
-        float b = sbr_value(image, tile, i1, float(row), n) * k;
-        float y = size.y * (1.0 - clamp(mix(a, b, t), 0.0, 1.0));
-        float slope = (b - a) * size.y / step;
-        float dist = abs(position.y - y) / sqrt(1.0 + slope * slope);
+        // Samples i0 - 2 to i0 + 3, and the tangents at i0 - 1 to i0 + 2.
+        float v[6];
+        for (int q = 0; q < 6; q++) {
+            v[q] = sbr_value(image, tile, i0 - 2.0 + float(q), float(row), n) * k;
+        }
+        float m[6];
+        for (int q = 1; q < 5; q++) {
+            m[q] = sbr_tangent(v[q - 1], v[q], v[q + 1]);
+        }
+        float y = size.y * (1.0 - clamp(sbr_curve(v[2], v[3], m[2], m[3], t), 0.0, 1.0));
+        float fill = f >= 0.0 ? clamp(position.y - y + 0.5, 0.0, 1.0) * u[12 + row] : 0.0;
+
+        // The stroke: the distance to the curve over this interval and its
+        // neighbours, each followed in four straight pieces.
+        float d = 1e9;
+        for (int q = 1; q < 4; q++) {
+            float j = i0 - 2.0 + float(q);
+            if (j < 0.0 || j + 1.0 > n - 1.0) {
+                continue;
+            }
+            float2 prev = float2((j - shift) * step, size.y * (1.0 - clamp(v[q], 0.0, 1.0)));
+            for (int s = 1; s <= 4; s++) {
+                float tt = float(s) / 4.0;
+                float value = sbr_curve(v[q], v[q + 1], m[q], m[q + 1], tt);
+                float2 at = float2((j + tt - shift) * step, size.y * (1.0 - clamp(value, 0.0, 1.0)));
+                d = min(d, sbr_segment(position, prev, at));
+                prev = at;
+            }
+        }
+        float half_width = u[14 + row] * u[3] * 0.5;
+        float line = 1.0 - smoothstep(half_width - 0.6, half_width + 0.6, d);
+
         float4 colour = row == 0 ? float4(u[4], u[5], u[6], u[7]) : float4(u[8], u[9], u[10], u[11]);
-        float fill = clamp(position.y - y + 0.5, 0.0, 1.0) * u[12 + row];
-        float line = clamp(u[14 + row] * u[3] * 0.5 - dist + 0.5, 0.0, 1.0);
         float alpha = colour.a * max(fill, line);
         float over = alpha + out.a * (1.0 - alpha);
         if (over > 0.0) {
@@ -246,8 +296,8 @@ impl LiveChart {
         a.set(2, full as f32);
         a.set(12, 0.18);
         a.set(13, 0.10);
-        a.set(14, 1.6);
-        a.set(15, 1.2);
+        a.set(14, 1.75);
+        a.set(15, 1.4);
         if first {
             a.hold(0, 1.0);
         } else {
