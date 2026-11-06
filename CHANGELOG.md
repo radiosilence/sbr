@@ -9,7 +9,7 @@
 
 ### Changed
 
-- **The iOS and macOS app is rewritten in Rust with GPUI and kōan's koan-kit, and requires iOS 26.** The tvOS app keeps SwiftUI. The new app draws its throughput graph, gauges and bars on the GPU between polls, so they move at the display's rate while the page itself is drawn only as figures arrive. It reads the Keychain items and VPN configuration the Swift app wrote, so an existing install keeps its profiles. Not carried over: scanning a profile's QR code, sending a profile to an Apple TV, the macOS app's Shortcuts actions, and the diagnose page's QUIC, bulk-download and system-resolver checks.
+- **The iOS and macOS app is rewritten in Rust with GPUI and kōan's koan-kit, and requires iOS 26 and macOS 26.** The tvOS app keeps SwiftUI. The new app draws its throughput graph, gauges and bars on the GPU between polls, so they move at the display's rate while the page itself is drawn only as figures arrive. It reads the Keychain items and VPN configuration the Swift app wrote, so an existing install keeps its profiles. Not carried over: scanning a profile's QR code, sending a profile to an Apple TV, the macOS app's Shortcuts actions, and the diagnose page's QUIC, bulk-download and system-resolver checks.
 - **The packet tunnel provider is Rust.** `SbrTunnelProvider` (`crates/sbr-tunnel-ext`) replaces SbrKit's `SbrPacketTunnelProvider` in the iOS, tvOS and macOS app extension and the macOS system extension, calling the core directly instead of through the C ABI, with the same app messages, Keychain items and files. `build-xcframework.sh` also builds `SbrTunnel.xcframework`, which the extensions link; SbrKit no longer has a provider class.
 
 ## 0.2.9

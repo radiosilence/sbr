@@ -1,7 +1,7 @@
 # XcodeGen spec: `xcodegen generate` (see README.md).
 #
 # Targets
-#   Sbr                        iOS 26+ and macOS 15+ app: the sbr-gui Rust
+#   Sbr                        iOS 26+ and macOS 26+ app: the sbr-gui Rust
 #                              library (GPUI, kōan's koan-kit), SbrGui.xcframework
 #   SbrTV                      tvOS 17+ app (SwiftUI on SbrKit)
 #   SbrTunnel                  their packet tunnel, as an app extension
@@ -59,7 +59,7 @@ targets:
     deploymentTarget:
       # GPUI's iOS backend, as kōan's phone app runs it.
       iOS: "26.0"
-      macOS: "15.0"
+      macOS: "26.0"
     sources:
       - path: Gui
       - path: App/Assets.xcassets
@@ -103,6 +103,10 @@ targets:
         SbrKeychainGroup: $(SBR_KEYCHAIN_GROUP)
     settings:
       base:
+        # XcodeGen leaves a multi-platform target's deploymentTarget out of
+        # its build settings, which then default to the SDK's version.
+        IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
         PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID)
         PRODUCT_NAME: sbr
         "OTHER_LDFLAGS[sdk=macosx*]": $(inherited) $(SBR_GUI_MAC_LDFLAGS)
@@ -179,7 +183,7 @@ targets:
     supportedDestinations: [iOS, macOS, tvOS]
     deploymentTarget:
       iOS: "17.0"
-      macOS: "15.0"
+      macOS: "26.0"
       tvOS: "17.0"
     sources:
       - path: Tunnel
@@ -201,6 +205,10 @@ targets:
           NSExtensionPrincipalClass: SbrTunnelProvider
     settings:
       base:
+        # As for Sbr: XcodeGen leaves these out for a multi-platform target.
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        TVOS_DEPLOYMENT_TARGET: "17.0"
         PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID).tunnel
         OTHER_LDFLAGS: $(inherited) $(SBR_TUNNEL_LDFLAGS)
         CODE_SIGN_ENTITLEMENTS: Tunnel/Tunnel.entitlements
@@ -245,7 +253,7 @@ targets:
   SbrMac:
     type: application
     platform: macOS
-    deploymentTarget: "15.0"
+    deploymentTarget: "26.0"
     sources:
       - path: Gui
       - path: App/Assets.xcassets
@@ -289,7 +297,7 @@ targets:
   SbrTunnelSystemExtension:
     type: system-extension
     platform: macOS
-    deploymentTarget: "15.0"
+    deploymentTarget: "26.0"
     sources:
       - Tunnel/Provider.c
       - SystemExtension/main.swift

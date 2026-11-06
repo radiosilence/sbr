@@ -47,7 +47,7 @@ rustup target add "${TARGETS[@]}"
 cargo build --release -p sbr-apple -p sbr-tunnel-ext "${TARGETS[@]/#/--target=}"
 # The app has no tvOS or Catalyst build, and targets the iOS GPUI runs on.
 GUI_TARGETS=("${IOS[@]}" "${IOS_SIM[@]}" "${MACOS[@]}")
-IPHONEOS_DEPLOYMENT_TARGET=26.0 MACOSX_DEPLOYMENT_TARGET=15.0 \
+IPHONEOS_DEPLOYMENT_TARGET=26.0 MACOSX_DEPLOYMENT_TARGET=26.0 \
   cargo build --release -p sbr-gui --lib "${GUI_TARGETS[@]/#/--target=}"
 
 OUT=apple/build

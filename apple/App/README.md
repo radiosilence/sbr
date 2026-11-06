@@ -1,6 +1,6 @@
 # sbr app
 
-The sbr client for iOS 26+, macOS 15+ and tvOS 17+. It runs sing-box profiles in
+The sbr client for iOS 26+, macOS 26+ and tvOS 17+. It runs sing-box profiles in
 a packet tunnel extension whose provider is Rust (`crates/sbr-tunnel-ext`,
 see `apple/README.md`).
 
@@ -10,7 +10,7 @@ a pinned revision (with the same GPUI revision koan pins, so one GPUI is
 built). Xcode still builds the bundle, because it provisions, signs and
 archives it with its extensions: the `Sbr` and `SbrMac` targets compile
 only `Gui/main.c`, which calls `sbr_gui_main` in `SbrGui.xcframework`. iOS
-26 is what GPUI's iOS backend requires. tvOS keeps the SwiftUI app
+26 is what GPUI's iOS backend requires; macOS 26 matches it. tvOS keeps the SwiftUI app
 (`SbrTV`), since GPUI has no tvOS backend.
 
 `SBR_GUI_DEMO=1 cargo run -p sbr-gui --profile gui-dev --features

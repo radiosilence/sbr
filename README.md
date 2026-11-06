@@ -278,7 +278,7 @@ Vision skips sing-box's 5 ms sleep before the first raw write; rustls is fed one
 brew install --cask radiosilence/tap/sbr
 ```
 
-or download `sbr-<version>.dmg` from the [latest release](https://github.com/radiosilence/sbr/releases/latest) and drag sbr to Applications. Either way, approve the network extension under System Settings › General › Login Items & Extensions on first connect. macOS 15 or later. The cask moves to a release once its disk image is notarised, which can lag the release by Apple's queue.
+or download `sbr-<version>.dmg` from the [latest release](https://github.com/radiosilence/sbr/releases/latest) and drag sbr to Applications. Either way, approve the network extension under System Settings › General › Login Items & Extensions on first connect. macOS 26 or later. The cask moves to a release once its disk image is notarised, which can lag the release by Apple's queue.
 
 ## CI
 
