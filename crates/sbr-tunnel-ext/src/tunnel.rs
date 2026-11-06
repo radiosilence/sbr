@@ -478,7 +478,7 @@ impl Tunnel {
                     if let Some(core) = weak.upgrade().and_then(|t| t.core()) {
                         let s = core.stats();
                         peak = peak.max(s.memory_footprint);
-                        if tick % 5 == 0
+                        if tick.is_multiple_of(5)
                             && let Some(path) = store::private_file(HEARTBEAT)
                         {
                             let now = Instant::now();
