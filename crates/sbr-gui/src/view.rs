@@ -3,7 +3,7 @@
 //! and each selector group with its members' latency.
 
 use koan_kit::app::*;
-use koan_kit::components::{Button, ButtonKind, ScrollArea, SectionHeading, Toolbar, ToolbarTitle, moves_window};
+use koan_kit::components::{Button, ButtonKind, ScrollArea, SectionHeading};
 use koan_kit::raw::{Hsla, px};
 use koan_kit::theme::{KoanStyled, Look, Space, Tone, TypeRole, label};
 
@@ -45,16 +45,8 @@ impl Render for TunnelPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
         self.bars.sweep();
-        let title = moves_window(
-            div()
-                .id("title")
-                .size_full()
-                .flex()
-                .items_center()
-                .child(ToolbarTitle::new("sbr")),
-            window,
-            cx,
-        );
+        let narrow = crate::ui::narrow(window);
+        let toolbar = crate::ui::toolbar("sbr", window, cx);
         let (taken, history) = {
             let t = self.tunnel.read(cx);
             (t.taken, t.history.clone())
@@ -81,10 +73,7 @@ impl Render for TunnelPage {
             .label(if on { "disconnect" } else { "connect" })
             .on_click(move |_, _, cx| tunnel.update(cx, |t, cx| t.set_on(!on, cx)));
 
-        let toolbar = Toolbar::new()
-            .under_window_buttons(true)
-            .principal(title)
-            .trailing(connect);
+        let toolbar = toolbar.trailing(connect);
 
         let route = t
             .groups
@@ -112,8 +101,10 @@ impl Render for TunnelPage {
             .child(figure("down", graph::rate(down), Tone::Accent, &look))
             .child(figure("up", graph::rate(up), Tone::Ink, &look));
 
+        // Side by side, or stacked on a narrow screen.
         let gauges = div()
             .flex()
+            .when(narrow, |g| g.flex_col())
             .gap(look.space(Space::M))
             .child(gauge(
                 "memory",
@@ -134,12 +125,7 @@ impl Render for TunnelPage {
                 &look,
             ));
 
-        let mut content = div()
-            .flex()
-            .flex_col()
-            .gap(look.space(Space::Xl))
-            .p(look.space(Space::Xl))
-            .child(status);
+        let mut content = crate::ui::column(&look, window).child(status);
         if let Some(error) = t.error.clone() {
             let tunnel = self.tunnel.clone();
             content = content.child(
@@ -161,7 +147,7 @@ impl Render for TunnelPage {
         // One-member selectors are aliases.
         for g in t.groups.iter().filter(|g| g.members.len() > 1) {
             let testing = t.testing.contains(&g.tag);
-            content = content.child(self.group(g, testing, &look));
+            content = content.child(self.group(g, testing, narrow, &look));
         }
 
         div()
@@ -198,7 +184,7 @@ fn gauge(name: &str, value: String, chart: &graph::LiveChart, look: &Look) -> Di
 }
 
 impl TunnelPage {
-    fn group(&self, g: &Group, testing: bool, look: &Look) -> Div {
+    fn group(&self, g: &Group, testing: bool, narrow: bool, look: &Look) -> Div {
         let tunnel = self.tunnel.clone();
         let tag = g.tag.clone();
         let test = Button::new(SharedString::from(format!("test-{}", g.tag)), ButtonKind::Compact)
@@ -212,7 +198,7 @@ impl TunnelPage {
         let slowest = g.members.iter().filter_map(|m| m.delay).max().unwrap_or(1).max(1);
         let mut rows = div().flex().flex_col();
         for m in g.members.iter().cloned() {
-            rows = rows.child(self.member(g, m, fastest, slowest, look));
+            rows = rows.child(self.member(g, m, fastest, slowest, narrow, look));
         }
         div()
             .flex()
@@ -221,7 +207,17 @@ impl TunnelPage {
             .child(rows)
     }
 
-    fn member(&self, g: &Group, m: Member, fastest: Option<u32>, slowest: u32, look: &Look) -> Stateful<Div> {
+    /// A member's row: its name, type, latency bar and figure. On a narrow
+    /// screen the type column, which only labels, is left out.
+    fn member(
+        &self,
+        g: &Group,
+        m: Member,
+        fastest: Option<u32>,
+        slowest: u32,
+        narrow: bool,
+        look: &Look,
+    ) -> Stateful<Div> {
         let picked = g.selected == m.tag;
         let degraded = m.degraded == Some(true);
         let bar_color: Hsla = if degraded {
@@ -247,6 +243,7 @@ impl TunnelPage {
             .items_center()
             .gap(look.space(Space::M))
             .py(look.space(Space::S))
+            .min_h(crate::ui::row_height(look))
             .border_b(look.hairline)
             .border_color(look.palette.rule.hsla())
             .when(selectable, |row| {
@@ -260,17 +257,19 @@ impl TunnelPage {
                     .w(px(10.0))
                     .child(text(if picked { "●" } else { "" }, TypeRole::Body, Tone::Accent, look)),
             )
-            .child(div().w(look.sized(140.0)).child(text(
+            .child(div().w(look.sized(if narrow { 110.0 } else { 140.0 })).child(text(
                 m.tag.clone(),
                 TypeRole::Body,
                 if picked { Tone::Strong } else { Tone::Ink },
                 look,
             )))
-            .child(
-                div()
-                    .w(look.sized(110.0))
-                    .child(text(m.kind.clone(), TypeRole::Meta, Tone::Muted, look)),
-            )
+            .when(!narrow, |row| {
+                row.child(
+                    div()
+                        .w(look.sized(110.0))
+                        .child(text(m.kind.clone(), TypeRole::Meta, Tone::Muted, look)),
+                )
+            })
             .child(div().flex_1().child(self.bars.bar(
                 format!("{}/{}", g.tag, m.tag),
                 share,
@@ -278,7 +277,7 @@ impl TunnelPage {
                 look.palette.rule.hsla(),
                 px(4.0),
             )))
-            .child(div().w(look.sized(120.0)).flex().justify_end().child(text(
+            .child(div().w(look.sized(if narrow { 90.0 } else { 120.0 })).flex().justify_end().child(text(
                 delay,
                 TypeRole::Meta,
                 if degraded { Tone::Bad } else { Tone::Ink },

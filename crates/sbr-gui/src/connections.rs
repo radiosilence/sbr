@@ -13,6 +13,7 @@ use crate::ne::{Manager, Status};
 use crate::proto::{Connection, Request};
 use crate::tunnel::Tunnel;
 
+/// The tunnel page's rate, which the rate bars' default easing spans.
 const POLL: Duration = Duration::from_millis(250);
 
 /// A connection with its rates over the last poll.
@@ -194,7 +195,7 @@ fn demo(previous: &HashMap<String, Live>) -> Vec<Live> {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);
-    let t = now_ms / 250;
+    let t = now_ms / POLL.as_millis() as i64;
     let hosts = [
         (
             "www.youtube.com",
@@ -257,8 +258,8 @@ fn demo(previous: &HashMap<String, Live>) -> Vec<Live> {
             let p = previous.get(&id);
             let (upload, download) = p.map_or((4_000 * i as u64, 90_000 * i as u64), |p| {
                 (
-                    p.connection.upload + (up * 0.25) as u64,
-                    p.connection.download + (down * 0.25) as u64,
+                    p.connection.upload + (up * POLL.as_secs_f64()) as u64,
+                    p.connection.download + (down * POLL.as_secs_f64()) as u64,
                 )
             });
             let ip = host.parse::<std::net::IpAddr>().is_ok();

@@ -22,6 +22,8 @@ pub struct ConnectionsPage {
     connections: Entity<Connections>,
     vpn: Entity<Vpn>,
     filter: Entity<FieldState>,
+    /// The rate bars, gliding over each 250 ms poll.
+    bars: graph::Bars,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -45,6 +47,7 @@ impl ConnectionsPage {
             connections,
             vpn,
             filter,
+            bars: graph::Bars::default(),
             _subscriptions,
         }
     }
@@ -88,6 +91,7 @@ fn matches(c: &Connection, filter: &str) -> bool {
 impl Render for ConnectionsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
+        self.bars.sweep();
         let toolbar = toolbar("connections", window, cx);
         let c = self.connections.read(cx);
         let connected = c.connected(cx);
@@ -151,16 +155,6 @@ impl Render for ConnectionsPage {
     }
 }
 
-/// A bar `share` of the way across, in `tone`.
-fn bar(share: f64, tone: Tone, look: &Look) -> Div {
-    div().w_full().h(px(3.0)).bg(look.palette.rule.hsla()).child(
-        div()
-            .h_full()
-            .w(relative(share.clamp(0.0, 1.0) as f32))
-            .bg(look.color(tone)),
-    )
-}
-
 impl ConnectionsPage {
     /// Host, chips and totals, with the rates beside them; on a narrow
     /// screen the rates run full width under the chips.
@@ -181,8 +175,20 @@ impl ConnectionsPage {
             .flex()
             .flex_col()
             .gap(px(3.0))
-            .child(bar((live.down / peak).sqrt(), Tone::Accent, look))
-            .child(bar((live.up / peak).sqrt(), Tone::Ink, look))
+            .child(self.bars.bar(
+                format!("down-{}", c.id),
+                (live.down / peak).sqrt() as f32,
+                look.color(Tone::Accent),
+                look.palette.rule.hsla(),
+                px(3.0),
+            ))
+            .child(self.bars.bar(
+                format!("up-{}", c.id),
+                (live.up / peak).sqrt() as f32,
+                look.color(Tone::Ink),
+                look.palette.rule.hsla(),
+                px(3.0),
+            ))
             .child(text(
                 format!("↓ {}  ↑ {}", graph::rate(live.down), graph::rate(live.up)),
                 TypeRole::Meta,

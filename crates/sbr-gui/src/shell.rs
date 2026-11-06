@@ -2,7 +2,8 @@
 //! drawn over them.
 
 use koan_kit::app::*;
-use koan_kit::components::{TabStrip, sheet};
+use koan_kit::components::sheet::{self, Layer};
+use koan_kit::components::{Clear, TabStrip, system_insets};
 use koan_kit::theme::{Icon, Look};
 
 use crate::Models;
@@ -129,20 +130,35 @@ impl Render for Shell {
                 })
             });
         }
+        // On a phone, as koan-gui's shell: the page clears the status bar
+        // and the notch, and the tab bar's surface runs on under the home
+        // indicator. A desktop window has no insets.
+        let insets = system_insets(Clear::System, window);
+        let foot = if crate::ui::phone() {
+            look.palette.surface.hsla()
+        } else {
+            look.palette.bg.hsla()
+        };
         div()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
             .bg(look.palette.bg.hsla())
+            .pt(insets.top)
+            .pl(insets.left)
+            .pr(insets.right)
             .child(div().flex_1().min_h_0().overflow_hidden().child(page))
             .child(
                 div()
-                    .bg(look.palette.bg.hsla())
+                    .flex_shrink_0()
+                    .bg(foot)
+                    .pb(insets.bottom)
                     .border_t(look.hairline)
                     .border_color(look.palette.rule.hsla())
                     .child(tabs),
             )
-            .children(sheet::presented(window, cx))
-            .children(sheet::overlay(window, cx))
+            .children(sheet::presented(window, cx).map(|s| sheet::layered(Layer::Sheet, s)))
+            .children(sheet::overlay(window, cx).map(|q| sheet::layered(Layer::Question, q)))
     }
 }
