@@ -122,7 +122,10 @@ impl Connections {
     /// Close every listed connection to `domain` and its subdomains.
     pub fn close_domain(&mut self, domain: &str, cx: &mut Context<Self>) {
         let suffix = format!(".{domain}");
-        self.close_where(|c| c.domain.as_deref().is_some_and(|d| d == domain || d.ends_with(&suffix)), cx);
+        self.close_where(
+            |c| c.domain.as_deref().is_some_and(|d| d == domain || d.ends_with(&suffix)),
+            cx,
+        );
     }
 
     fn close_where(&mut self, matches: impl Fn(&Connection) -> bool, cx: &mut Context<Self>) {
@@ -182,9 +185,7 @@ fn rates(previous: &[Live], next: Vec<Connection>, dt: f64, now: Instant) -> Vec
             }
         })
         .collect();
-    rows.sort_by(|a, b| {
-        (b.last_active, b.connection.start).cmp(&(a.last_active, a.connection.start))
-    });
+    rows.sort_by(|a, b| (b.last_active, b.connection.start).cmp(&(a.last_active, a.connection.start)));
     rows
 }
 
@@ -195,12 +196,54 @@ fn demo(previous: &HashMap<String, Live>) -> Vec<Live> {
         .map_or(0, |d| d.as_millis() as i64);
     let t = now_ms / 250;
     let hosts = [
-        ("www.youtube.com", "tcp", Some("tls"), ["hk-01", "auto", "proxy"].as_slice(), "domain_suffix=youtube.com", 2_400_000.0),
-        ("api.github.com", "tcp", Some("tls"), ["jp-02", "proxy"].as_slice(), "final", 18_000.0),
-        ("dns.google", "udp", Some("dns"), ["direct"].as_slice(), "protocol=dns", 900.0),
-        ("fonts.gstatic.com", "tcp", Some("tls"), ["hk-01", "auto", "proxy"].as_slice(), "final", 0.0),
-        ("17.253.144.10", "udp", Some("quic"), ["direct"].as_slice(), "ip_is_private=false", 64_000.0),
-        ("news.ycombinator.com", "tcp", Some("http"), ["sg-01", "proxy"].as_slice(), "final", 3_000.0),
+        (
+            "www.youtube.com",
+            "tcp",
+            Some("tls"),
+            ["hk-01", "auto", "proxy"].as_slice(),
+            "domain_suffix=youtube.com",
+            2_400_000.0,
+        ),
+        (
+            "api.github.com",
+            "tcp",
+            Some("tls"),
+            ["jp-02", "proxy"].as_slice(),
+            "final",
+            18_000.0,
+        ),
+        (
+            "dns.google",
+            "udp",
+            Some("dns"),
+            ["direct"].as_slice(),
+            "protocol=dns",
+            900.0,
+        ),
+        (
+            "fonts.gstatic.com",
+            "tcp",
+            Some("tls"),
+            ["hk-01", "auto", "proxy"].as_slice(),
+            "final",
+            0.0,
+        ),
+        (
+            "17.253.144.10",
+            "udp",
+            Some("quic"),
+            ["direct"].as_slice(),
+            "ip_is_private=false",
+            64_000.0,
+        ),
+        (
+            "news.ycombinator.com",
+            "tcp",
+            Some("http"),
+            ["sg-01", "proxy"].as_slice(),
+            "final",
+            3_000.0,
+        ),
     ];
     let now = Instant::now();
     hosts
@@ -237,7 +280,11 @@ fn demo(previous: &HashMap<String, Live>) -> Vec<Live> {
                 },
                 up,
                 down,
-                last_active: if down > 0.0 { now } else { p.map_or(now, |p| p.last_active) },
+                last_active: if down > 0.0 {
+                    now
+                } else {
+                    p.map_or(now, |p| p.last_active)
+                },
             }
         })
         .collect()

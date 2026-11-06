@@ -137,7 +137,13 @@ impl Render for ProfilesPage {
             }
         }
         let content = content
-            .child(div().flex().flex_col().child(SectionHeading::new("profiles")).child(list))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(SectionHeading::new("profiles"))
+                    .child(list),
+            )
             .child(self.add_section(store.adding, &look, cx.entity()))
             .child(self.rules_section(&look, cx));
         page(toolbar, "profiles", content, &look)
@@ -221,14 +227,24 @@ impl ProfilesPage {
             .border_color(look.palette.rule.hsla())
             .cursor_pointer()
             .on_click(move |_, _, cx| profiles.update(cx, |s, cx| s.activate(id, cx)))
-            .child(div().w(px(2.0)).h(px(32.0)).when(active, |bar| bar.bg(look.color(Tone::Accent))))
+            .child(
+                div()
+                    .w(px(2.0))
+                    .h(px(32.0))
+                    .when(active, |bar| bar.bg(look.color(Tone::Accent))),
+            )
             .child(
                 div()
                     .flex_1()
                     .flex()
                     .flex_col()
                     .gap(look.space(Space::Xs))
-                    .child(text(p.name.clone(), TypeRole::Body, if active { Tone::Strong } else { Tone::Ink }, look))
+                    .child(text(
+                        p.name.clone(),
+                        TypeRole::Body,
+                        if active { Tone::Strong } else { Tone::Ink },
+                        look,
+                    ))
                     .child(text(subtitle, TypeRole::Meta, Tone::Muted, look)),
             )
             .child(actions)

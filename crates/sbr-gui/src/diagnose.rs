@@ -61,9 +61,7 @@ impl Diagnose {
             let plan = config.as_deref().and_then(sbr_apple::app::tun_plan);
             for (i, name) in names.into_iter().enumerate() {
                 let plan = plan.clone();
-                let outcome = cx
-                    .background_spawn(async move { run_check(name, plan.as_ref()) })
-                    .await;
+                let outcome = cx.background_spawn(async move { run_check(name, plan.as_ref()) }).await;
                 let alive = this.update(cx, |d, cx| {
                     if let Some(c) = d.checks.get_mut(i) {
                         (c.ok, c.detail) = outcome;

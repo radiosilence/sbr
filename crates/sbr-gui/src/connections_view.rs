@@ -26,7 +26,12 @@ pub struct ConnectionsPage {
 }
 
 impl ConnectionsPage {
-    pub fn new(connections: Entity<Connections>, vpn: Entity<Vpn>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        connections: Entity<Connections>,
+        vpn: Entity<Vpn>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let filter = cx.new(|cx| FieldState::new(window, cx).placeholder("filter"));
         let _subscriptions = vec![
             cx.observe(&connections, |_, _, cx| cx.notify()),
@@ -123,14 +128,19 @@ impl Render for ConnectionsPage {
         let empty = if !connected {
             Some("connect to see the tunnel's connections.")
         } else if shown.is_empty() {
-            Some(if filter.trim().is_empty() { "nothing open." } else { "nothing matches." })
+            Some(if filter.trim().is_empty() {
+                "nothing open."
+            } else {
+                "nothing matches."
+            })
         } else {
             None
         };
         if let Some(empty) = empty {
             list = list.child(text(label(empty), TypeRole::Body, Tone::Muted, &look));
         }
-        // Rates are drawn against the busiest connection listed.
+        // Rates are drawn against the busiest connection listed, on a
+        // square-root scale so slow ones still show.
         let peak = shown.iter().map(|l| l.up.max(l.down)).fold(1.0, f64::max);
         for live in shown {
             list = list.child(self.row(live, peak, &look));
@@ -142,11 +152,12 @@ impl Render for ConnectionsPage {
 
 /// A bar `share` of the way across, in `tone`.
 fn bar(share: f64, tone: Tone, look: &Look) -> Div {
-    div()
-        .w_full()
-        .h(px(3.0))
-        .bg(look.palette.rule.hsla())
-        .child(div().h_full().w(relative(share.clamp(0.0, 1.0) as f32)).bg(look.color(tone)))
+    div().w_full().h(px(3.0)).bg(look.palette.rule.hsla()).child(
+        div()
+            .h_full()
+            .w(relative(share.clamp(0.0, 1.0) as f32))
+            .bg(look.color(tone)),
+    )
 }
 
 impl ConnectionsPage {
@@ -166,8 +177,8 @@ impl ConnectionsPage {
             .flex()
             .flex_col()
             .gap(px(3.0))
-            .child(bar(live.down / peak, Tone::Accent, look))
-            .child(bar(live.up / peak, Tone::Ink, look))
+            .child(bar((live.down / peak).sqrt(), Tone::Accent, look))
+            .child(bar((live.up / peak).sqrt(), Tone::Ink, look))
             .child(text(
                 format!("↓ {}  ↑ {}", graph::rate(live.down), graph::rate(live.up)),
                 TypeRole::Meta,
@@ -197,7 +208,12 @@ impl ConnectionsPage {
                 let detail = cx.new(|cx| Detail::new(id.clone(), connections.clone(), vpn.clone(), cx));
                 sheet::present(detail, window, cx);
             })
-            .child(div().w(px(2.0)).h(px(40.0)).when(active, |b| b.bg(look.color(Tone::Accent))))
+            .child(
+                div()
+                    .w(px(2.0))
+                    .h(px(40.0))
+                    .when(active, |b| b.bg(look.color(Tone::Accent))),
+            )
             .child(
                 div()
                     .flex_1()
@@ -240,7 +256,12 @@ impl Detail {
             }
             cx.notify();
         });
-        let last = connections.read(cx).rows.iter().find(|l| l.connection.id == id).cloned();
+        let last = connections
+            .read(cx)
+            .rows
+            .iter()
+            .find(|l| l.connection.id == id)
+            .cloned();
         Detail {
             id,
             last,
@@ -259,8 +280,17 @@ fn field(name: &str, value: String, look: &Look) -> Div {
         .py(look.space(Space::S))
         .border_b(look.hairline)
         .border_color(look.palette.rule.hsla())
-        .child(div().w(look.sized(96.0)).child(text(label(name), TypeRole::Meta, Tone::Muted, look)))
-        .child(div().flex_1().min_w_0().child(text(value, TypeRole::Meta, Tone::Ink, look)))
+        .child(
+            div()
+                .w(look.sized(96.0))
+                .child(text(label(name), TypeRole::Meta, Tone::Muted, look)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(text(value, TypeRole::Meta, Tone::Ink, look)),
+        )
 }
 
 fn figure(name: &str, rate: String, total: String, look: &Look) -> Div {
@@ -304,7 +334,12 @@ impl Render for Detail {
                     .flex()
                     .gap(look.space(Space::Xl))
                     .child(figure("up", graph::rate(live.up), graph::bytes(c.upload as f64), &look))
-                    .child(figure("down", graph::rate(live.down), graph::bytes(c.download as f64), &look)),
+                    .child(figure(
+                        "down",
+                        graph::rate(live.down),
+                        graph::bytes(c.download as f64),
+                        &look,
+                    )),
             )
             .child(SectionHeading::new("connection"))
             .child(field("destination", c.destination.clone(), &look));
@@ -342,11 +377,14 @@ impl Render for Detail {
                     let (d, t) = (domain.clone(), tag.clone());
                     let picked = ruled.as_deref() == Some(tag.as_str());
                     row = row.child(
-                        Chip::new(SharedString::from(format!("via-{tag}")), if picked { format!("● {tag}") } else { tag.clone() })
-                            .on_click(move |_, _, cx| {
-                                let (d, t) = (d.clone(), t.clone());
-                                vpn.update(cx, |v, cx| v.add_rule(&d, t, cx))
-                            }),
+                        Chip::new(
+                            SharedString::from(format!("via-{tag}")),
+                            if picked { format!("● {tag}") } else { tag.clone() },
+                        )
+                        .on_click(move |_, _, cx| {
+                            let (d, t) = (d.clone(), t.clone());
+                            vpn.update(cx, |v, cx| v.add_rule(&d, t, cx))
+                        }),
                     );
                 }
                 body = body
@@ -383,7 +421,11 @@ impl Render for Detail {
         body = body.child(actions);
 
         sheet::panel("connection", &look)
-            .child(sheet::head_data(c.host().to_owned(), vec![done.into_any_element()], &look))
+            .child(sheet::head_data(
+                c.host().to_owned(),
+                vec![done.into_any_element()],
+                &look,
+            ))
             .child(body)
     }
 }

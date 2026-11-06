@@ -45,8 +45,8 @@ impl Render for LogsPage {
         let toolbar = toolbar.trailing(copy);
 
         let vpn = self.vpn.clone();
-        let verbose = Toggle::new("verbose", "verbose", self.vpn.read(cx).settings.verbose)
-            .on_change(move |on, _, cx| {
+        let verbose =
+            Toggle::new("verbose", "verbose", self.vpn.read(cx).settings.verbose).on_change(move |on, _, cx| {
                 let on = *on;
                 vpn.update(cx, |v, cx| v.set_verbose(on, cx))
             });

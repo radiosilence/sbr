@@ -129,7 +129,11 @@ impl SettingsPage {
                     .py(look.space(Space::S))
                     .border_b(look.hairline)
                     .border_color(look.palette.rule.hsla())
-                    .child(div().flex_1().child(text(ssid.clone(), TypeRole::Body, Tone::Ink, look)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(text(ssid.clone(), TypeRole::Body, Tone::Ink, look)),
+                    )
                     .child(
                         Button::new(SharedString::from(format!("forget-{ssid}")), ButtonKind::Text)
                             .label("remove")
@@ -241,8 +245,17 @@ impl SettingsPage {
                     .gap(look.space(Space::M))
                     .py(look.space(Space::Xs))
                     .child(div().w(look.sized(40.0)).child(text(mark, TypeRole::Meta, tone, look)))
-                    .child(div().w(look.sized(110.0)).child(text(c.name, TypeRole::Meta, Tone::Ink, look)))
-                    .child(div().flex_1().min_w_0().child(text(c.detail.clone(), TypeRole::Meta, Tone::Muted, look))),
+                    .child(
+                        div()
+                            .w(look.sized(110.0))
+                            .child(text(c.name, TypeRole::Meta, Tone::Ink, look)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(text(c.detail.clone(), TypeRole::Meta, Tone::Muted, look)),
+                    ),
             );
         }
         out
