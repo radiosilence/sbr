@@ -1878,6 +1878,7 @@ checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",
+ "libc",
  "objc2 0.6.5",
 ]
 
@@ -4707,6 +4708,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-system-extensions"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a00ca10e1fd778a1dd13d579afb37168422ef4bbb36b6723179c2228f6b8372c"
+dependencies = [
+ "dispatch2",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc2-ui-kit"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6418,6 +6430,7 @@ name = "sbr-gui"
 version = "0.2.8"
 dependencies = [
  "block2 0.6.2",
+ "dispatch2",
  "futures",
  "gpui-koan",
  "gpui-koan-platform",
@@ -6430,6 +6443,7 @@ dependencies = [
  "objc2-network-extension",
  "objc2-security",
  "objc2-service-management",
+ "objc2-system-extensions",
  "percent-encoding",
  "sbr-apple",
  "sbr-message",

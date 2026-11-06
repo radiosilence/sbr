@@ -15,10 +15,6 @@ crate-type = ["rlib", "staticlib"]
 # GPUI's Metal shaders compiled at launch rather than at build time, so a
 # development build needs only the Command Line Tools. Releases leave it off.
 runtime-shaders = ["koan-kit/runtime-shaders"]
-# The macOS Developer ID build, whose tunnel is a system extension running as
-# root outside the user's Keychain: the profile travels inline in the VPN
-# configuration rather than as a reference to its Keychain item.
-system-extension = []
 
 [dependencies]
 sbr-message = { path = "../sbr-message" }
@@ -49,6 +45,7 @@ objc2-foundation = { version = "0.3.2", features = [
   "NSNotification",
   "NSOperation",
   "NSPathUtilities",
+  "NSURL",
   "NSString",
   "NSUserDefaults",
   "NSValue",
@@ -78,8 +75,11 @@ objc2-app-kit = { version = "0.3.2", features = [
   "NSStatusBarButton",
   "NSStatusItem",
   "NSView",
+  "NSWorkspace",
 ] }
 objc2-service-management = { version = "0.3.2", features = ["SMAppService"] }
+objc2-system-extensions = "0.3.2"
+dispatch2 = "0.3"
 
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
 gpui = { package = "gpui-koan", git = "https://github.com/radiosilence/zed", rev = "5f97692fdd8bb4def13321cd26d84f9a7ad282f3", features = ["test-support"] }

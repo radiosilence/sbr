@@ -8,6 +8,9 @@
 //! `SbrProviderKey`): which Keychain item holds the profile, the personal
 //! rules, the TCP stack and the log level.
 
+#[cfg(target_os = "macos")]
+mod sysext;
+
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -135,9 +138,21 @@ pub enum VpnEvent {
 
 impl EventEmitter<VpnEvent> for Vpn {}
 
+/// Whether this build's tunnel is a system extension, which runs as root
+/// outside the user's Keychain and must be activated before each install.
+fn system_extension() -> bool {
+    #[cfg(target_os = "macos")]
+    return sysext::enabled();
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
 pub struct Vpn {
     pub settings: Settings,
     pub error: Option<String>,
+    /// The system extension waits for the user to allow it in System
+    /// Settings. Always false outside the Developer ID build.
+    pub needs_approval: bool,
     /// The profile's `strict_route`, which `strict` follows until set.
     profile_strict: bool,
     active: Active,
@@ -173,10 +188,45 @@ impl Vpn {
             tunnel,
             profiles,
             demo,
+            needs_approval: false,
             _observe,
         };
+        #[cfg(target_os = "macos")]
+        if system_extension() {
+            let mut changes = sysext::watch();
+            cx.spawn(async move |this, cx| {
+                use futures::StreamExt as _;
+                while let Some(error) = changes.next().await {
+                    let alive = this.update(cx, |vpn, cx| vpn.approval_changed(error, cx));
+                    if alive.is_err() {
+                        return;
+                    }
+                }
+            })
+            .detach();
+        }
         vpn.apply(cx);
         vpn
+    }
+
+    /// The user allowed the extension, or it is waiting for them to; with
+    /// the error a request then failed with. The approval message goes once
+    /// it no longer applies.
+    #[cfg(target_os = "macos")]
+    fn approval_changed(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+        self.needs_approval = sysext::awaiting_approval();
+        if let Some(e) = error {
+            self.error = Some(e);
+        } else if !self.needs_approval && self.error.as_deref() == Some(sysext::APPROVAL_NEEDED) {
+            self.error = None;
+        }
+        cx.notify();
+    }
+
+    /// Opens System Settings where the user allows the system extension.
+    pub fn open_approval_settings(&self) {
+        #[cfg(target_os = "macos")]
+        sysext::open_settings();
     }
 
     pub fn strict(&self) -> bool {
@@ -341,7 +391,7 @@ impl Vpn {
     /// What the tunnel reads from `providerConfiguration`.
     fn provider(&self) -> Result<Vec<(&'static str, ProviderValue)>, String> {
         let mut pc = Vec::new();
-        if cfg!(feature = "system-extension") {
+        if system_extension() {
             // A system extension runs as root, outside the user's Keychain:
             // the config travels inline.
             pc.push((
@@ -400,6 +450,15 @@ impl Vpn {
         self.install_failed = true;
         let tunnel = self.tunnel.clone();
         cx.spawn(async move |this, cx| {
+            #[cfg(target_os = "macos")]
+            if system_extension() {
+                let activated = sysext::activate(&bundle_id).await;
+                let _ = this.update(cx, |vpn, cx| {
+                    vpn.needs_approval = sysext::awaiting_approval();
+                    cx.notify();
+                });
+                activated?;
+            }
             let fresh = existing.is_none();
             let m = existing.unwrap_or_else(|| Rc::new(Manager::create()));
             if !fresh {
@@ -574,12 +633,30 @@ impl Vpn {
                 }
             }
             tunnel.update(cx, |t, cx| t.forget(cx));
+            // Launch at login, which the menu bar sets.
+            #[cfg(target_os = "macos")]
+            if let Err(e) = unregister_login_item() {
+                errors.push(e);
+            }
             if let Some(e) = errors.pop() {
                 let _ = this.update(cx, |vpn, cx| vpn.fail(e, cx));
             }
         })
         .detach();
     }
+}
+
+/// Takes sbr out of the login items when it is in them, or waits there for
+/// the user's approval.
+#[cfg(target_os = "macos")]
+fn unregister_login_item() -> Result<(), String> {
+    use objc2_service_management::{SMAppService, SMAppServiceStatus};
+    let service = unsafe { SMAppService::mainAppService() };
+    let status = unsafe { service.status() };
+    if status != SMAppServiceStatus::Enabled && status != SMAppServiceStatus::RequiresApproval {
+        return Ok(());
+    }
+    unsafe { service.unregisterAndReturnError() }.map_err(|e| e.localizedDescription().to_string())
 }
 
 fn json(value: &impl serde::Serialize) -> Result<Vec<u8>, String> {

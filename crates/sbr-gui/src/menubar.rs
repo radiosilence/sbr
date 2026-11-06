@@ -25,6 +25,8 @@ struct Shown {
     profiles: Vec<(Uuid, String)>,
     active: Option<Uuid>,
     login: Login,
+    /// The system extension waits for the user to allow it.
+    needs_approval: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -95,6 +97,7 @@ fn shown(models: &Models, cx: &App) -> Shown {
         profiles: profiles.profiles.iter().map(|p| (p.id, p.name.clone())).collect(),
         active: profiles.active_id,
         login: login(),
+        needs_approval: vpn.needs_approval,
     }
 }
 
@@ -127,6 +130,12 @@ impl MenuBar {
             entries.push(Entry::Label(format!("Error: {error}")));
         }
         entries.push(Entry::Label(shown.status.clone()));
+        if shown.needs_approval {
+            let vpn = models.vpn.clone();
+            entries.push(Entry::action("Allow sbr in System Settings…", move |cx| {
+                vpn.read(cx).open_approval_settings()
+            }));
+        }
         let on = shown.on;
         let tunnel = models.tunnel.clone();
         entries.push(
