@@ -42,7 +42,7 @@ settings:
     # What the sbr-gui static library links against: the frameworks its
     # binary links (otool -L on macOS, rustc's link line on iOS), which a
     # static library cannot name itself.
-    SBR_GUI_MAC_LDFLAGS: -liconv -framework AppKit -framework ApplicationServices -framework Carbon -framework CloudKit -framework ColorSync -framework CoreData -framework CoreFoundation -framework CoreGraphics -framework CoreImage -framework CoreServices -framework CoreText -framework CoreVideo -framework Foundation -framework Metal -framework NetworkExtension -framework QuartzCore -framework Security -framework ServiceManagement -framework UniformTypeIdentifiers -framework UserNotifications
+    SBR_GUI_MAC_LDFLAGS: -liconv -framework AppKit -framework ApplicationServices -framework Carbon -framework CloudKit -framework ColorSync -framework CoreData -framework CoreFoundation -framework CoreGraphics -framework CoreImage -framework CoreServices -framework CoreText -framework CoreVideo -framework Foundation -framework Metal -framework NetworkExtension -framework QuartzCore -framework Security -framework ServiceManagement -framework SystemExtensions -framework UniformTypeIdentifiers -framework UserNotifications
     SBR_GUI_IOS_LDFLAGS: -liconv -framework CoreFoundation -framework CoreGraphics -framework CoreText -framework CoreVideo -framework Foundation -framework Metal -framework NetworkExtension -framework QuartzCore -framework SafariServices -framework Security -framework UIKit
 
 packages:
