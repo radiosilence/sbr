@@ -6,6 +6,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use std::collections::BTreeSet;
+
 use koan_kit::app::*;
 use koan_kit::components::sheet;
 use koan_kit::components::{Badge, Button, ButtonKind, Chip, FieldState, InputEvent, SectionHeading, TextField};
@@ -261,6 +263,9 @@ impl ConnectionsPage {
 struct Detail {
     id: String,
     last: Option<Live>,
+    /// The selector groups shown open among the route choices; none until
+    /// one is toggled, when the group the domain is routed through is open.
+    open: Option<BTreeSet<String>>,
     connections: Entity<Connections>,
     vpn: Entity<Vpn>,
     _observe: Subscription,
@@ -283,6 +288,7 @@ impl Detail {
         Detail {
             id,
             last,
+            open: None,
             connections,
             vpn,
             _observe,
@@ -320,6 +326,99 @@ fn figure(name: &str, rate: String, total: String, look: &Look) -> Div {
         .child(text(total, TypeRole::Meta, Tone::Muted, look))
 }
 
+impl Detail {
+    /// "Always route this domain via": each of the profile's selector groups
+    /// as a heading that opens to its members, the group itself first.
+    fn routes(&self, domain: String, look: &Look, cx: &mut Context<Self>) -> Option<Div> {
+        let groups = self.vpn.read(cx).route_groups();
+        if groups.is_empty() {
+            return None;
+        }
+        let ruled = self
+            .vpn
+            .read(cx)
+            .settings
+            .rules
+            .iter()
+            .find(|r| r.domains == [domain.clone()])
+            .map(|r| r.outbound.clone());
+        let routed_through = |(g, m): &(String, Vec<String>)| ruled.as_ref().is_some_and(|r| r == g || m.contains(r));
+        let routed: BTreeSet<String> = groups
+            .iter()
+            .filter(|g| routed_through(g))
+            .map(|(g, _)| g.clone())
+            .collect();
+        let open = self.open.clone().unwrap_or_else(|| routed.clone());
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap(look.space(Space::Xs))
+            .child(SectionHeading::new(format!("always route {domain} via")));
+        for (group, members) in groups {
+            let expanded = open.contains(&group);
+            let this = cx.entity();
+            let (toggled, default) = (group.clone(), routed.clone());
+            section = section.child(
+                div()
+                    .id(SharedString::from(format!("group-{group}")))
+                    .flex()
+                    .items_center()
+                    .gap(look.space(Space::S))
+                    .py(look.space(Space::Xs))
+                    .min_h(look.target())
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        this.update(cx, |d, cx| {
+                            let set = d.open.get_or_insert_with(|| default.clone());
+                            if !set.remove(&toggled) {
+                                set.insert(toggled.clone());
+                            }
+                            cx.notify();
+                        })
+                    })
+                    .child(text(
+                        if expanded { "▾" } else { "▸" },
+                        TypeRole::Body,
+                        Tone::Muted,
+                        look,
+                    ))
+                    .child(text(group.clone(), TypeRole::Body, Tone::Strong, look))
+                    .child(text(members.len().to_string(), TypeRole::Meta, Tone::Muted, look)),
+            );
+            if expanded {
+                let mut row = div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(look.space(Space::S))
+                    .pl(look.space(Space::L))
+                    .pb(look.space(Space::S));
+                for tag in std::iter::once(group.clone()).chain(members) {
+                    let vpn = self.vpn.clone();
+                    let (d, t) = (domain.clone(), tag.clone());
+                    let picked = ruled.as_deref() == Some(tag.as_str());
+                    let name = if tag == group {
+                        format!("{tag} (group)")
+                    } else {
+                        tag.clone()
+                    };
+                    row = row.child(
+                        Chip::new(
+                            SharedString::from(format!("via-{group}-{tag}")),
+                            if picked { format!("● {name}") } else { name },
+                        )
+                        .on_click(move |_, _, cx| {
+                            let (d, t) = (d.clone(), t.clone());
+                            vpn.update(cx, |v, cx| v.add_rule(&d, t, cx))
+                        }),
+                    );
+                }
+                section = section.child(row);
+            }
+        }
+        Some(section)
+    }
+}
+
 impl Render for Detail {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
@@ -338,7 +437,12 @@ impl Render for Detail {
                 .child(sheet::note(label("closed."), Tone::Muted, &look));
         };
         let c = &live.connection;
+        let routes = c.domain.clone().map(|domain| self.routes(domain, &look, cx));
         let mut body = sheet::body("detail-body", &look)
+            // Fills the panel's height and scrolls inside it, clear of what
+            // stands at the window's foot.
+            .flex_1()
+            .pb(look.space(Space::Xxl))
             .child(text(
                 label(if open { "open" } else { "closed" }),
                 TypeRole::Meta,
@@ -346,6 +450,7 @@ impl Render for Detail {
                 &look,
             ))
             .child(text(route(c), TypeRole::Body, Tone::Ink, &look))
+            .children(routes)
             .child(SectionHeading::new("traffic"))
             .child(
                 div()
@@ -377,39 +482,6 @@ impl Render for Detail {
             .child(field("rule", c.rule.clone(), &look))
             .child(field("started", format!("{} ago", age(started_secs_ago(c))), &look))
             .child(field("id", c.id.clone(), &look));
-
-        if let Some(domain) = c.domain.clone() {
-            let choices = self.vpn.read(cx).route_choices();
-            let ruled = self
-                .vpn
-                .read(cx)
-                .settings
-                .rules
-                .iter()
-                .find(|r| r.domains == [domain.clone()])
-                .map(|r| r.outbound.clone());
-            if !choices.is_empty() {
-                let mut row = div().flex().flex_wrap().gap(look.space(Space::S));
-                for tag in choices {
-                    let vpn = self.vpn.clone();
-                    let (d, t) = (domain.clone(), tag.clone());
-                    let picked = ruled.as_deref() == Some(tag.as_str());
-                    row = row.child(
-                        Chip::new(
-                            SharedString::from(format!("via-{tag}")),
-                            if picked { format!("● {tag}") } else { tag.clone() },
-                        )
-                        .on_click(move |_, _, cx| {
-                            let (d, t) = (d.clone(), t.clone());
-                            vpn.update(cx, |v, cx| v.add_rule(&d, t, cx))
-                        }),
-                    );
-                }
-                body = body
-                    .child(SectionHeading::new(format!("always route {domain} via")))
-                    .child(row);
-            }
-        }
 
         let mut actions = div().flex().gap(look.space(Space::M)).pt(look.space(Space::L));
         if open {

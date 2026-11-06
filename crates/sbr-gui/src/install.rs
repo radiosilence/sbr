@@ -261,8 +261,14 @@ impl Vpn {
     }
 
     /// Outbounds a personal rule can name in the active profile.
-    pub fn route_choices(&self) -> Vec<String> {
-        self.active.config.as_deref().map(rules::choices).unwrap_or_default()
+    /// The active profile's selector groups and their members, which a
+    /// personal rule can route through.
+    pub fn route_groups(&self) -> Vec<(String, Vec<String>)> {
+        self.active
+            .config
+            .as_deref()
+            .map(rules::selector_groups)
+            .unwrap_or_default()
     }
 
     /// Route `domain` and its subdomains through `outbound`, replacing any

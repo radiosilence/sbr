@@ -83,6 +83,34 @@ fn tags(root: &Map<String, Value>) -> BTreeSet<&str> {
         .collect()
 }
 
+/// The config's selector groups and their members, in profile order: what
+/// a rule can route through, grouped as the profile groups it.
+pub fn selector_groups(config: &str) -> Vec<(String, Vec<String>)> {
+    let Ok(Value::Object(root)) = serde_json::from_str::<Value>(config) else {
+        return Vec::new();
+    };
+    root.get("outbounds")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|o| o.get("type").and_then(Value::as_str) == Some("selector"))
+        .filter_map(|s| {
+            let tag = s.get("tag")?.as_str()?.to_owned();
+            let mut seen = BTreeSet::new();
+            let members = s
+                .get("outbounds")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|m| seen.insert(*m))
+                .map(str::to_owned)
+                .collect();
+            Some((tag, members))
+        })
+        .collect()
+}
+
 /// What a rule can route through: the members of the config's selector
 /// groups, then the groups themselves, in profile order.
 pub fn choices(config: &str) -> Vec<String> {
@@ -196,6 +224,25 @@ mod tests {
     const CONFIG: &str = r#"{"inbounds":[{"type":"tun","tag":"tun-in"},{"type":"mixed"}],
         "outbounds":[{"type":"direct","tag":"direct"},{"type":"selector","tag":"proxy"}],
         "route":{"rules":[{"action":"sniff"},{"protocol":"dns","action":"hijack-dns"},{"ip_is_private":true,"outbound":"direct"}]}}"#;
+
+    #[test]
+    fn selector_groups_keep_profile_order() {
+        let config = r#"{"outbounds":[
+            {"type":"selector","tag":"proxy","outbounds":["auto","hk","hk","jp"]},
+            {"type":"direct","tag":"direct"},
+            {"type":"selector","tag":"streaming","outbounds":["jp","direct"]}]}"#;
+        assert_eq!(
+            selector_groups(config),
+            vec![
+                (
+                    "proxy".to_owned(),
+                    vec!["auto".to_owned(), "hk".to_owned(), "jp".to_owned()]
+                ),
+                ("streaming".to_owned(), vec!["jp".to_owned(), "direct".to_owned()]),
+            ]
+        );
+        assert!(selector_groups("not json").is_empty());
+    }
 
     #[test]
     fn rules_go_after_the_last_sniff_or_hijack() {
