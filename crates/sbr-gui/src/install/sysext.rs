@@ -84,9 +84,7 @@ pub fn watch() -> mpsc::UnboundedReceiver<Option<String>> {
 }
 
 fn tell_watchers(state: &mut State, error: Option<String>) {
-    state
-        .watchers
-        .retain(|w| w.unbounded_send(error.clone()).is_ok());
+    state.watchers.retain(|w| w.unbounded_send(error.clone()).is_ok());
 }
 
 /// Activates the extension `identifier`, replacing an older version. Fails
