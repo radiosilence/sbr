@@ -143,8 +143,6 @@ struct TunnelView: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label).font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
             Text(Self.bits(bytesPerSecond)).font(.sbr(.title)).foregroundStyle(Color.sbrStrong)
-                .contentTransition(.numericText())
-                .animation(Theme.fast, value: bytesPerSecond)
         }
     }
 
