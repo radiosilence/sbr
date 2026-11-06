@@ -9,6 +9,7 @@ use std::time::Duration;
 use koan_kit::app::*;
 use objc2_foundation::{NSBundle, NSSearchPathDirectory, NSSearchPathDomainMask, NSSearchPathForDirectoriesInDomains};
 
+use crate::install::{Vpn, VpnEvent};
 use crate::ne::Status;
 use crate::proto::Request;
 use crate::tunnel::Tunnel;
@@ -21,6 +22,15 @@ pub struct Logs {
     tunnel: Entity<Tunnel>,
     demo: bool,
     poll: Option<Task<()>>,
+    _forget: Subscription,
+}
+
+/// Delete the cached lines: TunnelModel's forgetActive and erase do, with
+/// the profile or the install they came from.
+pub fn remove_cache() {
+    if let Some(file) = cache_file() {
+        let _ = std::fs::remove_file(file);
+    }
 }
 
 /// `<caches>/<bundle id>/tunnel-logs.json`.
@@ -38,7 +48,7 @@ fn cache_file() -> Option<PathBuf> {
 }
 
 impl Logs {
-    pub fn new(tunnel: Entity<Tunnel>, _: &mut Context<Self>) -> Self {
+    pub fn new(tunnel: Entity<Tunnel>, vpn: &Entity<Vpn>, cx: &mut Context<Self>) -> Self {
         let demo = std::env::var_os("SBR_GUI_DEMO").is_some();
         let lines = if demo {
             demo_lines()
@@ -48,11 +58,15 @@ impl Logs {
                 .and_then(|d| serde_json::from_slice(&d).ok())
                 .unwrap_or_default()
         };
+        let _forget = cx.subscribe(vpn, |logs, _, e: &VpnEvent, cx| match e {
+            VpnEvent::ForgotActive => logs.clear(cx),
+        });
         Logs {
             lines,
             tunnel,
             demo,
             poll: None,
+            _forget,
         }
     }
 
@@ -105,13 +119,9 @@ impl Logs {
         }
     }
 
-    /// Forget the lines and their cached copy, with the profile or the
-    /// install they came from.
-    pub fn clear(&mut self, cx: &mut Context<Self>) {
+    fn clear(&mut self, cx: &mut Context<Self>) {
         self.lines.clear();
-        if let Some(file) = cache_file() {
-            let _ = std::fs::remove_file(file);
-        }
+        remove_cache();
         cx.notify();
     }
 }

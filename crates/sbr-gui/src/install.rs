@@ -126,6 +126,15 @@ struct Active {
     stored: Option<StoredProfile>,
 }
 
+/// What the configuration lost, for whoever keeps something from it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VpnEvent {
+    /// The active profile was deleted, or everything erased: its logs go.
+    ForgotActive,
+}
+
+impl EventEmitter<VpnEvent> for Vpn {}
+
 pub struct Vpn {
     pub settings: Settings,
     pub error: Option<String>,
@@ -496,7 +505,12 @@ impl Vpn {
     /// the next profile needs no new system prompt.
     pub fn delete_profile(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let was_active = self.profiles.update(cx, |p, cx| p.remove(id, cx));
-        if !was_active || self.demo {
+        if !was_active {
+            return;
+        }
+        crate::logs::remove_cache();
+        cx.emit(VpnEvent::ForgotActive);
+        if self.demo {
             return;
         }
         self.active = Active::default();
@@ -540,6 +554,8 @@ impl Vpn {
         }
         let r = self.profiles.update(cx, |p, cx| p.erase_all(cx));
         self.error = r.err();
+        crate::logs::remove_cache();
+        cx.emit(VpnEvent::ForgotActive);
         cx.notify();
         if self.demo {
             return;

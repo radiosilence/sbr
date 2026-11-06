@@ -70,7 +70,7 @@ impl Shell {
     pub fn new(models: Models, tab: Tab, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let Models { tunnel, profiles, vpn } = models;
         let connections = cx.new(|cx| Connections::new(tunnel.clone(), cx));
-        let logs = cx.new(|cx| Logs::new(tunnel.clone(), cx));
+        let logs = cx.new(|cx| Logs::new(tunnel.clone(), &vpn, cx));
         let tunnel_page = cx.new(|cx| TunnelPage::new(tunnel, cx));
         let profiles_page = cx.new(|cx| ProfilesPage::new(profiles.clone(), vpn.clone(), window, cx));
         let connections_page = cx.new(|cx| ConnectionsPage::new(connections.clone(), vpn.clone(), window, cx));

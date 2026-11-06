@@ -104,7 +104,11 @@ impl SettingsPage {
     fn auto_connect(&self, look: &Look, cx: &App) -> Div {
         let s = &self.vpn.read(cx).settings;
         let vpn = self.vpn.clone();
-        let mut out = section("auto-connect", look)
+        // The toggle names the setting; a heading over it would repeat it.
+        let mut out = div()
+            .flex()
+            .flex_col()
+            .gap(look.space(Space::S))
             .child(
                 Toggle::new("auto-connect", "auto-connect", s.auto_connect).on_change(move |on, _, cx| {
                     let on = *on;
@@ -262,7 +266,7 @@ impl SettingsPage {
     }
 
     fn erase(&self, look: &Look) -> Div {
-        let (vpn, logs) = (self.vpn.clone(), self.logs.clone());
+        let vpn = self.vpn.clone();
         section("erase", look)
             .child(note(
                 "removes every profile and its credentials, the vpn configuration, settings and logs from this device. the app stays installed, and the system keeps its own record of vpn connections.",
@@ -274,7 +278,7 @@ impl SettingsPage {
                         .label("erase everything")
                         .destructive(true)
                         .on_click(move |_, window, cx| {
-                            let (vpn, logs) = (vpn.clone(), logs.clone());
+                            let vpn = vpn.clone();
                             sheet::confirm(
                                 Confirm {
                                     title: "erase everything?".into(),
@@ -292,10 +296,7 @@ impl SettingsPage {
                                 },
                                 window,
                                 cx,
-                                move |cx| {
-                                    vpn.update(cx, |v, cx| v.erase(cx));
-                                    logs.update(cx, |l, cx| l.clear(cx));
-                                },
+                                move |cx| vpn.update(cx, |v, cx| v.erase(cx)),
                             );
                         }),
                 ),
