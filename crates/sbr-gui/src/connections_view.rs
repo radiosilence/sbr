@@ -511,6 +511,10 @@ impl Render for Detail {
         body = body.child(actions);
 
         sheet::panel("connection", &look)
+            // koan-kit caps a panel at a share of what holds it, which under
+            // its rise is the panel's own height and caps nothing: a long
+            // sheet ran off the window. A cap in points lets its body scroll.
+            .max_h(window.viewport_size().height * 0.8)
             .child(sheet::head_data(
                 c.host().to_owned(),
                 vec![done.into_any_element()],
