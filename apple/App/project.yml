@@ -4,6 +4,7 @@
 #   Sbr                        iOS 17+, macOS 15+, tvOS 17+ app (SwiftUI)
 #   SbrTunnel                  its packet tunnel, as an app extension
 #                              (iOS, tvOS, and Mac App Store style on macOS)
+#                              whose provider is Rust (crates/sbr-tunnel-ext)
 #   SbrMac                     macOS Developer ID flavour of the same app ...
 #   SbrTunnelSystemExtension   ... shipping the tunnel as a system extension
 #   SbrWidgets                 iOS 18+ Control Center toggle, embedded in Sbr
@@ -25,6 +26,13 @@ settings:
     # there. Under the team prefix, which every provisioning profile allows.
     SBR_KEYCHAIN_GROUP: $(AppIdentifierPrefix)$(SBR_BUNDLE_ID)
     SWIFT_VERSION: "5.9"
+    # The tunnel extensions link the Rust provider (SbrTunnel.xcframework),
+    # and with it what Rust's std, rustls and the provider use. A static
+    # library carries no link options of its own, so they are listed here.
+    SBR_TUNNEL_LDFLAGS: >-
+      -liconv -lresolv -lobjc
+      -framework CoreFoundation -framework Foundation -framework Security
+      -framework Network -framework NetworkExtension
     MARKETING_VERSION: "0.2.8"
     CURRENT_PROJECT_VERSION: "1"
     DEAD_CODE_STRIPPING: YES
@@ -114,7 +122,8 @@ targets:
       - path: Tunnel
         excludes: ["*.entitlements"]
     dependencies:
-      - package: SbrKit
+      - framework: ../SbrTunnel.xcframework
+        embed: false
     info:
       path: Support/Tunnel-Info.plist
       properties:
@@ -125,10 +134,12 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
-          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+          # Registered by the Rust library under this bare name.
+          NSExtensionPrincipalClass: SbrTunnelProvider
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID).tunnel
+        OTHER_LDFLAGS: $(inherited) $(SBR_TUNNEL_LDFLAGS)
         CODE_SIGN_ENTITLEMENTS: Tunnel/Tunnel.entitlements
         "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": Tunnel/Tunnel-macOS.entitlements
       configs:
@@ -216,10 +227,11 @@ targets:
     platform: macOS
     deploymentTarget: "15.0"
     sources:
-      - Tunnel/PacketTunnelProvider.swift
+      - Tunnel/Provider.c
       - SystemExtension/main.swift
     dependencies:
-      - package: SbrKit
+      - framework: ../SbrTunnel.xcframework
+        embed: false
     info:
       path: Support/SystemExtension-Info.plist
       properties:
@@ -234,7 +246,7 @@ targets:
         NetworkExtension:
           NEMachServiceName: $(SBR_APP_GROUP).tunnel
           NEProviderClasses:
-            com.apple.networkextension.packet-tunnel: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+            com.apple.networkextension.packet-tunnel: SbrTunnelProvider
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID).mac.tunnel
@@ -243,6 +255,7 @@ targets:
         PRODUCT_NAME: $(PRODUCT_BUNDLE_IDENTIFIER)
         CODE_SIGN_ENTITLEMENTS: SystemExtension/SystemExtension.entitlements
         ENABLE_HARDENED_RUNTIME: YES
+        OTHER_LDFLAGS: $(inherited) $(SBR_TUNNEL_LDFLAGS)
       configs:
         Release:
           CODE_SIGN_STYLE: Manual

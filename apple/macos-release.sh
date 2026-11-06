@@ -22,7 +22,7 @@
 # notarise.sh takes up the submission of the same name, and a name is the
 # file's content hash. The remade image hashes differently each time.
 #
-# build needs apple/SbrCore.xcframework (build-xcframework.sh) and the
+# build needs apple/SbrCore.xcframework and SbrTunnel.xcframework (build-xcframework.sh) and the
 # "sbr mac Developer ID" and "sbr mac tunnel Developer ID" profiles installed
 # (tools/fetch-profiles.py); build and package need a Developer ID Application
 # identity in a keychain; notarise-dmg needs that too, and APPLE_API_KEY_PATH,
@@ -75,7 +75,7 @@ make_dmg() {
 
 case "$step" in
 build)
-  [ -d ../SbrCore.xcframework ] || { echo "apple/SbrCore.xcframework is missing: run apple/build-xcframework.sh" >&2; exit 1; }
+  for x in SbrCore SbrTunnel; do [ -d "../$x.xcframework" ] || { echo "apple/$x.xcframework is missing: run apple/build-xcframework.sh" >&2; exit 1; }; done
   # macOS replaces an active system extension only when the new one's version
   # differs, so a build that kept the last one's number would leave the old
   # tunnel running. UTC YYYYMMDDHHMM, as TestFlight builds are numbered.

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The packet tunnel provider is Rust.** `SbrTunnelProvider` (`crates/sbr-tunnel-ext`) replaces SbrKit's `SbrPacketTunnelProvider` in the iOS, tvOS and macOS app extension and the macOS system extension, calling the core directly instead of through the C ABI, with the same app messages, Keychain items and files. `build-xcframework.sh` also builds `SbrTunnel.xcframework`, which the extensions link; SbrKit no longer has a provider class.
+
+### Fixed
+
+- **The macOS app no longer uses a quarter of a core while its window is open.** The traffic and connection rates animated each change with a rolling-digit transition, which SwiftUI renders on the CPU by redrawing the text layer every frame; at one update a second this kept the app at 25–35% CPU. The figures now change in place, and unchanged groups and stats from the poll are no longer republished.
+
 ## 0.2.8
 
 ### Added

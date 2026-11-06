@@ -41,7 +41,7 @@ rust_target=$([ "$(uname -m)" = arm64 ] && echo aarch64-apple-darwin || echo x86
 if [ "${SBR_TUNNEL_CHECK_SKIP_BUILD:-0}" != 1 ]; then
   echo "== build"
   (cd "$repo" && MACOSX_DEPLOYMENT_TARGET=12.0 CARGO_PROFILE_RELEASE_DEBUG=0 \
-    cargo build -q --release -p sbr-apple --target "$rust_target")
+    cargo build -q --release -p sbr-apple -p sbr-tunnel-ext --target "$rust_target")
   (cd "$repo" && cargo build -q --release -p sbr)
   key=${APPLE_API_KEY_PATH:-$HOME/.appstoreconnect/private_keys/AuthKey_${APPLE_API_KEY_ID:-9G3FHWD2RH}.p8}
   auth=()

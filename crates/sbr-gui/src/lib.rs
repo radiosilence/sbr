@@ -2,8 +2,8 @@
 //! figures, without a tunnel.
 
 pub mod profile;
-#[allow(dead_code)]
-pub mod proto;
+/// The app's side of the tunnel messages; the tunnel extension shares them.
+pub use sbr_message as proto;
 pub mod rules;
 pub mod swift;
 

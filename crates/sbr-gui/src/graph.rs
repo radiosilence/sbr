@@ -181,7 +181,7 @@ float4 shade(float2 position, float2 size, float time, constant float *u, textur
         return float4(0.0);
     }
     float phase = clamp(koan_track(u, 0, time), 0.0, 1.0);
-    float k = u[2] / max(koan_track(u, 1, time), 1.0);
+    float k = u[2] / max(koan_track(u, 1, time), 1e-9);
     float step = size.x / (slots - 1.0);
     // Sample i stands at x = (i - shift) * step.
     float shift = (n - 1.0) - (slots - 1.0) - (1.0 - phase);

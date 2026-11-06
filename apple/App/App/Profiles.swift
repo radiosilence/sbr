@@ -3,7 +3,7 @@ import SbrKit
 
 /// A sing-box config the user can switch to. Remote profiles keep their URL.
 /// The active one is refreshed by the running tunnel itself (see
-/// `SbrPacketTunnelProvider`); the rest, and the active one while the tunnel
+/// `crates/sbr-tunnel-ext`); the rest, and the active one while the tunnel
 /// is off, refresh when the app comes to the front and they're stale.
 struct Profile: Codable, Identifiable, Hashable {
     var id = UUID()

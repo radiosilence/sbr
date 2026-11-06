@@ -1,8 +1,8 @@
 # sbr app
 
 The sbr client for iOS 17+, macOS 15+ and tvOS 17+. It runs sing-box profiles in
-a packet tunnel extension (an empty subclass of SbrKit's
-`SbrPacketTunnelProvider`) and follows kōan's design language: Geist Mono,
+a packet tunnel extension whose provider is Rust (`crates/sbr-tunnel-ext`,
+see `apple/README.md`) and follows kōan's design language: Geist Mono,
 lowercase interface text, square corners, hairlines and a single mint accent
 (see `koan/docs/design/koan-theme.md`).
 
@@ -10,7 +10,7 @@ lowercase interface text, square corners, hairlines and a single mint accent
 
 ```sh
 cd apple
-./build-xcframework.sh              # SBR_SKIP_TVOS=1 to leave out tvOS
+./build-xcframework.sh              # both xcframeworks; SBR_SKIP_TVOS=1 to leave out tvOS
 cd App
 mise exec -- xcodegen generate      # team: DEVELOPMENT_TEAM in project.yml
 open Sbr.xcodeproj
@@ -210,6 +210,5 @@ The tunnel logs to the unified log under its bundle ID, with categories
 log stream --predicate 'subsystem BEGINSWITH "cc.blit.sbr"' --level debug
 ```
 
-Core messages are `private` by default, because they contain destinations.
-Override `publicLogMessages` in `PacketTunnelProvider` to see them without a
-logging profile.
+Core messages are `private`, because they contain destinations; a logging
+profile that enables private data shows them.

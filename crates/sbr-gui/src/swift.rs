@@ -3,65 +3,11 @@
 //! number of seconds since 2001-01-01 UTC, and a `UUID` an uppercase string.
 
 use std::fmt;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Seconds from the Unix epoch to Foundation's reference date.
-const REFERENCE: f64 = 978_307_200.0;
-
-/// Foundation's `Date`: seconds since 2001-01-01 00:00 UTC.
-#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Default)]
-pub struct Date(pub f64);
-
-impl Date {
-    pub fn now() -> Self {
-        SystemTime::now().into()
-    }
-
-    /// Seconds from `self` until now; negative for a date in the future.
-    pub fn age(self) -> f64 {
-        Date::now().0 - self.0
-    }
-}
-
-impl From<SystemTime> for Date {
-    fn from(t: SystemTime) -> Self {
-        let unix = match t.duration_since(UNIX_EPOCH) {
-            Ok(d) => d.as_secs_f64(),
-            Err(e) => -e.duration().as_secs_f64(),
-        };
-        Date(unix - REFERENCE)
-    }
-}
-
-impl From<Date> for SystemTime {
-    fn from(d: Date) -> Self {
-        let unix = d.0 + REFERENCE;
-        if unix >= 0.0 {
-            UNIX_EPOCH + Duration::from_secs_f64(unix)
-        } else {
-            UNIX_EPOCH - Duration::from_secs_f64(-unix)
-        }
-    }
-}
-
-impl Serialize for Date {
-    /// `JSONEncoder` writes a whole number of seconds without a fraction.
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        if self.0.fract() == 0.0 && self.0.abs() < 9.0e15 {
-            s.serialize_i64(self.0 as i64)
-        } else {
-            s.serialize_f64(self.0)
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Date {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        f64::deserialize(d).map(Date)
-    }
-}
+/// Foundation's `Date`, shared with the tunnel.
+pub use sbr_message::Date;
 
 /// Foundation's `UUID`, written as `uuidString` writes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -104,6 +50,8 @@ impl<'de> Deserialize<'de> for Uuid {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
     use super::*;
 
     #[test]

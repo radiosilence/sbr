@@ -298,7 +298,7 @@ impl ProfilesPage {
         }
         for r in rules {
             let vpn = self.vpn.clone();
-            let id = r.id;
+            let id = r.id.clone();
             section = section.child(
                 div()
                     .flex()
@@ -319,7 +319,7 @@ impl ProfilesPage {
                     .child(
                         Button::new(SharedString::from(format!("rule-{id}")), ButtonKind::Text)
                             .label("delete")
-                            .on_click(move |_, _, cx| vpn.update(cx, |v, cx| v.remove_rule(id, cx))),
+                            .on_click(move |_, _, cx| vpn.update(cx, |v, cx| v.remove_rule(id.clone(), cx))),
                     ),
             );
         }

@@ -72,59 +72,13 @@ pub struct Index {
     pub active: Option<Uuid>,
 }
 
-/// What makes a profile usable, and so what a seized device must not give
-/// up: the config and the link it came from. `SbrProfileSecret`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
-pub struct ProfileSecret {
-    /// None while a remote profile waits to be downloaded again.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-}
+/// The Keychain items the app shares with the tunnel, as the tunnel reads
+/// them.
+pub use sbr_message::{ProfileSecret, ProfileSnapshot, RemoteProfile, StoredProfile};
 
-impl ProfileSecret {
-    pub fn account(id: &Uuid) -> String {
-        format!("profile.{id}")
-    }
-}
-
-/// `providerConfiguration["stored"]`: which Keychain item holds the
-/// tunnel's profile, so the VPN preferences carry no credentials.
-/// `SbrStoredProfile`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct StoredProfile {
-    pub access_group: String,
-    /// The profile's `uuidString`.
-    pub id: String,
-    pub refresh_minutes: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated: Option<Date>,
-}
-
-/// A remote profile the tunnel refreshes by itself. `SbrRemoteProfile`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteProfile {
-    pub url: String,
-    pub refresh_minutes: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated: Option<Date>,
-}
-
-/// The tunnel's own download of the active remote profile.
-/// `SbrProfileSnapshot`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct ProfileSnapshot {
-    pub url: String,
-    pub text: String,
-    pub updated: Date,
-}
-
-impl ProfileSnapshot {
-    /// The Keychain item the tunnel keeps it in.
-    pub const ACCOUNT: &str = "tunnel.snapshot";
+/// The Keychain account of a profile's `ProfileSecret`.
+pub fn secret_account(id: &Uuid) -> String {
+    format!("profile.{id}")
 }
 
 /// What a sing-box or sbr import link asks for.
@@ -237,10 +191,7 @@ mod tests {
         };
         assert_eq!(serde_json::to_string(&local).unwrap(), r#"{"config":"{}"}"#);
         let id: Uuid = serde_json::from_str(r#""6b1f0b4c-2e0a-4c55-9d3b-8f1e2a3b4c5d""#).unwrap();
-        assert_eq!(
-            ProfileSecret::account(&id),
-            "profile.6B1F0B4C-2E0A-4C55-9D3B-8F1E2A3B4C5D"
-        );
+        assert_eq!(secret_account(&id), "profile.6B1F0B4C-2E0A-4C55-9D3B-8F1E2A3B4C5D");
     }
 
     #[test]

@@ -205,7 +205,7 @@ impl Vpn {
         true
     }
 
-    pub fn remove_rule(&mut self, id: Uuid, cx: &mut Context<Self>) {
+    pub fn remove_rule(&mut self, id: String, cx: &mut Context<Self>) {
         self.update_settings(None, cx, |s| s.rules.retain(|r| r.id != id));
         self.reload_running(cx);
     }

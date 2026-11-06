@@ -20,7 +20,7 @@ use koan_kit::app::*;
 use crate::keychain::{self, Keychain};
 use crate::profile::{
     INDEX_ACCOUNT, Index, Profile, ProfileLink, ProfileSecret, ProfileSnapshot, RemoteProfile, StoredProfile,
-    default_name, file_name,
+    default_name, file_name, secret_account,
 };
 use crate::swift::{Date, Uuid};
 
@@ -198,7 +198,7 @@ impl Profiles {
     }
 
     fn secret(&self, id: &Uuid) -> Result<Option<ProfileSecret>, String> {
-        self.vault.value(&ProfileSecret::account(id))
+        self.vault.value(&secret_account(id))
     }
 
     fn set_active_text(&mut self, text: Option<String>) {
@@ -285,7 +285,7 @@ impl Profiles {
     /// Delete a profile. True when it was the active one: the caller stops
     /// the tunnel and clears what the extension kept of it.
     pub fn remove(&mut self, id: Uuid, cx: &mut Context<Self>) -> bool {
-        let _ = self.vault.remove(&ProfileSecret::account(&id));
+        let _ = self.vault.remove(&secret_account(&id));
         self.profiles.retain(|p| p.id != id);
         let was_active = self.active_id == Some(id);
         if was_active {
@@ -403,7 +403,7 @@ impl Profiles {
             config: Some(text.to_owned()),
             url: profile.remote_url.clone(),
         };
-        self.vault.set_value(&secret, &ProfileSecret::account(&profile.id))?;
+        self.vault.set_value(&secret, &secret_account(&profile.id))?;
         let id = profile.id;
         match self.profiles.iter_mut().find(|p| p.id == id) {
             Some(p) => *p = profile,

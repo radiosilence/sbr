@@ -6432,9 +6432,19 @@ dependencies = [
  "objc2-service-management",
  "percent-encoding",
  "sbr-apple",
+ "sbr-message",
  "serde",
  "serde_json",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "sbr-message"
+version = "0.2.8"
+dependencies = [
+ "serde",
+ "serde_json",
  "uuid",
 ]
 
@@ -6469,6 +6479,22 @@ dependencies = [
  "smoltcp",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "sbr-tunnel-ext"
+version = "0.2.8"
+dependencies = [
+ "block2 0.6.2",
+ "cc",
+ "libc",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+ "objc2-network-extension",
+ "sbr-apple",
+ "sbr-message",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
