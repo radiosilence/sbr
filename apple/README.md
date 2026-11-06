@@ -3,8 +3,10 @@
 | | |
 |---|---|
 | `crates/sbr-apple` | C ABI (`include/sbr.h`) and staticlib |
-| `apple/Sources/SbrKit` | Swift package: the `Sbr` wrapper and the `SbrPacketTunnelProvider` base class |
-| `apple/build-xcframework.sh` | builds `SbrCore.xcframework` for iOS, iOS Simulator, macOS, Mac Catalyst, tvOS and tvOS Simulator |
+| `crates/sbr-tunnel-ext` | the packet tunnel provider, `SbrTunnelProvider`: an `NEPacketTunnelProvider` subclass in Rust (staticlib) |
+| `crates/sbr-message` | the app ↔ tunnel JSON messages, encoded as SbrKit's Swift `Codable` types are |
+| `apple/Sources/SbrKit` | Swift package for the Swift app: the `Sbr` wrapper, messages, Keychain and config store |
+| `apple/build-xcframework.sh` | builds `SbrCore.xcframework` (iOS, iOS Simulator, macOS, Mac Catalyst, tvOS, tvOS Simulator) and `SbrTunnel.xcframework` (the same without Catalyst) |
 | `apple/check-apple-targets.sh` | `cargo check` for every Apple target, runnable from Linux |
 | `apple/Examples/SbrDemo` | SwiftUI sample app and tunnel for iOS, macOS and tvOS (XcodeGen) |
 
@@ -13,14 +15,25 @@
 > staticlib. The Swift code was written without an Xcode toolchain and has
 > only been syntax-checked, not compiled. It has never run on a device.
 
-## SbrKit in a tunnel extension
+## The tunnel extension
 
-```swift
-import SbrKit
-final class PacketTunnelProvider: SbrPacketTunnelProvider {}
-```
+The provider is Rust: `SbrTunnelProvider` in `crates/sbr-tunnel-ext`, defined
+with `objc2::define_class!` and calling `sbr-apple` directly as a Rust crate.
+The app extension (iOS, tvOS, macOS) and the macOS system extension link
+`SbrTunnel.xcframework` and name `SbrTunnelProvider` as their principal /
+provider class. Their only source is `apple/App/Tunnel/Provider.c`, a
+reference to `sbr_tunnel_provider_register` that makes the linker take the
+provider from the archive; the system extension adds the `main.swift` that
+calls `NEProvider.startSystemExtensionMode()`.
 
-That is the whole extension. The base class:
+NetworkExtension looks the principal class up by name as the extension
+starts, before any provider code runs, and a `define_class!` class exists only
+once registered. The library therefore registers it from an image initializer
+(`__mod_init_func`), which dyld runs as the extension loads. A Swift subclass
+of the Rust class is not a fallback: Swift needs the superclass as a symbol at
+link time, which a runtime-registered class does not have.
+
+The provider:
 
 1. Loads the sing-box config from the Keychain item named by
    `providerConfiguration["stored"]` (an `SbrStoredProfile`, see
@@ -47,7 +60,8 @@ That is the whole extension. The base class:
    opened (`sbr_find_tun_fd`: scan the fd table and match the
    `UTUN_OPT_IFNAME` name against "utun", like WireGuard-apple and sing-box) and
    starts sbr with that fd.
-4. Forwards sbr's logs to `Logger` (`Sbr.forwardLogs`). Messages are private by default.
+4. Forwards sbr's logs to the unified log (category `core`) and keeps the
+   last 1000 lines in memory for `SbrRequest.logs`. Messages are private.
 5. Watches `NWPathMonitor` and calls `sbr_network_migrate` when the set of physical
    interfaces changes. `wake()` calls it too, because UDP NAT mappings are likely gone
    after sleep. `sleep()` returns immediately: an idle sbr arms no timers, so there is
@@ -61,7 +75,14 @@ That is the whole extension. The base class:
    below.
 8. Keeps its working files (cache file, rule-set cache, session logs) in a
    directory excluded from backups and protected until first unlock, and
-   deletes them on `SbrRequest.erase`.
+   deletes them on `SbrRequest.erase`, or when started with the
+   `sbrErase` option (the app's way to erase while the tunnel is off).
+9. Reports how the previous process ended on the next start: a crash file
+   written by sbr's panic and signal handlers, the stop reason when the
+   system stopped the tunnel, or, failing both, the last heartbeat (time,
+   memory, CPU share, connections, written every 5 s) with the 40 log lines
+   before it. iOS kills an extension for memory or CPU without a report the
+   extension can see, so this is the only trace of it.
 
 ### Remote profile refresh
 
@@ -85,9 +106,6 @@ or otherwise in the extension's own container (no App Group is needed), and used
 the next start if it is newer than the config the app installed. The app asks for it with `SbrRequest.profile` when it comes to the front
 and stores it, so it shows what the tunnel runs. The URL and the profile text are
 never logged.
-
-Override `loadConfiguration()`, `coreOptions` (threads, buffer, connection cap)
-or `handle(_:)` to customise.
 
 ### Leak protection
 

@@ -5,7 +5,7 @@
 #   APPLE_API_KEY_PATH=AuthKey.p8 APPLE_API_KEY_ID=... APPLE_API_ISSUER_ID=... \
 #     apple/testflight.sh ios|tvos [build-number]
 #
-# Needs apple/SbrCore.xcframework (build-xcframework.sh) with that platform's
+# Needs apple/SbrCore.xcframework and SbrTunnel.xcframework (build-xcframework.sh) with that platform's
 # slice, the Apple Distribution identity in a keychain, and the platform's
 # profiles installed (tools/fetch-profiles.py): "sbr App Store", "sbr tunnel
 # App Store" and "sbr widgets App Store" for iOS, "sbr tvOS App Store" and
@@ -15,7 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/App"
 : "${APPLE_API_KEY_PATH:?}" "${APPLE_API_KEY_ID:?}" "${APPLE_API_ISSUER_ID:?}"
-[ -d ../SbrCore.xcframework ] || { echo "apple/SbrCore.xcframework is missing: run apple/build-xcframework.sh" >&2; exit 1; }
+for x in SbrCore SbrTunnel; do [ -d "../$x.xcframework" ] || { echo "apple/$x.xcframework is missing: run apple/build-xcframework.sh" >&2; exit 1; }; done
 
 platform=${1:?usage: testflight.sh ios|tvos [build-number]}
 build=${2:-$(date -u +%Y%m%d%H%M)}

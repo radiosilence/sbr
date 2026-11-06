@@ -7,6 +7,7 @@
 //! stays well below the ceiling. Every entry point catches panics; nothing
 //! unwinds into Swift.
 
+pub mod api;
 mod crash;
 mod log;
 mod profile;
@@ -279,6 +280,16 @@ fn ignore_sigpipe() {
     }
 }
 
+/// The relay buffer for a requested size: 0 for the platform default, and
+/// at least 4 KiB, since below a TCP segment or two the relay just burns
+/// syscalls.
+fn relay_buffer(requested: u32) -> usize {
+    match requested {
+        0 => default_relay_buffer(),
+        n => (n as usize).max(4096),
+    }
+}
+
 /// Run `f`, turning a panic into `default` so nothing unwinds across the ABI.
 fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
@@ -318,13 +329,17 @@ pub extern "C" fn sbr_version() -> *const c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sbr_check(config_json: *const c_char) -> *mut c_char {
     let r = guard(Some("internal error (panic)".to_owned()), || {
-        let o = match parse(unsafe { str_arg(config_json) }) {
-            Ok(o) => o,
-            Err(e) => return Some(e),
-        };
-        Engine::new(&o, &Settings::default()).err().map(|e| e.to_string())
+        check(unsafe { str_arg(config_json) })
     });
     r.map_or(ptr::null_mut(), out_string)
+}
+
+fn check(config: Option<&str>) -> Option<String> {
+    let o = match parse(config) {
+        Ok(o) => o,
+        Err(e) => return Some(e),
+    };
+    Engine::new(&o, &Settings::default()).err().map(|e| e.to_string())
 }
 
 /// # Safety
@@ -387,11 +402,7 @@ pub unsafe extern "C" fn sbr_start_ex(
             base_dir: unsafe { str_arg(o.base_dir) }.map(Into::into),
             tun_fd: (o.tun_fd >= 0).then_some(o.tun_fd),
             flavor: Flavor::from_threads(o.threads),
-            relay_buffer: match o.relay_buffer {
-                0 => default_relay_buffer(),
-                // Below a TCP segment or two the relay just burns syscalls.
-                n => (n as usize).max(4096),
-            },
+            relay_buffer: relay_buffer(o.relay_buffer),
             max_connections: o.max_connections as usize,
         };
         let text = unsafe { str_arg(config_json) };
@@ -522,20 +533,24 @@ pub unsafe extern "C" fn sbr_select(instance: *mut SbrInstance, group: *const c_
         }) else {
             return 0;
         };
-        let Some(group) = e.outbound(g).and_then(|o| o.as_group()) else {
-            return 0;
-        };
-        let before = group.selected().tag().to_owned();
-        if !group.select(m) {
-            return 0;
-        }
-        // A choice made by hand should take effect now, not when apps next
-        // open a connection: close what still runs through the old member.
-        if before != m {
-            e.tracker.close_through(g);
-        }
-        1
+        select(&e, g, m) as i32
     })
+}
+
+fn select(e: &Engine, g: &str, m: &str) -> bool {
+    let Some(group) = e.outbound(g).and_then(|o| o.as_group()) else {
+        return false;
+    };
+    let before = group.selected().tag().to_owned();
+    if !group.select(m) {
+        return false;
+    }
+    // A choice made by hand should take effect now, not when apps next open
+    // a connection: close what still runs through the old member.
+    if before != m {
+        e.tracker.close_through(g);
+    }
+    true
 }
 
 /// # Safety
@@ -546,49 +561,53 @@ pub unsafe extern "C" fn sbr_groups(instance: *mut SbrInstance) -> *mut c_char {
         let Some(e) = engine_of(instance) else {
             return ptr::null_mut();
         };
-        let env = e.groups();
-        let delay = |o: &dyn sbr_engine::Outbound| match env.history(&real_tag(o)) {
-            Some(h) => h.delay.to_string(),
-            None => "null".to_owned(),
-        };
-        let groups: Vec<String> = e
-            .outbounds()
-            .iter()
-            .filter_map(|o| o.as_group().map(|g| (o, g)))
-            .map(|(o, g)| {
-                let members: Vec<String> = g
-                    .members()
-                    .iter()
-                    .map(|m| {
-                        let d = env.degraded(&real_tag(m.as_ref()));
-                        format!(
-                            r#"{{"tag":{},"type":{},"delay":{},"degraded":{},"reason":{},"retry_in":{}}}"#,
-                            json_str(m.tag()),
-                            json_str(m.kind()),
-                            delay(m.as_ref()),
-                            d.is_some(),
-                            d.map_or("null".to_owned(), |d| json_str(d.reason.as_str())),
-                            d.map_or("null".to_owned(), |d| d
-                                .until
-                                .saturating_duration_since(std::time::Instant::now())
-                                .as_secs()
-                                .to_string()),
-                        )
-                    })
-                    .collect();
-                format!(
-                    r#"{{"tag":{},"type":{},"selected":{},"now":{},"delay":{},"members":[{}]}}"#,
-                    json_str(o.tag()),
-                    json_str(o.kind()),
-                    json_str(g.selected().tag()),
-                    json_str(&real_tag(o.as_ref())),
-                    delay(o.as_ref()),
-                    members.join(",")
-                )
-            })
-            .collect();
-        out_string(format!("[{}]", groups.join(",")))
+        out_string(groups_json(&e))
     })
+}
+
+fn groups_json(e: &Engine) -> String {
+    let env = e.groups();
+    let delay = |o: &dyn sbr_engine::Outbound| match env.history(&real_tag(o)) {
+        Some(h) => h.delay.to_string(),
+        None => "null".to_owned(),
+    };
+    let groups: Vec<String> = e
+        .outbounds()
+        .iter()
+        .filter_map(|o| o.as_group().map(|g| (o, g)))
+        .map(|(o, g)| {
+            let members: Vec<String> = g
+                .members()
+                .iter()
+                .map(|m| {
+                    let d = env.degraded(&real_tag(m.as_ref()));
+                    format!(
+                        r#"{{"tag":{},"type":{},"delay":{},"degraded":{},"reason":{},"retry_in":{}}}"#,
+                        json_str(m.tag()),
+                        json_str(m.kind()),
+                        delay(m.as_ref()),
+                        d.is_some(),
+                        d.map_or("null".to_owned(), |d| json_str(d.reason.as_str())),
+                        d.map_or("null".to_owned(), |d| d
+                            .until
+                            .saturating_duration_since(std::time::Instant::now())
+                            .as_secs()
+                            .to_string()),
+                    )
+                })
+                .collect();
+            format!(
+                r#"{{"tag":{},"type":{},"selected":{},"now":{},"delay":{},"members":[{}]}}"#,
+                json_str(o.tag()),
+                json_str(o.kind()),
+                json_str(g.selected().tag()),
+                json_str(&real_tag(o.as_ref())),
+                delay(o.as_ref()),
+                members.join(",")
+            )
+        })
+        .collect();
+    format!("[{}]", groups.join(","))
 }
 
 /// Start a latency test of `group` (a urltest, or a selector whose urltest
@@ -607,43 +626,47 @@ pub unsafe extern "C" fn sbr_url_test(instance: *mut SbrInstance, group: *const 
         let Some(inst) = (unsafe { instance.as_ref() }) else {
             return 0;
         };
-        let Some((engine, handle)) = inst
-            .lock()
-            .running
-            .as_ref()
-            .map(|r| (r.engine.clone(), r.handle.clone()))
-        else {
-            return 0;
-        };
-        let Some(o) = engine.outbound(tag) else { return 0 };
-        let Some(g) = o.as_group() else { return 0 };
-        let mut tags: Vec<String> = vec![tag.to_owned()];
-        tags.extend(
-            g.members()
-                .iter()
-                .filter(|m| m.kind() == "urltest")
-                .map(|m| m.tag().to_owned()),
-        );
-        let env = engine.groups().clone();
-        let mut started = 0;
-        for t in tags {
-            if env.urltest(&t).is_some() {
-                let env = env.clone();
-                handle.spawn(async move {
-                    if let Some(u) = env.urltest(&t) {
-                        u.url_test(true).await;
-                    }
-                });
-                started = 1;
-            }
-        }
-        started
+        url_test(inst, tag) as i32
     })
+}
+
+fn url_test(inst: &SbrInstance, group: &str) -> bool {
+    let Some((engine, handle)) = inst
+        .lock()
+        .running
+        .as_ref()
+        .map(|r| (r.engine.clone(), r.handle.clone()))
+    else {
+        return false;
+    };
+    let Some(o) = engine.outbound(group) else { return false };
+    let Some(g) = o.as_group() else { return false };
+    let mut tags: Vec<String> = vec![group.to_owned()];
+    tags.extend(
+        g.members()
+            .iter()
+            .filter(|m| m.kind() == "urltest")
+            .map(|m| m.tag().to_owned()),
+    );
+    let env = engine.groups().clone();
+    let mut started = false;
+    for t in tags {
+        if env.urltest(&t).is_some() {
+            let env = env.clone();
+            handle.spawn(async move {
+                if let Some(u) = env.urltest(&t) {
+                    u.url_test(true).await;
+                }
+            });
+            started = true;
+        }
+    }
+    started
 }
 
 /// Default and ceiling for `sbr_connections`: each entry is a few hundred
 /// bytes of JSON, and the extension has ~50 MB in all.
-const CONNECTIONS_LIMIT: usize = 200;
+pub(crate) const CONNECTIONS_LIMIT: usize = 200;
 
 fn connections_json(e: &Engine, limit: usize) -> String {
     use std::sync::atomic::Ordering::Relaxed;
@@ -781,19 +804,24 @@ pub unsafe extern "C" fn sbr_runtime_stats(instance: *mut SbrInstance, out: *mut
         let Some(out) = (unsafe { out.as_mut() }) else {
             return;
         };
-        let mut s = SbrRuntimeStats {
-            memory_footprint: sys::memory_footprint(),
-            memory_available: sys::memory_available(),
-            cpu_time_us: sys::cpu_time_us(),
-            ..Default::default()
-        };
-        if let Some(e) = engine_of(instance) {
-            (s.uplink_bytes, s.downlink_bytes) = e.traffic.snapshot();
-            s.active_connections = e.active_connections() as u64;
-            s.udp_sessions = e.udp_sessions() as u64;
-        }
-        *out = s;
+        // SAFETY: NULL or live per the contract.
+        *out = runtime_stats(unsafe { instance.as_ref() });
     })
+}
+
+fn runtime_stats(instance: Option<&SbrInstance>) -> SbrRuntimeStats {
+    let mut s = SbrRuntimeStats {
+        memory_footprint: sys::memory_footprint(),
+        memory_available: sys::memory_available(),
+        cpu_time_us: sys::cpu_time_us(),
+        ..Default::default()
+    };
+    if let Some(e) = instance.and_then(SbrInstance::engine) {
+        (s.uplink_bytes, s.downlink_bytes) = e.traffic.snapshot();
+        s.active_connections = e.active_connections() as u64;
+        s.udp_sessions = e.udp_sessions() as u64;
+    }
+    s
 }
 
 /// # Safety
@@ -817,14 +845,17 @@ pub unsafe extern "C" fn sbr_network_changed(instance: *mut SbrInstance) {
 pub unsafe extern "C" fn sbr_network_migrate(instance: *mut SbrInstance) {
     guard((), || {
         // SAFETY: NULL or live per the contract.
-        let Some(i) = (unsafe { instance.as_ref() }) else {
-            return;
-        };
-        let running = i.lock().running.as_ref().map(|r| (r.engine.clone(), r.handle.clone()));
-        if let Some((engine, handle)) = running {
-            handle.spawn(async move { engine.network_migrate().await });
+        if let Some(i) = unsafe { instance.as_ref() } {
+            network_migrate(i);
         }
     })
+}
+
+fn network_migrate(i: &SbrInstance) {
+    let running = i.lock().running.as_ref().map(|r| (r.engine.clone(), r.handle.clone()));
+    if let Some((engine, handle)) = running {
+        handle.spawn(async move { engine.network_migrate().await });
+    }
 }
 
 /// Record panics and fatal signals to the file at `path` (appended), so the
@@ -856,10 +887,14 @@ pub unsafe extern "C" fn sbr_set_crash_file(path: *const c_char) -> i32 {
 pub unsafe extern "C" fn sbr_set_default_interface(name: *const c_char) {
     guard((), || {
         // SAFETY: NULL or valid per the contract.
-        let name = unsafe { str_arg(name) }.filter(|n| !n.is_empty()).map(str::to_owned);
-        tracing::info!(interface = name.as_deref().unwrap_or("none"), "outbound sockets bound");
-        sbr_engine::sbr_core::dial::set_default_interface(name);
+        set_default_interface(unsafe { str_arg(name) });
     })
+}
+
+fn set_default_interface(name: Option<&str>) {
+    let name = name.filter(|n| !n.is_empty()).map(str::to_owned);
+    tracing::info!(interface = name.as_deref().unwrap_or("none"), "outbound sockets bound");
+    sbr_engine::sbr_core::dial::set_default_interface(name);
 }
 
 /// # Safety

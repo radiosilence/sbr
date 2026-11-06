@@ -1,8 +1,8 @@
 //! The sbr app on macOS and iOS. `SBR_GUI_DEMO=1` runs it on made-up
 //! figures, without a tunnel.
 
-#[allow(dead_code)]
-pub mod proto;
+/// The app's side of the tunnel messages; the tunnel extension shares them.
+pub use sbr_message as proto;
 
 #[cfg(target_vendor = "apple")]
 pub mod demo;

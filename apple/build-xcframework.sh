@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-# Build apple/SbrCore.xcframework (static library + sbr.h module) for:
-#   iOS, iOS Simulator (arm64), macOS (arm64 + x86_64),
-#   Mac Catalyst (arm64 + x86_64), tvOS and tvOS Simulator (arm64).
+# Build two xcframeworks of static libraries:
+#
+#   apple/SbrCore.xcframework    sbr-apple (C ABI + sbr.h module) for SbrKit:
+#                                iOS, iOS Simulator (arm64), macOS (arm64 +
+#                                x86_64), Mac Catalyst (arm64 + x86_64), tvOS
+#                                and tvOS Simulator (arm64).
+#   apple/SbrTunnel.xcframework  sbr-tunnel-ext, the packet tunnel provider
+#                                the tunnel extensions link: the same slices
+#                                without Mac Catalyst.
 #
 # Run on macOS with Xcode and rustup. SBR_SKIP_TVOS=1 skips tvOS and
 # SBR_SKIP_CATALYST=1 skips Catalyst. The simulators are arm64 only: Intel
 # simulators would need an Intel Mac, and x86_64 tvOS has no prebuilt std.
 #
-# Every target builds in one cargo invocation, so their final LTO passes,
-# each single-threaded, run side by side rather than one after another.
+# Every target and both libraries build in one cargo invocation, so their
+# final LTO passes, each single-threaded, run side by side rather than one
+# after another.
 #
 # Release profile: fat LTO, one codegen unit (workspace Cargo.toml), no debug
 # info. The archives are deliberately not run through strip(1): it corrupts
@@ -32,11 +39,12 @@ TARGETS=("${IOS[@]}" "${IOS_SIM[@]}" "${MACOS[@]}")
 [ "${SBR_SKIP_TVOS:-0}" = 1 ] || TARGETS+=("${TVOS[@]}" "${TVOS_SIM[@]}")
 
 rustup target add "${TARGETS[@]}"
-cargo build --release -p sbr-apple "${TARGETS[@]/#/--target=}"
+# sbr-tunnel-ext has nothing to offer Catalyst, but building it there too
+# keeps this one invocation.
+cargo build --release -p sbr-apple -p sbr-tunnel-ext "${TARGETS[@]/#/--target=}"
 
-lib=libsbr_apple.a
 OUT=apple/build
-rm -rf "$OUT" apple/SbrCore.xcframework
+rm -rf "$OUT" apple/SbrCore.xcframework apple/SbrTunnel.xcframework
 mkdir -p "$OUT/headers"
 cp crates/sbr-apple/include/sbr.h "$OUT/headers/"
 cat > "$OUT/headers/module.modulemap" <<'MAP'
@@ -46,20 +54,22 @@ module SbrCore {
 }
 MAP
 
-# One (fat) archive per xcframework slice.
+# One (fat) archive of $lib per xcframework slice, under $OUT/$dir.
 slice() {
   local name=$1; shift
-  mkdir -p "$OUT/$name"
+  mkdir -p "$OUT/$dir/$name"
   local inputs=()
   for t in "$@"; do inputs+=("target/$t/release/$lib"); done
   if [ $# -gt 1 ]; then
-    lipo -create "${inputs[@]}" -output "$OUT/$name/$lib"
+    lipo -create "${inputs[@]}" -output "$OUT/$dir/$name/$lib"
   else
-    cp "${inputs[0]}" "$OUT/$name/$lib"
+    cp "${inputs[0]}" "$OUT/$dir/$name/$lib"
   fi
-  XCF_ARGS+=(-library "$OUT/$name/$lib" -headers "$OUT/headers")
+  XCF_ARGS+=(-library "$OUT/$dir/$name/$lib")
+  [ -z "$headers" ] || XCF_ARGS+=(-headers "$headers")
 }
 
+lib=libsbr_apple.a dir=core headers=$OUT/headers
 XCF_ARGS=()
 slice ios "${IOS[@]}"
 slice ios-simulator "${IOS_SIM[@]}"
@@ -69,13 +79,27 @@ if [ "${SBR_SKIP_TVOS:-0}" != 1 ]; then
   slice tvos "${TVOS[@]}"
   slice tvos-simulator "${TVOS_SIM[@]}"
 fi
-
 xcodebuild -create-xcframework "${XCF_ARGS[@]}" -output apple/SbrCore.xcframework
+
+# The provider has no header: the extension refers to one symbol, declared
+# where it is used (apple/App/Tunnel/Provider.c).
+lib=libsbr_tunnel_ext.a dir=tunnel headers=
+XCF_ARGS=()
+slice ios "${IOS[@]}"
+slice ios-simulator "${IOS_SIM[@]}"
+slice macos "${MACOS[@]}"
+if [ "${SBR_SKIP_TVOS:-0}" != 1 ]; then
+  slice tvos "${TVOS[@]}"
+  slice tvos-simulator "${TVOS_SIM[@]}"
+fi
+xcodebuild -create-xcframework "${XCF_ARGS[@]}" -output apple/SbrTunnel.xcframework
 
 echo
 echo "slice sizes (static archives; the linked app adds far less after dead-stripping):"
-for d in "$OUT"/*/; do
-  [ -f "$d$lib" ] && printf '  %-16s %s\n' "$(basename "$d")" "$(du -h "$d$lib" | cut -f1)"
+for a in "$OUT"/*/*/*.a; do
+  printf '  %-34s %s\n' "${a#"$OUT"/}" "$(du -h "$a" | cut -f1)"
 done
-printf '  %-16s %s\n' xcframework "$(du -sh apple/SbrCore.xcframework | cut -f1)"
-echo "built apple/SbrCore.xcframework"
+for x in SbrCore SbrTunnel; do
+  printf '  %-34s %s\n' "$x.xcframework" "$(du -sh "apple/$x.xcframework" | cut -f1)"
+done
+echo "built apple/SbrCore.xcframework and apple/SbrTunnel.xcframework"

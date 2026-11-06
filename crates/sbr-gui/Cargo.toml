@@ -12,6 +12,7 @@ publish = false
 runtime-shaders = ["koan-kit/runtime-shaders"]
 
 [dependencies]
+sbr-message = { path = "../sbr-message" }
 serde.workspace = true
 serde_json.workspace = true
 
