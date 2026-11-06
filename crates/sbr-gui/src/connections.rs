@@ -79,10 +79,10 @@ impl Connections {
         self.poll = Some(cx.spawn(async move |this, cx| {
             let mut last = Instant::now();
             loop {
-                let Ok((manager, demo)) = this.read_with(cx, |c, cx| (c.manager(cx), c.demo)) else {
+                let Ok((manager, is_demo)) = this.read_with(cx, |c, cx| (c.manager(cx), c.demo)) else {
                     return;
                 };
-                let snapshot = match (manager, demo) {
+                let snapshot = match (manager, is_demo) {
                     (_, true) => None,
                     (Some(m), _) => m.send(&Request::Connections {}).await.ok().and_then(|r| r.connections),
                     (None, _) => None,

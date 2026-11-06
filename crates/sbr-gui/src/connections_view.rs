@@ -350,7 +350,7 @@ impl Render for Detail {
                     );
                 }
                 body = body
-                    .child(SectionHeading::new(&format!("always route {domain} via")))
+                    .child(SectionHeading::new(format!("always route {domain} via")))
                     .child(row);
             }
         }

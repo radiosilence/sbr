@@ -34,6 +34,7 @@ impl LogsPage {
 impl Render for LogsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
+        let toolbar = toolbar("logs", window, cx);
         let logs = self.logs.read(cx);
         let connected = logs.connected(cx);
         let all = logs.lines.join("\n");
@@ -41,7 +42,7 @@ impl Render for LogsPage {
             .label("copy")
             .disabled(logs.lines.is_empty())
             .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(all.clone())));
-        let toolbar = toolbar("logs", window, cx).trailing(copy);
+        let toolbar = toolbar.trailing(copy);
 
         let vpn = self.vpn.clone();
         let verbose = Toggle::new("verbose", "verbose", self.vpn.read(cx).settings.verbose)

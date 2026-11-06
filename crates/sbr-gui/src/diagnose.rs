@@ -59,8 +59,7 @@ impl Diagnose {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let plan = config.as_deref().and_then(sbr_apple::app::tun_plan);
-            for i in 0..names.len() {
-                let name = names[i];
+            for (i, name) in names.into_iter().enumerate() {
                 let plan = plan.clone();
                 let outcome = cx
                     .background_spawn(async move { run_check(name, plan.as_ref()) })

@@ -40,7 +40,7 @@ pub fn toolbar(title: &str, window: &mut Window, cx: &mut App) -> Toolbar {
 }
 
 /// A page under its toolbar, scrolling.
-pub fn page(toolbar: Toolbar, id: &'static str, content: impl IntoElement, look: &Look) -> Div {
+pub fn page(toolbar: Toolbar, id: &'static str, content: Div, look: &Look) -> Div {
     div()
         .size_full()
         .flex()
