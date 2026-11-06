@@ -185,7 +185,7 @@ fn rates(previous: &[Live], next: Vec<Connection>, dt: f64, now: Instant) -> Vec
             }
         })
         .collect();
-    rows.sort_by(|a, b| (b.last_active, b.connection.start).cmp(&(a.last_active, a.connection.start)));
+    rows.sort_by_key(|l| std::cmp::Reverse((l.last_active, l.connection.start)));
     rows
 }
 
