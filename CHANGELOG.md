@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.8
+
+### Added
+
+- **Automatic fragmentation also reacts to silence.** A ClientHello with no answer for 6 s now counts as a cut, as a reset does, so filters that drop blocked flows instead of resetting them (Egypt's often do) turn fragmentation on; such a handshake used to wait out the 15 s timeout and fail.
+- **`urltest` retries a failed connect on the next member.** When the selected member cannot connect, the connection is made once more through the member the group would pick without it, and the group switches there if that works, instead of failing every connection until the next check.
+
+### Tests
+
+- **SSH tests start their sshd reliably.** The test sshd is restarted on a fresh port when another test takes the one it was given, instead of the test failing with "connection refused".
+
 ## 0.2.7
 
 ### Changed
