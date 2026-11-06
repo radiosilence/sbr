@@ -59,7 +59,6 @@ struct ConnectionsView: View {
                 .padding(.top, Theme.Space.xl)
                 .padding(.bottom, Theme.Space.s)
             Text(summary).font(.sbr(.meta)).foregroundStyle(Color.sbrMuted)
-                .contentTransition(.numericText())
             TextField("filter", text: $filter)
                 .font(.sbr(.control))
                 .textFieldStyle(.plain)
@@ -255,7 +254,6 @@ private struct ConnectionDetail: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label).font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
             Text(rate).font(.sbr(.title)).foregroundStyle(Color.sbrStrong)
-                .contentTransition(.numericText())
             Text(total).font(.sbr(.fine)).foregroundStyle(Color.sbrMuted)
         }
     }

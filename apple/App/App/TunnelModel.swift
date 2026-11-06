@@ -284,9 +284,9 @@ final class TunnelModel: ObservableObject {
                         cpuShare = Double(s.cpuTimeMicros &- last.stats.cpuTimeMicros) / 1e6 / dt
                     }
                     last = (s, now)
-                    stats = s
+                    if s != stats { stats = s }
                 }
-                if let g = try? await session.send(.groups).groups { groups = g }
+                if let g = try? await session.send(.groups).groups, g != groups { groups = g }
             } else {
                 last = nil
                 uploadRate = 0
