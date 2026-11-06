@@ -12,7 +12,7 @@ use crate::install::Vpn;
 use crate::profile::Profile;
 use crate::profiles::Profiles;
 use crate::swift::Date;
-use crate::ui::{column, narrow, row_height, page, problem, text, toolbar};
+use crate::ui::{column, narrow, page, problem, row_height, text, toolbar};
 
 pub struct ProfilesPage {
     profiles: Entity<Profiles>,
@@ -233,7 +233,7 @@ impl ProfilesPage {
             .child(
                 div()
                     .w(px(2.0))
-                    .h(px(32.0))
+                    .self_stretch()
                     .when(active, |bar| bar.bg(look.color(Tone::Accent))),
             )
             .child(

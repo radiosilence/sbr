@@ -11,7 +11,7 @@ use crate::diagnose::Diagnose;
 use crate::install::Vpn;
 use crate::logs::Logs;
 use crate::profiles::Profiles;
-use crate::ui::{row_height, column, page, problem, text, toolbar};
+use crate::ui::{column, page, problem, row_height, text, toolbar};
 
 pub struct SettingsPage {
     vpn: Entity<Vpn>,

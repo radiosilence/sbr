@@ -81,11 +81,7 @@ pub fn page(toolbar: Toolbar, id: &'static str, content: Div, look: &Look) -> Di
 /// A page's column of sections, closer to the edges on a narrow screen.
 pub fn column(look: &Look, window: &Window) -> Div {
     let edge = if narrow(window) { Space::L } else { Space::Xl };
-    div()
-        .flex()
-        .flex_col()
-        .gap(look.space(Space::Xl))
-        .p(look.space(edge))
+    div().flex().flex_col().gap(look.space(Space::Xl)).p(look.space(edge))
 }
 
 /// Seconds as the fewest words: `42s`, `5m`, `3h 12m`, `2d 4h`.

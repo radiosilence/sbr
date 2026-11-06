@@ -277,11 +277,17 @@ impl TunnelPage {
                 look.palette.rule.hsla(),
                 px(4.0),
             )))
-            .child(div().w(look.sized(if narrow { 90.0 } else { 120.0 })).flex().justify_end().child(text(
-                delay,
-                TypeRole::Meta,
-                if degraded { Tone::Bad } else { Tone::Ink },
-                look,
-            )))
+            .child(
+                div()
+                    .w(look.sized(if narrow { 90.0 } else { 120.0 }))
+                    .flex()
+                    .justify_end()
+                    .child(text(
+                        delay,
+                        TypeRole::Meta,
+                        if degraded { Tone::Bad } else { Tone::Ink },
+                        look,
+                    )),
+            )
     }
 }

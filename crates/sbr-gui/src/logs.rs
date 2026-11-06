@@ -79,11 +79,27 @@ impl Logs {
             self.poll = None;
             return;
         }
-        if self.poll.is_some() || self.demo {
+        if self.poll.is_some() {
             return;
         }
         self.poll = Some(cx.spawn(async move |this, cx| {
             loop {
+                let Ok(demo) = this.read_with(cx, |l, _| l.demo) else {
+                    return;
+                };
+                if demo {
+                    let alive = this.update(cx, |l, cx| {
+                        l.lines.extend(demo_next());
+                        let over = l.lines.len().saturating_sub(KEPT);
+                        l.lines.drain(..over);
+                        cx.notify();
+                    });
+                    if alive.is_err() {
+                        return;
+                    }
+                    cx.background_executor().timer(POLL).await;
+                    continue;
+                }
                 let Ok(manager) = this.read_with(cx, |l, cx| {
                     let t = l.tunnel.read(cx);
                     t.manager().filter(|_| t.status == Status::On)
@@ -144,6 +160,51 @@ pub fn level(line: &str) -> Level {
     }
 }
 
+/// Lines the demo keeps, as the extension keeps its recent ones.
+const KEPT: usize = 200;
+
+/// One poll's worth of made-up lines, stamped with the time now: a
+/// connection opening or closing, a lookup, and now and then a warning.
+fn demo_next() -> Vec<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    let stamp = format!("{:02}:{:02}:{:02}", secs / 3600 % 24, secs / 60 % 60, secs % 60);
+    let n = (now.as_millis() / POLL.as_millis()) as usize;
+    let hosts = [
+        "www.youtube.com",
+        "api.github.com",
+        "fonts.gstatic.com",
+        "news.ycombinator.com",
+        "icloud.com",
+    ];
+    let exits = ["hk-01", "jp-02", "sg-01"];
+    let host = hosts[n % hosts.len()];
+    let exit = exits[n / 3 % exits.len()];
+    let mut lines = vec![match n % 3 {
+        0 => format!("{stamp} INFO router: {host} via {exit}"),
+        1 => format!(
+            "{stamp} INFO dns: {host} A answered via {exit} in {} ms",
+            8 + n * 7 % 60
+        ),
+        _ => format!("{stamp} INFO connection: {host}:443 closed after {}s", 2 + n * 13 % 90),
+    }];
+    if n.is_multiple_of(2) {
+        lines.push(format!(
+            "{stamp} INFO connection: {}:443 opened via {exit}",
+            hosts[(n + 2) % hosts.len()]
+        ));
+    }
+    if n % 9 == 4 {
+        lines.push(format!(
+            "{stamp} WARN outbound/vless[{exit}]: handshake slow: 1.{}s",
+            n % 10
+        ));
+    }
+    lines
+}
+
 fn demo_lines() -> Vec<String> {
     [
         "12:00:01 INFO sbr 0.2.8 starting",
@@ -162,6 +223,17 @@ fn demo_lines() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_demo_adds_stamped_lines() {
+        let lines = demo_next();
+        assert!(!lines.is_empty() && lines.len() <= 3);
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.as_bytes()[2] == b':' && l.contains(" INFO ") || l.contains(" WARN "))
+        );
+    }
 
     #[test]
     fn levels() {

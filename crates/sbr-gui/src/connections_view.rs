@@ -16,7 +16,7 @@ use crate::connections::{Connections, Live};
 use crate::graph;
 use crate::install::Vpn;
 use crate::proto::Connection;
-use crate::ui::{age, column, narrow, row_height, page, problem, text, toolbar};
+use crate::ui::{age, column, narrow, page, problem, row_height, text, toolbar};
 
 pub struct ConnectionsPage {
     connections: Entity<Connections>,
@@ -195,7 +195,11 @@ impl ConnectionsPage {
                 if active { Tone::Accent } else { Tone::Muted },
                 look,
             ));
-        let (under, beside) = if narrow { (Some(rates), None) } else { (None, Some(rates)) };
+        let (under, beside) = if narrow {
+            (Some(rates), None)
+        } else {
+            (None, Some(rates))
+        };
         let totals = format!(
             "↓ {} ↑ {} · {}",
             graph::bytes(c.download as f64),
