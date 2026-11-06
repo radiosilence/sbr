@@ -31,6 +31,9 @@ pub struct Sample {
     pub connections: u64,
 }
 
+/// Connects (true) or disconnects (false).
+pub type SetOn = Rc<dyn Fn(bool, &mut App)>;
+
 pub struct Tunnel {
     pub status: Status,
     pub stats: Option<Stats>,
@@ -41,6 +44,9 @@ pub struct Tunnel {
     pub testing: BTreeSet<String>,
     pub error: Option<String>,
     manager: Option<Rc<Manager>>,
+    /// Connects and disconnects in place of `set_on`'s own handling, so the
+    /// configuration can be installed first (`install::Vpn`).
+    pub on_set_on: Option<SetOn>,
     demo: bool,
     _observer: Option<ne::Observer>,
     _tasks: Vec<Task<()>>,
@@ -57,6 +63,7 @@ impl Tunnel {
             testing: BTreeSet::new(),
             error: None,
             manager: None,
+            on_set_on: None,
             demo,
             _observer: None,
             _tasks: Vec::new(),
@@ -77,7 +84,7 @@ impl Tunnel {
                 let loaded = Manager::load(&id).await;
                 let _ = this.update(cx, |t, cx| {
                     match loaded {
-                        Ok(Some(m)) => t.adopt(m, cx),
+                        Ok(Some(m)) => t.adopt(Rc::new(m), cx),
                         Ok(None) => {}
                         Err(e) => t.error = Some(e),
                     }
@@ -123,11 +130,26 @@ impl Tunnel {
         tunnel
     }
 
-    fn adopt(&mut self, m: Manager, cx: &mut Context<Self>) {
+    pub fn manager(&self) -> Option<Rc<Manager>> {
+        self.manager.clone()
+    }
+
+    /// The configuration was removed.
+    pub fn forget(&mut self, cx: &mut Context<Self>) {
+        self.manager = None;
+        self._observer = None;
+        self.status = Status::Invalid;
+        self.groups.clear();
+        self.stats = None;
+        self.history.clear();
+        cx.notify();
+    }
+
+    pub fn adopt(&mut self, m: Rc<Manager>, cx: &mut Context<Self>) {
         self.status = m.status();
         let (mut statuses, observer) = m.statuses();
         self._observer = Some(observer);
-        self.manager = Some(Rc::new(m));
+        self.manager = Some(m);
         self._tasks.push(cx.spawn(async move |this, cx| {
             while let Some(status) = statuses.next().await {
                 let _ = this.update(cx, |t, cx| {
@@ -178,6 +200,10 @@ impl Tunnel {
                 self.history.clear();
             }
             cx.notify();
+            return;
+        }
+        if let Some(set_on) = self.on_set_on.clone() {
+            set_on(on, cx);
             return;
         }
         let Some(m) = &self.manager else {
