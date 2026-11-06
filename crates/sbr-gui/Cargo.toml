@@ -55,6 +55,26 @@ objc2-core-foundation = { version = "0.3.2", features = ["CFString", "CFDictiona
 objc2-security = { version = "0.3.2", default-features = false, features = ["std", "SecBase", "SecItem"] }
 sbr-apple = { path = "../sbr-apple" }
 
+# The menu bar item, the Dock, and launch at login.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", features = [
+  "NSApplication",
+  "NSButton",
+  "NSCell",
+  "NSControl",
+  "NSEvent",
+  "NSImage",
+  "NSMenu",
+  "NSMenuItem",
+  "NSResponder",
+  "NSRunningApplication",
+  "NSStatusBar",
+  "NSStatusBarButton",
+  "NSStatusItem",
+  "NSView",
+] }
+objc2-service-management = { version = "0.3.2", features = ["SMAppService"] }
+
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
 gpui = { package = "gpui-koan", git = "https://github.com/radiosilence/zed", rev = "5f97692fdd8bb4def13321cd26d84f9a7ad282f3", features = ["test-support"] }
 gpui_platform = { package = "gpui-koan-platform", git = "https://github.com/radiosilence/zed", rev = "5f97692fdd8bb4def13321cd26d84f9a7ad282f3", features = ["font-kit", "test-support"] }

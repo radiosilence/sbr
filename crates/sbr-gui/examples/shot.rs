@@ -21,18 +21,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         gpui_platform::current_headless_renderer,
     );
     cx.update(theme::init);
-    let tunnel = cx.update(|cx| cx.new(sbr_gui::tunnel::Tunnel::new));
+    let models = cx.update(sbr_gui::Models::new);
 
     let mut shots = Vec::new();
     for dark in [true, false] {
-        let tunnel = tunnel.clone();
+        let models = models.clone();
         let window = cx.open_window(size(px(880.0), px(900.0)), |window, cx| {
             if profiles {
                 let tab = sbr_gui::shell::Tab::Profiles;
-                let page = cx.new(|cx| sbr_gui::shell::Shell::new(tunnel, tab, window, cx));
+                let page = cx.new(|cx| sbr_gui::shell::Shell::new(models, tab, window, cx));
                 return koan_kit::components::host(page, window, cx);
             }
-            let page = cx.new(|cx| sbr_gui::view::TunnelPage::new(tunnel, cx));
+            let page = cx.new(|cx| sbr_gui::view::TunnelPage::new(models.tunnel, cx));
             koan_kit::components::host(page, window, cx)
         })?;
         cx.update_window(window.into(), |_, window, cx| {

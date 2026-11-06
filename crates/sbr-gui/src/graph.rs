@@ -192,6 +192,10 @@ float4 shade(float2 position, float2 size, float time, constant float *u, textur
     float t = clamp(f - i0, 0.0, 1.0);
     float4 out = float4(0.0);
     for (int row = 0; row < 2; row++) {
+        float4 colour = row == 0 ? float4(u[4], u[5], u[6], u[7]) : float4(u[8], u[9], u[10], u[11]);
+        if (colour.a <= 0.0) {
+            continue;
+        }
         // Samples i0 - 2 to i0 + 3, and the tangents at i0 - 1 to i0 + 2.
         float v[6];
         for (int q = 0; q < 6; q++) {
@@ -224,7 +228,6 @@ float4 shade(float2 position, float2 size, float time, constant float *u, textur
         float half_width = u[14 + row] * u[3] * 0.5;
         float line = 1.0 - smoothstep(half_width - 0.6, half_width + 0.6, d);
 
-        float4 colour = row == 0 ? float4(u[4], u[5], u[6], u[7]) : float4(u[8], u[9], u[10], u[11]);
         float alpha = colour.a * max(fill, line);
         float over = alpha + out.a * (1.0 - alpha);
         if (over > 0.0) {
@@ -244,39 +247,61 @@ fn shade(position: vec2<f32>, size: vec2<f32>, time: f32, u: array<vec4<f32>, 20
     prepare: None,
 };
 
-/// Throughput over the last two minutes, which moves at the display's rate
-/// while the page itself is drawn only as samples arrive: each sample is
-/// written into a small texture and the GPU scrolls it in over one poll, and
-/// eases the scale when it changes. Kept by the page that shows it.
+/// A line on a `LiveChart`: its values, oldest first, and how it is drawn.
+pub struct Line {
+    pub values: Vec<f64>,
+    pub colour: Hsla,
+    /// The fill's opacity under the line.
+    pub fill: f32,
+    /// The stroke's width, in points.
+    pub width: f32,
+}
+
+/// A chart of one or two lines that moves at the display's rate while the
+/// page around it is drawn only as samples arrive: each sample is written
+/// into a small texture the GPU draws from, scrolled in over one poll, and
+/// the scale eases when it changes. Nothing is tessellated on the CPU, so
+/// scrolling the page costs the chart nothing. Kept by the page that shows
+/// it.
 #[derive(Default)]
 pub struct LiveChart {
     animated: Animated,
     image: Option<Arc<RenderImage>>,
     taken: u64,
-    scale: Option<f64>,
+    top: Option<f64>,
     look: Option<Look>,
 }
 
 impl LiveChart {
-    /// Takes the samples if they changed since the last call.
-    pub fn update(&mut self, samples: &VecDeque<Sample>, taken: u64, look: &Look, window: &mut Window, cx: &mut App) {
-        if self.look != Some(*look) {
-            self.look = Some(*look);
-            self.animated.set(3, window.scale_factor());
-            self.animated.set_color(4, look.color(Tone::Accent));
-            self.animated.set_color(8, look.color(Tone::Ink).opacity(0.8));
-        }
-        if taken == self.taken {
+    /// Takes new lines when a sample was `taken` or the look changed since
+    /// the last call; `build` gives the value that reaches the top and at
+    /// most two lines.
+    pub fn update(
+        &mut self,
+        taken: u64,
+        look: &Look,
+        window: &mut Window,
+        cx: &mut App,
+        build: impl FnOnce(&Look) -> (f64, Vec<Line>),
+    ) {
+        let fresh = taken != self.taken;
+        if !fresh && self.look == Some(*look) {
             return;
         }
         let first = self.taken == 0;
         self.taken = taken;
-        let full = samples.iter().map(|s| s.down.max(s.up)).fold(1.0, f64::max);
-        let n = samples.len();
+        self.look = Some(*look);
+        let (top, lines) = build(look);
+        let n = lines.iter().map(|l| l.values.len()).max().unwrap_or(0);
+        let full = lines
+            .iter()
+            .flat_map(|l| l.values.iter().copied())
+            .fold(f64::EPSILON, f64::max);
         let mut bytes = Vec::with_capacity(n.max(1) * 2 * 4);
         for row in 0..2 {
-            for s in samples {
-                let v = if row == 0 { s.down } else { s.up };
+            let values = lines.get(row).map(|l| l.values.as_slice()).unwrap_or(&[]);
+            for i in 0..n {
+                let v = values.get(i).copied().unwrap_or(0.0);
                 let q = (v / full * 65535.0).round().clamp(0.0, 65535.0) as u16;
                 let (hi, lo) = ((q >> 8) as u8, q as u8);
                 bytes.extend_from_slice(&[hi, lo, hi, 255]);
@@ -294,39 +319,44 @@ impl LiveChart {
         a.set(0, n as f32);
         a.set(1, HISTORY as f32);
         a.set(2, full as f32);
-        a.set(12, 0.18);
-        a.set(13, 0.10);
-        a.set(14, 1.75);
-        a.set(15, 1.4);
+        a.set(3, window.scale_factor());
+        for row in 0..2 {
+            match lines.get(row) {
+                Some(line) => {
+                    a.set_color(4 + row * 4, line.colour);
+                    a.set(12 + row, line.fill);
+                    a.set(14 + row, line.width);
+                }
+                None => {
+                    a.set_color(4 + row * 4, Hsla::transparent_black());
+                    a.set(12 + row, 0.0);
+                    a.set(14 + row, 0.0);
+                }
+            }
+        }
         if first {
             a.hold(0, 1.0);
-        } else {
+        } else if fresh {
             a.segment(0, 0.0, 1.0, Animated::now(), POLL, Ease::Linear, Repeat::Once);
         }
-        let peak = samples.iter().map(|s| s.down.max(s.up)).fold(0.0, f64::max);
-        let scale = scale_for(peak);
-        if self.scale.is_none() {
-            a.hold(1, scale as f32);
-        } else if self.scale != Some(scale) {
-            a.to(1, scale as f32, Duration::from_millis(400), Ease::QuickOut);
+        if self.top.is_none() {
+            a.hold(1, top as f32);
+        } else if self.top != Some(top) {
+            a.to(1, top as f32, Duration::from_millis(400), Ease::QuickOut);
         }
-        self.scale = Some(scale);
+        self.top = Some(top);
     }
 
-    /// The chart with its scale named above and its span below.
-    pub fn element(&self, look: Look, height: Pixels) -> impl IntoElement {
-        let muted = look.text_color(Tone::Muted);
-        let note = |s: String| div().text_role(TypeRole::Fine, &look).text_color(muted).child(s);
-        let mut plot_area = div().relative().w_full().h(height).child(plot(
-            Vec::new(),
-            1.0,
-            HISTORY,
-            true,
-            look.palette.rule.hsla(),
-            height,
-        ));
+    /// The value at the top of the chart.
+    pub fn top(&self) -> Option<f64> {
+        self.top
+    }
+
+    /// The lines, filling a box `height` tall.
+    pub fn quad(&self, height: Pixels) -> Div {
+        let mut area = div().relative().w_full().h(height);
         if let Some(image) = self.image.clone() {
-            plot_area = plot_area.child(
+            area = area.child(
                 div()
                     .absolute()
                     .top_0()
@@ -335,26 +365,64 @@ impl LiveChart {
                     .child(AnimatedQuad::new(&CURVES, &self.animated).image(image).size_full()),
             );
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap(look.space(Space::Xs))
-            .child(note(rate(self.scale.unwrap_or(FLOOR))))
-            .child(plot_area)
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .child(note("2 min".into()))
-                    .child(note("now".into())),
-            )
+        area
     }
 }
 
-/// A gauge's trend: one series filling its box, scaled between its own
-/// least and greatest values so a figure that moves little still shows its
-/// shape.
-pub fn trend(values: Vec<f64>, look: Look, height: Pixels) -> impl IntoElement {
+/// Throughput's lines: download in the accent, upload in `ink` in front of
+/// it, on a scale that rounds up to a readable step.
+pub fn throughput_lines(samples: &VecDeque<Sample>, look: &Look) -> (f64, Vec<Line>) {
+    let peak = samples.iter().map(|s| s.down.max(s.up)).fold(0.0, f64::max);
+    (
+        scale_for(peak),
+        vec![
+            Line {
+                values: samples.iter().map(|s| s.down).collect(),
+                colour: look.color(Tone::Accent),
+                fill: 0.18,
+                width: 1.75,
+            },
+            Line {
+                values: samples.iter().map(|s| s.up).collect(),
+                colour: look.color(Tone::Ink).opacity(0.8),
+                fill: 0.10,
+                width: 1.4,
+            },
+        ],
+    )
+}
+
+/// The throughput chart with quarter rules, its scale named above and its
+/// span below.
+pub fn throughput(chart: &LiveChart, look: Look, height: Pixels) -> impl IntoElement {
+    let muted = look.text_color(Tone::Muted);
+    let note = |s: String| div().text_role(TypeRole::Fine, &look).text_color(muted).child(s);
+    let rules = div().absolute().top_0().left_0().size_full().child(plot(
+        Vec::new(),
+        1.0,
+        HISTORY,
+        true,
+        look.palette.rule.hsla(),
+        height,
+    ));
+    div()
+        .flex()
+        .flex_col()
+        .gap(look.space(Space::Xs))
+        .child(note(rate(chart.top().unwrap_or(FLOOR))))
+        .child(div().relative().child(rules).child(chart.quad(height)))
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .child(note("2 min".into()))
+                .child(note("now".into())),
+        )
+}
+
+/// A gauge's line, scaled between its own least and greatest values so a
+/// figure that moves little still shows its shape.
+pub fn trend_lines(values: Vec<f64>, look: &Look) -> (f64, Vec<Line>) {
     let lo = values.iter().copied().fold(f64::INFINITY, f64::min);
     let hi = values.iter().copied().fold(0.0, f64::max);
     let base = if lo.is_finite() {
@@ -363,20 +431,14 @@ pub fn trend(values: Vec<f64>, look: Look, height: Pixels) -> impl IntoElement {
         0.0
     };
     let values: Vec<f64> = values.iter().map(|v| v - base).collect();
-    let peak = ((hi - base) * 1.1).max(f64::EPSILON);
-    let accent = look.color(Tone::Accent);
-    plot(
-        vec![Series {
+    (
+        ((hi - base) * 1.1).max(f64::EPSILON),
+        vec![Line {
             values,
-            fill: accent.opacity(0.14),
-            stroke: accent,
+            colour: look.color(Tone::Accent),
+            fill: 0.14,
             width: 1.2,
         }],
-        peak,
-        HISTORY,
-        false,
-        look.palette.rule.hsla(),
-        height,
     )
 }
 

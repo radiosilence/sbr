@@ -88,6 +88,9 @@ impl Drop for Running {
 fn fail_sockets(shared: &Shared) {
     let mut st = shared.stack.lock().unwrap_or_else(|e| e.into_inner());
     for (_, s) in st.sockets.iter_mut() {
+        // Irrefutable when nothing else in the build enables smoltcp's TCP
+        // sockets (a build of sbr-apple alone); sbr-tun's tunnel does.
+        #[allow(irrefutable_let_patterns)]
         if let smoltcp::socket::Socket::Udp(u) = s {
             u.close();
         }

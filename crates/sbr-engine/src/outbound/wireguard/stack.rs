@@ -283,6 +283,9 @@ impl Stack {
 
     pub fn release_udp(&mut self, h: SocketHandle) {
         let s = self.sockets.remove(h);
+        // Irrefutable when nothing else in the build enables smoltcp's TCP
+        // sockets (a build of sbr-apple alone); sbr-tun's tunnel does.
+        #[allow(irrefutable_let_patterns)]
         if let smoltcp::socket::Socket::Udp(s) = s {
             self.used_ports.remove(&s.endpoint().port);
         }

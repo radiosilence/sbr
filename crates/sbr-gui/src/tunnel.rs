@@ -47,6 +47,8 @@ pub struct Tunnel {
     pub history: VecDeque<Sample>,
     /// Counts samples taken, so a graph knows when to take the next.
     pub taken: u64,
+    /// Whether a window shows the graphs: the tunnel is polled only then.
+    watched: bool,
     /// Groups whose latency test is running.
     pub testing: BTreeSet<String>,
     pub error: Option<String>,
@@ -68,6 +70,7 @@ impl Tunnel {
             groups: Vec::new(),
             history: VecDeque::with_capacity(KEPT),
             taken: 0,
+            watched: false,
             testing: BTreeSet::new(),
             error: None,
             manager: None,
@@ -183,7 +186,20 @@ impl Tunnel {
         self.taken += 1;
     }
 
-    /// The next poll's requests, or none while the tunnel is down.
+    /// Polls the tunnel while `on`: while a window shows the graphs. The
+    /// history starts again when it opens, so it never draws a gap as a
+    /// line.
+    pub fn watch(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on != self.watched && !self.demo {
+            self.history.clear();
+            self.taken += 1;
+        }
+        self.watched = on;
+        cx.notify();
+    }
+
+    /// The next poll's requests, or none while the tunnel is down or no
+    /// window shows it.
     #[allow(clippy::type_complexity)]
     fn poll(
         &mut self,
@@ -193,7 +209,7 @@ impl Tunnel {
             let stats = crate::demo::stats(self.stats.as_ref());
             return Some(Box::pin(async move { (Some(stats), None) }));
         }
-        if self.status != Status::On {
+        if self.status != Status::On || !self.watched {
             return None;
         }
         let m = self.manager.clone()?;

@@ -4,10 +4,9 @@ use koan_kit::app::*;
 use koan_kit::components::TabStrip;
 use koan_kit::theme::{Icon, Look};
 
+use crate::Models;
 use crate::install::Vpn;
-use crate::profiles::Profiles;
 use crate::profiles_view::ProfilesPage;
-use crate::tunnel::Tunnel;
 use crate::view::TunnelPage;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -24,12 +23,10 @@ pub struct Shell {
 }
 
 impl Shell {
-    pub fn new(tunnel: Entity<Tunnel>, tab: Tab, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let profiles = cx.new(Profiles::new);
-        let vpn = cx.new(|cx| Vpn::new(tunnel.clone(), profiles.clone(), cx));
+    pub fn new(models: Models, tab: Tab, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let Models { tunnel, profiles, vpn } = models;
         let tunnel_page = cx.new(|cx| TunnelPage::new(tunnel, cx));
         let profiles_page = cx.new(|cx| ProfilesPage::new(profiles, vpn.clone(), window, cx));
-        vpn.update(cx, |v, cx| v.refresh_profiles(cx));
         Self {
             tab,
             vpn,
