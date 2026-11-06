@@ -8,13 +8,23 @@ pub mod rules;
 pub mod swift;
 
 #[cfg(target_vendor = "apple")]
+pub mod connections;
+#[cfg(target_vendor = "apple")]
+pub mod connections_view;
+#[cfg(target_vendor = "apple")]
 pub mod demo;
+#[cfg(target_vendor = "apple")]
+pub mod diagnose;
 #[cfg(target_vendor = "apple")]
 pub mod graph;
 #[cfg(target_vendor = "apple")]
 pub mod install;
 #[cfg(target_vendor = "apple")]
 pub mod keychain;
+#[cfg(target_vendor = "apple")]
+pub mod logs;
+#[cfg(target_vendor = "apple")]
+pub mod logs_view;
 #[cfg(target_os = "macos")]
 pub mod menubar;
 #[cfg(target_vendor = "apple")]
@@ -24,11 +34,15 @@ pub mod profiles;
 #[cfg(target_vendor = "apple")]
 pub mod profiles_view;
 #[cfg(target_vendor = "apple")]
+pub mod settings_view;
+#[cfg(target_vendor = "apple")]
 pub mod shell;
 #[cfg(target_os = "macos")]
 pub mod status_item;
 #[cfg(target_vendor = "apple")]
 pub mod tunnel;
+#[cfg(target_vendor = "apple")]
+pub mod ui;
 #[cfg(target_vendor = "apple")]
 pub mod view;
 

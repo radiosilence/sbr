@@ -1,7 +1,7 @@
 //! Draws the tunnel page offscreen on the demo figures, dark and light side
 //! by side, into a PNG. No window is shown; GPUI's headless renderer draws it.
 //!
-//! cargo run -p sbr-gui --features runtime-shaders --example shot -- target/shot.png [tunnel|profiles]
+//! cargo run -p sbr-gui --features runtime-shaders --example shot -- target/shot.png [tunnel|profiles|connections|logs|settings]
 
 #[cfg(target_vendor = "apple")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -11,7 +11,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use koan_kit::theme;
 
     let out = std::env::args().nth(1).unwrap_or_else(|| "target/shot.png".into());
-    let profiles = std::env::args().nth(2).as_deref() == Some("profiles");
+    // The tunnel page alone, or another page in the window's shell.
+    let tab = std::env::args()
+        .nth(2)
+        .and_then(|name| sbr_gui::shell::Tab::named(&name))
+        .filter(|t| *t != sbr_gui::shell::Tab::Tunnel);
     // SAFETY: set before any thread that reads the environment starts.
     unsafe { std::env::set_var("SBR_GUI_DEMO", "1") };
     let text_system = gpui_platform::current_platform(true).text_system();
@@ -27,8 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for dark in [true, false] {
         let models = models.clone();
         let window = cx.open_window(size(px(880.0), px(900.0)), |window, cx| {
-            if profiles {
-                let tab = sbr_gui::shell::Tab::Profiles;
+            if let Some(tab) = tab {
                 let page = cx.new(|cx| sbr_gui::shell::Shell::new(models, tab, window, cx));
                 return koan_kit::components::host(page, window, cx);
             }
