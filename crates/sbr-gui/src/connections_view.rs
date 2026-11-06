@@ -437,7 +437,7 @@ impl Render for Detail {
                 .child(sheet::note(label("closed."), Tone::Muted, &look));
         };
         let c = &live.connection;
-        let routes = c.domain.clone().map(|domain| self.routes(domain, &look, cx));
+        let routes = c.domain.clone().and_then(|domain| self.routes(domain, &look, cx));
         let mut body = sheet::body("detail-body", &look)
             // Fills the panel's height and scrolls inside it, clear of what
             // stands at the window's foot.
