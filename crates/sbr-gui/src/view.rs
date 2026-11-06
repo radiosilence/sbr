@@ -117,9 +117,10 @@ impl Render for TunnelPage {
             .child(graph::throughput(samples.clone(), look, 180.0))
             .child(gauges);
 
-        let groups: Vec<Group> = t.groups.iter().filter(|g| g.members.len() > 1).cloned().collect();
-        for g in groups {
-            content = content.child(self.group(g, &t.testing.contains(&g_tag(&g)), &look, cx));
+        // One-member selectors are aliases.
+        for g in t.groups.iter().filter(|g| g.members.len() > 1) {
+            let testing = t.testing.contains(&g.tag);
+            content = content.child(self.group(g, testing, &look));
         }
 
         div()
@@ -130,10 +131,6 @@ impl Render for TunnelPage {
             .child(toolbar)
             .child(ScrollArea::new("tunnel", content))
     }
-}
-
-fn g_tag(g: &Group) -> String {
-    g.tag.clone()
 }
 
 fn figure(name: &str, value: String, tone: Tone, look: &Look) -> Div {
@@ -162,12 +159,12 @@ fn gauge(name: &str, value: String, values: Vec<f64>, look: &Look) -> Div {
 }
 
 impl TunnelPage {
-    fn group(&self, g: Group, testing: &bool, look: &Look, cx: &mut Context<Self>) -> Div {
+    fn group(&self, g: &Group, testing: bool, look: &Look) -> Div {
         let tunnel = self.tunnel.clone();
         let tag = g.tag.clone();
         let test = Button::new(SharedString::from(format!("test-{}", g.tag)), ButtonKind::Compact)
-            .label(if *testing { "testing" } else { "test" })
-            .disabled(*testing)
+            .label(if testing { "testing" } else { "test" })
+            .disabled(testing)
             .on_click(move |_, _, cx| {
                 let tag = tag.clone();
                 tunnel.update(cx, |t, cx| t.url_test(tag, cx))
@@ -176,7 +173,7 @@ impl TunnelPage {
         let slowest = g.members.iter().filter_map(|m| m.delay).max().unwrap_or(1).max(1);
         let mut rows = div().flex().flex_col();
         for m in g.members.iter().cloned() {
-            rows = rows.child(self.member(&g, m, fastest, slowest, look, cx));
+            rows = rows.child(self.member(g, m, fastest, slowest, look));
         }
         div()
             .flex()
@@ -185,15 +182,7 @@ impl TunnelPage {
             .child(rows)
     }
 
-    fn member(
-        &self,
-        g: &Group,
-        m: Member,
-        fastest: Option<u32>,
-        slowest: u32,
-        look: &Look,
-        _: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    fn member(&self, g: &Group, m: Member, fastest: Option<u32>, slowest: u32, look: &Look) -> Stateful<Div> {
         let picked = g.selected == m.tag;
         let degraded = m.degraded == Some(true);
         let bar_color: Hsla = if degraded {

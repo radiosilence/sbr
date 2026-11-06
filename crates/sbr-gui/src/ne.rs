@@ -91,10 +91,8 @@ impl Manager {
             } else {
                 let found = unsafe { all.as_ref() }.and_then(|all| {
                     all.iter().find(|m| {
-                        let proto = unsafe { m.protocolConfiguration() };
-                        proto
-                            .downcast::<NETunnelProviderProtocol>()
-                            .ok()
+                        unsafe { m.protocolConfiguration() }
+                            .and_then(|p| p.downcast::<NETunnelProviderProtocol>().ok())
                             .and_then(|p| unsafe { p.providerBundleIdentifier() })
                             .is_some_and(|id| id.to_string() == bundle_id)
                     })
