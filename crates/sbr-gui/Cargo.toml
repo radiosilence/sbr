@@ -1,0 +1,42 @@
+[package]
+name = "sbr-gui"
+description = "The sbr app for macOS and iOS, in GPUI with kōan's koan-kit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# GPUI's Metal shaders compiled at launch rather than at build time, so a
+# development build needs only the Command Line Tools. Releases leave it off.
+runtime-shaders = ["koan-kit/runtime-shaders"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+# GPUI and koan-kit exist only for Apple targets here; elsewhere the crate is
+# an empty binary, so the Linux jobs build no display stack.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+# koan-kit and GPUI pinned together: koan-kit's revision of koan, and the
+# radiosilence/zed revision that koan's workspace pins, so Cargo builds a
+# single GPUI. Bump them together.
+koan-kit = { git = "https://github.com/radiosilence/koan", rev = "2891ec6dfa94deb034b807df0c2adcb2864cfa72" }
+gpui = { package = "gpui-koan", git = "https://github.com/radiosilence/zed", rev = "5f97692fdd8bb4def13321cd26d84f9a7ad282f3" }
+gpui_platform = { package = "gpui-koan-platform", git = "https://github.com/radiosilence/zed", rev = "5f97692fdd8bb4def13321cd26d84f9a7ad282f3", features = ["font-kit"] }
+futures = "0.3"
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3.2", features = [
+  "NSArray",
+  "NSBundle",
+  "NSData",
+  "NSDictionary",
+  "NSError",
+  "NSNotification",
+  "NSOperation",
+  "NSString",
+  "NSValue",
+  "block2",
+] }
+objc2-network-extension = "0.3.2"
