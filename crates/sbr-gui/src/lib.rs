@@ -1,15 +1,28 @@
 //! The sbr app on macOS and iOS. `SBR_GUI_DEMO=1` runs it on made-up
 //! figures, without a tunnel.
 
+pub mod profile;
 #[allow(dead_code)]
 pub mod proto;
+pub mod rules;
+pub mod swift;
 
 #[cfg(target_vendor = "apple")]
 pub mod demo;
 #[cfg(target_vendor = "apple")]
 pub mod graph;
 #[cfg(target_vendor = "apple")]
+pub mod install;
+#[cfg(target_vendor = "apple")]
+pub mod keychain;
+#[cfg(target_vendor = "apple")]
 pub mod ne;
+#[cfg(target_vendor = "apple")]
+pub mod profiles;
+#[cfg(target_vendor = "apple")]
+pub mod profiles_view;
+#[cfg(target_vendor = "apple")]
+pub mod shell;
 #[cfg(target_vendor = "apple")]
 pub mod tunnel;
 #[cfg(target_vendor = "apple")]
@@ -34,7 +47,7 @@ pub fn run() {
                         cx.quit();
                         true
                     });
-                    cx.new(|cx| view::TunnelPage::new(tunnel, cx))
+                    cx.new(|cx| shell::Shell::new(tunnel, shell::Tab::Tunnel, window, cx))
                 });
             if let Err(e) = opened {
                 eprintln!("sbr's window did not open: {e}");

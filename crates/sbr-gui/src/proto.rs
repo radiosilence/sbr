@@ -5,16 +5,44 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::profile::{ProfileSnapshot, RemoteProfile};
+use crate::rules::PersonalRule;
+
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum Request {
     Groups {},
-    Select { group: String, member: String },
-    UrlTest { group: String },
+    Select {
+        group: String,
+        member: String,
+    },
+    UrlTest {
+        group: String,
+    },
     Stats {},
     Connections {},
-    CloseConnection { id: String },
+    CloseConnection {
+        id: String,
+    },
     Logs {},
+    /// Run this config (nothing restarts when it is already running), or
+    /// re-read the saved one when none. With a config, `remote` and
+    /// `log_level` replace the tunnel's; `rules` replaces the personal rules.
+    #[serde(rename_all = "camelCase")]
+    Reload {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        config: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remote: Option<RemoteProfile>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        log_level: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rules: Option<Vec<PersonalRule>>,
+    },
+    /// The remote profile the tunnel last downloaded itself, if any.
+    Profile {},
+    /// Delete the extension's files before the app removes its configuration.
+    Erase {},
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -23,6 +51,7 @@ pub struct Response {
     pub stats: Option<Stats>,
     pub logs: Option<Vec<String>>,
     pub connections: Option<Connections>,
+    pub profile: Option<ProfileSnapshot>,
     pub error: Option<String>,
 }
 
@@ -128,6 +157,16 @@ mod tests {
             s(Request::UrlTest { group: "auto".into() }),
             r#"{"urlTest":{"group":"auto"}}"#
         );
+        assert_eq!(
+            s(Request::Reload {
+                config: Some("{}".into()),
+                remote: None,
+                log_level: Some("debug".into()),
+                rules: Some(Vec::new()),
+            }),
+            r#"{"reload":{"config":"{}","logLevel":"debug","rules":[]}}"#
+        );
+        assert_eq!(s(Request::Erase {}), r#"{"erase":{}}"#);
     }
 
     #[test]

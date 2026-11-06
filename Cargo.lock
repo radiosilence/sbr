@@ -6411,10 +6411,16 @@ dependencies = [
  "image",
  "koan-kit",
  "objc2 0.6.5",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
  "objc2-network-extension",
+ "objc2-security",
+ "percent-encoding",
+ "sbr-apple",
  "serde",
  "serde_json",
+ "url",
+ "uuid",
 ]
 
 [[package]]
