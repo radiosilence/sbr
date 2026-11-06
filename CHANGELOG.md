@@ -2,9 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **Connections, logs and settings in the GPUI app.** The connections page polls only while it shows, with per-connection rates, closing by connection or domain, and personal rules added from a connection. The logs page keeps the last session's lines on disk. The settings page holds auto-connect, leak protection, the TCP stack, verbose logs, a reduced diagnose (DNS, HTTPS, exit address, IPv6 and WebRTC exposure) and erase, confirmed with koan-kit's question sheet.
+- **Profiles in the GPUI app.** sbr-gui reads and writes profiles in the Keychain items the Swift app used, so an existing install keeps its profiles and settings, and installs the VPN configuration (on-demand rules, trusted Wi-Fi, leak protection, personal rules). Configs are checked and remote profiles downloaded by sbr-apple directly, with the tunnel's anonymous HTTP client.
+
 ### Changed
 
+- **The iOS and macOS app is rewritten in Rust with GPUI and kōan's koan-kit, and requires iOS 26.** The tvOS app keeps SwiftUI. The new app draws its throughput graph, gauges and bars on the GPU between polls, so they move at the display's rate while the page itself is drawn only as figures arrive. It reads the Keychain items and VPN configuration the Swift app wrote, so an existing install keeps its profiles. Not carried over: scanning a profile's QR code, sending a profile to an Apple TV, the macOS app's Shortcuts actions, and the diagnose page's QUIC, bulk-download and system-resolver checks.
 - **The packet tunnel provider is Rust.** `SbrTunnelProvider` (`crates/sbr-tunnel-ext`) replaces SbrKit's `SbrPacketTunnelProvider` in the iOS, tvOS and macOS app extension and the macOS system extension, calling the core directly instead of through the C ABI, with the same app messages, Keychain items and files. `build-xcframework.sh` also builds `SbrTunnel.xcframework`, which the extensions link; SbrKit no longer has a provider class.
+
+## 0.2.9
 
 ### Fixed
 

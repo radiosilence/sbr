@@ -35,7 +35,7 @@ settings:
       -liconv -lresolv -lobjc
       -framework CoreFoundation -framework Foundation -framework Security
       -framework Network -framework NetworkExtension
-    MARKETING_VERSION: "0.2.8"
+    MARKETING_VERSION: "0.2.9"
     CURRENT_PROJECT_VERSION: "1"
     DEAD_CODE_STRIPPING: YES
     CODE_SIGN_STYLE: Automatic
