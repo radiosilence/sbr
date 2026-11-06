@@ -7,8 +7,8 @@
 //! stays well below the ceiling. Every entry point catches panics; nothing
 //! unwinds into Swift.
 
-pub mod app;
 pub mod api;
+pub mod app;
 mod crash;
 mod log;
 mod profile;

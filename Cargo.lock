@@ -6427,7 +6427,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-gui"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -6455,7 +6455,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-message"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -6497,7 +6497,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-tunnel-ext"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "block2 0.6.2",
  "cc",
