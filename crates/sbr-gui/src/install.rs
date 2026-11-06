@@ -177,23 +177,81 @@ impl Vpn {
     /// Change the settings, keep them, and save the configuration so the
     /// next connect uses them. `on_demand` arms or disarms on-demand rules.
     pub fn update_settings(&mut self, on_demand: Option<bool>, cx: &mut Context<Self>, f: impl FnOnce(&mut Settings)) {
+        if self.store(cx, f) && (self.tunnel.read(cx).manager().is_some() || on_demand.is_some()) {
+            self.install(on_demand, cx).detach();
+        }
+    }
+
+    /// Change and keep the settings; whether they changed.
+    fn store(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Settings)) -> bool {
         let before = self.settings.clone();
         f(&mut self.settings);
         if self.settings == before {
-            return;
+            return false;
         }
         if !self.demo {
             self.settings.save();
         }
         cx.notify();
-        if self.tunnel.read(cx).manager().is_some() || on_demand.is_some() {
-            self.install(on_demand, cx).detach();
-        }
+        true
     }
 
     pub fn remove_rule(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.update_settings(None, cx, |s| s.rules.retain(|r| r.id != id));
         self.reload_running(cx);
+    }
+
+    /// Outbounds a personal rule can name in the active profile.
+    pub fn route_choices(&self) -> Vec<String> {
+        self.active.config.as_deref().map(rules::choices).unwrap_or_default()
+    }
+
+    /// Route `domain` and its subdomains through `outbound`, replacing any
+    /// rule for the same domain. Checked against the active profile first.
+    pub fn add_rule(&mut self, domain: &str, outbound: String, cx: &mut Context<Self>) {
+        let Some(domain) = rules::normalize(domain) else {
+            return self.fail("not a domain".into(), cx);
+        };
+        let mut next: Vec<PersonalRule> = self
+            .settings
+            .rules
+            .iter()
+            .filter(|r| r.domains != [domain.clone()])
+            .cloned()
+            .collect();
+        next.insert(0, PersonalRule::new(domain, outbound));
+        if let Some(config) = &self.active.config
+            && let Err(problem) = sbr_apple::app::check(&rules::apply(&next, config).0)
+        {
+            return self.fail(problem, cx);
+        }
+        self.update_settings(None, cx, |s| s.rules = next);
+        self.reload_running(cx);
+    }
+
+    /// Debug-level engine logs, applied to a running tunnel at once.
+    pub fn set_verbose(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_settings(None, cx, |s| s.verbose = on);
+        self.reload_running(cx);
+    }
+
+    /// The TCP stack, applied by reconnecting a running tunnel.
+    pub fn set_userspace_tcp(&mut self, on: bool, cx: &mut Context<Self>) {
+        if !self.store(cx, |s| s.userspace_tcp = on) || self.tunnel.read(cx).manager().is_none() {
+            return;
+        }
+        let install = self.install(None, cx);
+        let tunnel = self.tunnel.clone();
+        cx.spawn(async move |_, cx| {
+            let _ = install.await;
+            let m = tunnel.read_with(cx, |t, _| t.manager().filter(|_| t.status.is_on()));
+            if let Some(m) = m {
+                m.stop();
+                cx.background_executor().timer(Duration::from_millis(1500)).await;
+                let _ = m.start();
+            }
+        })
+        .detach();
     }
 
     /// The active profile changed: point the configuration at it, so a

@@ -590,3 +590,15 @@ fn app_checks_match_the_c_abi() {
     assert!(app::strict_route(strict));
     assert!(!app::strict_route(CFG));
 }
+
+#[test]
+fn app_tun_plan() {
+    let v4 = r#"{"inbounds":[{"type":"tun","tag":"t","address":["172.19.0.1/30"],"auto_route":true}]}"#;
+    let p = app::tun_plan(v4).unwrap();
+    assert!(p.routes_all_ipv4);
+    assert!(p.ipv6_addresses.is_empty(), "{p:?}");
+    assert_eq!(p.dns_servers, ["172.19.0.2"]);
+    let v6 = r#"{"inbounds":[{"type":"tun","tag":"t","address":["172.19.0.1/30","fdfe::1/126"],"auto_route":true}]}"#;
+    assert_eq!(app::tun_plan(v6).unwrap().ipv6_addresses, ["fdfe::1"]);
+    assert_eq!(app::tun_plan(CFG), None);
+}

@@ -45,7 +45,7 @@ pub async fn fetch(engine: &Engine, inbound: (Arc<str>, &'static str), url: &Url
 /// The URL is a credential, and errors from the dial, DNS and TLS layers can
 /// name the host (or a redirect target's). Only the HTTP client's own fixed
 /// messages pass through; everything else is reduced to its kind.
-fn redact(e: &std::io::Error) -> String {
+pub(crate) fn redact(e: &std::io::Error) -> String {
     use std::io::ErrorKind;
     let msg = e.to_string();
     let fixed = msg.starts_with("unexpected status: ")

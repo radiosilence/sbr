@@ -32,7 +32,7 @@ const DEFAULT_MTU: u32 = 9000;
 /// The interface address for IPv6 that the engine does not carry, from a
 /// fixed ULA prefix (`fd73:6272::/48`, "sbr") that no config is likely to use.
 /// SbrKit's `Sbr.unroutedIPv6Address` repeats it.
-const UNROUTED_IPV6: &str = "fd73:6272::1/126";
+pub(crate) const UNROUTED_IPV6: &str = "fd73:6272::1/126";
 
 pub fn network_settings(options: &Options) -> Result<Value, String> {
     let tun = options
