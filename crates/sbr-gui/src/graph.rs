@@ -3,7 +3,8 @@
 
 use koan_kit::app::*;
 use koan_kit::raw::{Hsla, PathBuilder, canvas, point, px};
-use std::collections::VecDeque;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -440,6 +441,91 @@ pub fn trend_lines(values: Vec<f64>, look: &Look) -> (f64, Vec<Line>) {
             width: 1.2,
         }],
     )
+}
+
+/// A bar's fill, drawn by the GPU: from the left edge to track 0's
+/// fraction of the width, in the colour at uniform 4, its edge smoothed.
+static BAR: ShaderProgram = ShaderProgram {
+    name: "sbr-bar",
+    msl: r#"
+float4 shade(float2 position, float2 size, float time, constant float *u, texture2d<float> image, float4 tile) {
+    float w = clamp(koan_track(u, 0, time), 0.0, 1.0) * size.x;
+    float cover = clamp(w - position.x + 0.5, 0.0, 1.0);
+    return float4(u[4], u[5], u[6], u[7] * cover);
+}
+"#,
+    // sbr-gui runs on Metal alone; wgpu never compiles this.
+    wgsl: r#"
+fn shade(position: vec2<f32>, size: vec2<f32>, time: f32, u: array<vec4<f32>, 20>, tile: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(0.0);
+}
+"#,
+    prepare: None,
+};
+
+/// Bars whose fills the GPU eases to each new value: speeds, latencies,
+/// shares. Each is kept by its key from one render to the next, so it moves
+/// from where it stands; the page is not drawn while it moves. Kept by the
+/// page that shows them.
+pub struct Bars {
+    shown: RefCell<HashMap<SharedString, (Animated, f32)>>,
+    drawn: RefCell<HashSet<SharedString>>,
+    ease: Duration,
+}
+
+/// Bars fed at the tunnel's poll, four times a second.
+impl Default for Bars {
+    fn default() -> Self {
+        Self::easing(POLL)
+    }
+}
+
+impl Bars {
+    /// Bars that take `ease` to reach a new value: the time between the
+    /// values that feed them, so they move without stopping.
+    pub fn easing(ease: Duration) -> Self {
+        Self {
+            shown: RefCell::default(),
+            drawn: RefCell::default(),
+            ease,
+        }
+    }
+
+    /// Forgets the bars the last render did not draw. Called once at the
+    /// start of each render.
+    pub fn sweep(&self) {
+        let drawn = std::mem::take(&mut *self.drawn.borrow_mut());
+        self.shown.borrow_mut().retain(|key, _| drawn.contains(key));
+    }
+
+    /// The bar `key`, filled to `fraction` in `colour` over `track`.
+    pub fn bar(&self, key: impl Into<SharedString>, fraction: f32, colour: Hsla, track: Hsla, height: Pixels) -> Div {
+        let key = key.into();
+        let fraction = if fraction.is_finite() {
+            fraction.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let mut shown = self.shown.borrow_mut();
+        let (animated, at) = shown.entry(key.clone()).or_insert_with(|| {
+            let animated = Animated::new();
+            animated.hold(0, fraction);
+            (animated, fraction)
+        });
+        if *at != fraction {
+            animated.to(0, fraction, self.ease, Ease::QuickOut);
+            *at = fraction;
+        }
+        animated.set_color(4, colour);
+        self.drawn.borrow_mut().insert(key);
+        div().w_full().h(height).bg(track).relative().child(
+            AnimatedQuad::new(&BAR, animated)
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+        )
+    }
 }
 
 #[cfg(test)]

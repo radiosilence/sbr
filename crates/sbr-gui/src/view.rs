@@ -16,6 +16,8 @@ pub struct TunnelPage {
     chart: graph::LiveChart,
     /// Memory, CPU and connections.
     gauges: [graph::LiveChart; 3],
+    /// The groups' latency bars.
+    bars: graph::Bars,
     _observe: Subscription,
 }
 
@@ -26,6 +28,7 @@ impl TunnelPage {
             tunnel,
             chart: graph::LiveChart::default(),
             gauges: Default::default(),
+            bars: Default::default(),
             _observe,
         }
     }
@@ -41,6 +44,7 @@ fn text(s: impl Into<SharedString>, role: TypeRole, tone: Tone, look: &Look) -> 
 impl Render for TunnelPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
+        self.bars.sweep();
         let title = moves_window(
             div()
                 .id("title")
@@ -267,13 +271,13 @@ impl TunnelPage {
                     .w(look.sized(110.0))
                     .child(text(m.kind.clone(), TypeRole::Meta, Tone::Muted, look)),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .h(px(4.0))
-                    .bg(look.palette.rule.hsla())
-                    .child(div().h_full().w(relative(share.clamp(0.0, 1.0))).bg(bar_color)),
-            )
+            .child(div().flex_1().child(self.bars.bar(
+                format!("{}/{}", g.tag, m.tag),
+                share,
+                bar_color,
+                look.palette.rule.hsla(),
+                px(4.0),
+            )))
             .child(div().w(look.sized(120.0)).flex().justify_end().child(text(
                 delay,
                 TypeRole::Meta,
