@@ -1,8 +1,10 @@
 # XcodeGen spec: `xcodegen generate` (see README.md).
 #
 # Targets
-#   Sbr                        iOS 17+, macOS 15+, tvOS 17+ app (SwiftUI)
-#   SbrTunnel                  its packet tunnel, as an app extension
+#   Sbr                        iOS 26+ and macOS 15+ app: the sbr-gui Rust
+#                              library (GPUI, kōan's koan-kit), SbrGui.xcframework
+#   SbrTV                      tvOS 17+ app (SwiftUI on SbrKit)
+#   SbrTunnel                  their packet tunnel, as an app extension
 #                              (iOS, tvOS, and Mac App Store style on macOS)
 #                              whose provider is Rust (crates/sbr-tunnel-ext)
 #   SbrMac                     macOS Developer ID flavour of the same app ...
@@ -37,20 +39,91 @@ settings:
     CURRENT_PROJECT_VERSION: "1"
     DEAD_CODE_STRIPPING: YES
     CODE_SIGN_STYLE: Automatic
+    # What the sbr-gui static library links against: the frameworks its
+    # binary links (otool -L on macOS, rustc's link line on iOS), which a
+    # static library cannot name itself.
+    SBR_GUI_MAC_LDFLAGS: -liconv -framework AppKit -framework ApplicationServices -framework Carbon -framework CloudKit -framework ColorSync -framework CoreData -framework CoreFoundation -framework CoreGraphics -framework CoreImage -framework CoreServices -framework CoreText -framework CoreVideo -framework Foundation -framework Metal -framework NetworkExtension -framework QuartzCore -framework Security -framework ServiceManagement -framework UniformTypeIdentifiers -framework UserNotifications
+    SBR_GUI_IOS_LDFLAGS: -liconv -framework CoreFoundation -framework CoreGraphics -framework CoreText -framework CoreVideo -framework Foundation -framework Metal -framework NetworkExtension -framework QuartzCore -framework SafariServices -framework Security -framework UIKit
 
 packages:
   SbrKit:
     path: ..
 
 targets:
+  # iOS and macOS: the app is the sbr-gui library (SbrGui.xcframework); its
+  # only source is the `main` that calls it.
   Sbr:
     type: application
     platform: auto
-    supportedDestinations: [iOS, macOS, tvOS]
+    supportedDestinations: [iOS, macOS]
     deploymentTarget:
-      iOS: "17.0"
+      # GPUI's iOS backend, as kōan's phone app runs it.
+      iOS: "26.0"
       macOS: "15.0"
-      tvOS: "17.0"
+    sources:
+      - path: Gui
+      - path: App/Assets.xcassets
+    dependencies:
+      - framework: ../SbrGui.xcframework
+        embed: false
+      - target: SbrTunnel
+        embed: true
+      - target: SbrWidgets
+        embed: true
+        destinationFilters: [iOS]
+    info:
+      path: Support/App-Info.plist
+      properties:
+        CFBundleDisplayName: sbr
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        # GPUI's scene delegate draws the app's one window.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default Configuration
+                UISceneDelegateClassName: GPUIIosSceneDelegate
+        # As declared in App Store Connect for the first build: standard,
+        # exempt encryption only. Skips the per-build compliance question.
+        ITSAppUsesNonExemptEncryption: false
+        # iPad multitasking requires all four; App Store validation rejects none.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # sing-box remote-profile links, and the same under sbr://.
+        CFBundleURLTypes:
+          - CFBundleURLName: cc.blit.sbr.profile
+            CFBundleURLSchemes: [sing-box, sbr]
+        SbrTunnelBundleIdentifier: $(SBR_BUNDLE_ID).tunnel
+        SbrKeychainGroup: $(SBR_KEYCHAIN_GROUP)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID)
+        PRODUCT_NAME: sbr
+        "OTHER_LDFLAGS[sdk=macosx*]": $(inherited) $(SBR_GUI_MAC_LDFLAGS)
+        "OTHER_LDFLAGS[sdk=iphone*]": $(inherited) $(SBR_GUI_IOS_LDFLAGS)
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: App/App.entitlements
+        # Adds Access WiFi Information, for trusting the current network.
+        "CODE_SIGN_ENTITLEMENTS[sdk=iphone*]": App/App-iOS.entitlements
+        "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": App/App-macOS.entitlements
+      configs:
+        # App Store builds sign with the API-provisioned distribution profile.
+        Release:
+          "CODE_SIGN_STYLE[sdk=iphoneos*]": Manual
+          "CODE_SIGN_IDENTITY[sdk=iphoneos*]": Apple Distribution
+          "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": sbr App Store
+
+  # tvOS keeps the SwiftUI app: GPUI has no tvOS backend.
+  SbrTV:
+    type: application
+    platform: tvOS
+    deploymentTarget: "17.0"
     sources:
       - path: App
         excludes: ["*.entitlements"]
@@ -59,11 +132,8 @@ targets:
       - package: SbrKit
       - target: SbrTunnel
         embed: true
-      - target: SbrWidgets
-        embed: true
-        destinationFilters: [iOS]
     info:
-      path: Support/App-Info.plist
+      path: Support/AppTV-Info.plist
       properties:
         CFBundleDisplayName: sbr
         CFBundleShortVersionString: $(MARKETING_VERSION)
@@ -94,18 +164,11 @@ targets:
         PRODUCT_NAME: sbr
         SWIFT_OBJC_BRIDGING_HEADER: App/Bridging.h
         OTHER_LDFLAGS: $(inherited) -lresolv
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        "ASSETCATALOG_COMPILER_APPICON_NAME[sdk=appletv*]": "App Icon & Top Shelf Image"
+        ASSETCATALOG_COMPILER_APPICON_NAME: "App Icon & Top Shelf Image"
         CODE_SIGN_ENTITLEMENTS: App/App.entitlements
-        # Adds Access WiFi Information, for trusting the current network.
-        "CODE_SIGN_ENTITLEMENTS[sdk=iphone*]": App/App-iOS.entitlements
-        "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": App/App-macOS.entitlements
       configs:
         # App Store builds sign with the API-provisioned distribution profile.
         Release:
-          "CODE_SIGN_STYLE[sdk=iphoneos*]": Manual
-          "CODE_SIGN_IDENTITY[sdk=iphoneos*]": Apple Distribution
-          "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": sbr App Store
           "CODE_SIGN_STYLE[sdk=appletvos*]": Manual
           "CODE_SIGN_IDENTITY[sdk=appletvos*]": Apple Distribution
           "PROVISIONING_PROFILE_SPECIFIER[sdk=appletvos*]": sbr tvOS App Store
@@ -184,11 +247,11 @@ targets:
     platform: macOS
     deploymentTarget: "15.0"
     sources:
-      - path: App
-        excludes: ["*.entitlements"]
-      - path: Shared
+      - path: Gui
+      - path: App/Assets.xcassets
     dependencies:
-      - package: SbrKit
+      - framework: ../SbrGui.xcframework
+        embed: false
       - target: SbrTunnelSystemExtension
         embed: true
     info:
@@ -203,6 +266,9 @@ targets:
         SbrAppGroup: $(SBR_APP_GROUP)
         SbrTunnelBundleIdentifier: $(SBR_BUNDLE_ID).mac.tunnel
         SbrKeychainGroup: $(SBR_KEYCHAIN_GROUP)
+        # The tunnel runs as a system extension, outside the user's Keychain:
+        # sbr-gui activates it and hands it the profile inline.
+        SbrSystemExtension: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(SBR_BUNDLE_ID).mac
@@ -210,9 +276,7 @@ targets:
         SBR_KEYCHAIN_GROUP: $(AppIdentifierPrefix)$(SBR_BUNDLE_ID).mac
         CODE_SIGN_ENTITLEMENTS: App/App-macOS-SystemExtension.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        SWIFT_OBJC_BRIDGING_HEADER: App/Bridging.h
-        OTHER_LDFLAGS: $(inherited) -lresolv
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) SBR_SYSTEM_EXTENSION
+        OTHER_LDFLAGS: $(inherited) $(SBR_GUI_MAC_LDFLAGS)
         ENABLE_HARDENED_RUNTIME: YES
       configs:
         # Developer ID distribution (apple/macos-release.sh) signs with the

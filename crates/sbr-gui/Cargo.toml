@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+# A static library for the Xcode app targets (SbrGui.xcframework), whose
+# `main` calls `sbr_gui_main`; the binary is for development runs.
+[lib]
+crate-type = ["rlib", "staticlib"]
+
 [features]
 # GPUI's Metal shaders compiled at launch rather than at build time, so a
 # development build needs only the Command Line Tools. Releases leave it off.

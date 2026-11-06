@@ -120,6 +120,31 @@ pub fn open_window(models: &Models, cx: &mut koan_kit::app::App) {
     }
 }
 
+/// Adds the profiles that links name, with the window open on them.
+#[cfg(target_vendor = "apple")]
+fn open_links(urls: Vec<String>, cx: &mut koan_kit::app::App) {
+    let links: Vec<String> = urls
+        .into_iter()
+        .filter(|u| profile::ProfileLink::parse(u).is_some())
+        .collect();
+    if links.is_empty() {
+        return;
+    }
+    let models = cx.global::<AppModels>().0.clone();
+    open_window(&models, cx);
+    for link in links {
+        models.profiles.update(cx, |p, cx| p.add_input(&link, cx));
+    }
+}
+
+/// The entry point of the Xcode app targets, whose `main` calls it: the app
+/// is this library, linked into a bundle Xcode signs and packages.
+#[cfg(target_vendor = "apple")]
+#[unsafe(no_mangle)]
+pub extern "C" fn sbr_gui_main() {
+    run();
+}
+
 /// Whether sbr shows in the Dock and the app switcher: while its window is
 /// open. With it closed, sbr is in the menu bar alone.
 #[cfg(target_os = "macos")]
@@ -144,6 +169,12 @@ pub fn run() {
     use koan_kit::theme;
 
     let application = koan_kit::raw::application().with_assets(theme::icons::Assets);
+    // `sing-box://` and `sbr://` profile links, and https links handed to
+    // sbr, arrive here before the app is running as often as after.
+    let (links, mut opened) = futures::channel::mpsc::unbounded::<Vec<String>>();
+    application.on_open_urls(move |urls| {
+        let _ = links.unbounded_send(urls);
+    });
     // Opening sbr again while it runs brings its window back.
     application.on_reopen(|cx| {
         if let Some(models) = cx.try_global::<AppModels>().map(|m| m.0.clone()) {
@@ -154,6 +185,13 @@ pub fn run() {
         theme::init(cx);
         let models = Models::new(cx);
         cx.set_global(AppModels(models.clone(), None));
+        cx.spawn(async move |cx| {
+            use futures::StreamExt as _;
+            while let Some(urls) = opened.next().await {
+                cx.update(|cx| open_links(urls, cx));
+            }
+        })
+        .detach();
         #[cfg(target_os = "macos")]
         {
             // In the menu bar with the window closed, until it quits.
