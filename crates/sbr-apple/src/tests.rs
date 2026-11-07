@@ -566,3 +566,39 @@ fn profile_fetch_errors_never_reveal_the_url() {
     }
     unsafe { sbr_stop(i) };
 }
+
+#[test]
+fn app_fetch_dials_directly_without_identifying_headers() {
+    let (addr, heads) = profile_server("{}");
+    let url = Url::parse(&format!("http://{addr}/p?token=x")).unwrap();
+    assert_eq!(app::fetch(url).unwrap(), "{}");
+    let head = heads.recv().unwrap();
+    assert!(head.starts_with("GET /p?token=x HTTP/1.1\r\n"), "{head}");
+    assert!(!head.to_ascii_lowercase().contains("user-agent"), "{head}");
+    assert_eq!(
+        app::fetch_profile(&format!("http://{addr}/p")).unwrap_err(),
+        "profile links must use https"
+    );
+}
+
+#[test]
+fn app_checks_match_the_c_abi() {
+    assert!(app::check(CFG).is_ok());
+    assert!(app::check(r#"{"outbounds":[{"type":"nope"}]}"#).is_err());
+    let strict =
+        r#"{"inbounds":[{"type":"tun","tag":"t","address":["172.19.0.1/30"],"auto_route":true,"strict_route":true}]}"#;
+    assert!(app::strict_route(strict));
+    assert!(!app::strict_route(CFG));
+}
+
+#[test]
+fn app_tun_plan() {
+    let v4 = r#"{"inbounds":[{"type":"tun","tag":"t","address":["172.19.0.1/30"],"auto_route":true}]}"#;
+    let p = app::tun_plan(v4).unwrap();
+    assert!(p.routes_all_ipv4);
+    assert!(p.ipv6_addresses.is_empty(), "{p:?}");
+    assert_eq!(p.dns_servers, ["172.19.0.2"]);
+    let v6 = r#"{"inbounds":[{"type":"tun","tag":"t","address":["172.19.0.1/30","fdfe::1/126"],"auto_route":true}]}"#;
+    assert_eq!(app::tun_plan(v6).unwrap().ipv6_addresses, ["fdfe::1"]);
+    assert_eq!(app::tun_plan(CFG), None);
+}

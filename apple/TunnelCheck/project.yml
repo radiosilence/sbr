@@ -1,10 +1,11 @@
 # XcodeGen spec for the macOS packet tunnel test rig (see README.md).
 #
-# A minimal host app plus the app's own PacketTunnelProvider as a packet
-# tunnel app extension, under separate bundle IDs so the rig never touches the
-# real app's VPN configuration. SbrKit is compiled from source and linked
-# against libsbr_apple.a for the host architecture, so the rig does not need
-# (or overwrite) apple/SbrCore.xcframework.
+# A minimal host app plus the app's own packet tunnel provider (Rust,
+# crates/sbr-tunnel-ext) as a packet tunnel app extension, under separate
+# bundle IDs so the rig never touches the real app's VPN configuration. The
+# host's SbrKit is compiled from source and linked against libsbr_apple.a,
+# and the extension against libsbr_tunnel_ext.a, both for the host
+# architecture, so the rig neither needs nor overwrites the xcframeworks.
 name: SbrTunnelCheck
 
 options:
@@ -67,10 +68,7 @@ targets:
     platform: macOS
     sources:
       # The shipping provider, unchanged.
-      - path: ../App/Tunnel/PacketTunnelProvider.swift
-    dependencies:
-      - target: SbrKitStatic
-        link: true
+      - path: ../App/Tunnel/Provider.c
     info:
       path: Support/Tunnel-Info.plist
       properties:
@@ -79,10 +77,14 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
-          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+          NSExtensionPrincipalClass: SbrTunnelProvider
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: cc.blit.sbr.check.tunnel
         CODE_SIGN_ENTITLEMENTS: Tunnel.entitlements
         LIBRARY_SEARCH_PATHS: $(SBR_RUST_LIB_DIR)
-        OTHER_LDFLAGS: -lsbr_apple -liconv -framework Security -framework CoreFoundation
+        # As SBR_TUNNEL_LDFLAGS in apple/App/project.yml.
+        OTHER_LDFLAGS: >-
+          -lsbr_tunnel_ext -liconv -lresolv -lobjc
+          -framework CoreFoundation -framework Foundation -framework Security
+          -framework Network -framework NetworkExtension

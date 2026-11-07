@@ -5,7 +5,7 @@
 #   APPLE_API_KEY_PATH=AuthKey.p8 APPLE_API_KEY_ID=... APPLE_API_ISSUER_ID=... \
 #     apple/testflight.sh ios|tvos [build-number]
 #
-# Needs apple/SbrCore.xcframework (build-xcframework.sh) with that platform's
+# Needs apple/SbrCore.xcframework, SbrTunnel.xcframework and SbrGui.xcframework (build-xcframework.sh) with that platform's
 # slice, the Apple Distribution identity in a keychain, and the platform's
 # profiles installed (tools/fetch-profiles.py): "sbr App Store", "sbr tunnel
 # App Store" and "sbr widgets App Store" for iOS, "sbr tvOS App Store" and
@@ -15,7 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/App"
 : "${APPLE_API_KEY_PATH:?}" "${APPLE_API_KEY_ID:?}" "${APPLE_API_ISSUER_ID:?}"
-[ -d ../SbrCore.xcframework ] || { echo "apple/SbrCore.xcframework is missing: run apple/build-xcframework.sh" >&2; exit 1; }
+for x in SbrCore SbrTunnel SbrGui; do [ -d "../$x.xcframework" ] || { echo "apple/$x.xcframework is missing: run apple/build-xcframework.sh" >&2; exit 1; }; done
 
 platform=${1:?usage: testflight.sh ios|tvos [build-number]}
 build=${2:-$(date -u +%Y%m%d%H%M)}
@@ -23,12 +23,14 @@ team=$(sed -n 's/^ *DEVELOPMENT_TEAM: *//p' project.yml | head -1)
 bundle=$(sed -n 's/^ *SBR_BUNDLE_ID: *//p' project.yml | head -1)
 case $platform in
   ios)
+    scheme=Sbr
     destination=iOS
     profiles="<key>$bundle</key><string>sbr App Store</string>
         <key>$bundle.tunnel</key><string>sbr tunnel App Store</string>
         <key>$bundle.widgets</key><string>sbr widgets App Store</string>"
     ;;
   tvos)
+    scheme=SbrTV
     destination=tvOS
     profiles="<key>$bundle</key><string>sbr tvOS App Store</string>
         <key>$bundle.tunnel</key><string>sbr tunnel tvOS App Store</string>"
@@ -47,7 +49,7 @@ mise exec -- xcodegen generate --quiet
 
 # Release signs iOS and tvOS manually with the distribution profiles (project.yml).
 if ! xcodebuild archive \
-  -project Sbr.xcodeproj -scheme Sbr -configuration Release \
+  -project Sbr.xcodeproj -scheme "$scheme" -configuration Release \
   -destination "generic/platform=$destination" \
   -archivePath "$out/sbr.xcarchive" \
   CURRENT_PROJECT_VERSION="$build" > "$out/archive.log" 2>&1; then

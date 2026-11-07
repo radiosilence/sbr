@@ -26,7 +26,7 @@ Which censors and surveillance programmes sbr is designed against, and what it s
 | `sbr` | CLI, flag-compatible with `sing-box run/check/version`. |
 | `sbr-reality` | TLS 1.3 client with browser ClientHellos: REALITY, and the default handshake for every other TCP TLS client. |
 | `sbr-apple` | C ABI (`include/sbr.h`) + `staticlib` for an xcframework: TUN fd adoption, log callback, reload, remote profile refresh through the tunnel, memory stats, network-change hook. |
-| `apple/` | `SbrKit` Swift package (`Sbr`, `SbrPacketTunnelProvider`), `build-xcframework.sh` (iOS, macOS, Catalyst, tvOS), SwiftUI sample app. See [`apple/README.md`](apple/README.md). CI builds the app for iOS, tvOS and macOS. |
+| `apple/` | `SbrKit` Swift package (`Sbr`, messages, Keychain), `build-xcframework.sh` (iOS, macOS, Catalyst, tvOS), the app; the tunnel provider is Rust (`crates/sbr-tunnel-ext`). See [`apple/README.md`](apple/README.md). CI builds the app for iOS, tvOS and macOS. |
 
 ## Routing semantics
 
@@ -278,7 +278,7 @@ Vision skips sing-box's 5 ms sleep before the first raw write; rustls is fed one
 brew install --cask radiosilence/tap/sbr
 ```
 
-or download `sbr-<version>.dmg` from the [latest release](https://github.com/radiosilence/sbr/releases/latest) and drag sbr to Applications. Either way, approve the network extension under System Settings › General › Login Items & Extensions on first connect. macOS 15 or later. The cask moves to a release once its disk image is notarised, which can lag the release by Apple's queue.
+or download `sbr-<version>.dmg` from the [latest release](https://github.com/radiosilence/sbr/releases/latest) and drag sbr to Applications. Either way, approve the network extension under System Settings › General › Login Items & Extensions on first connect. macOS 26 or later. The cask moves to a release once its disk image is notarised, which can lag the release by Apple's queue.
 
 ## CI
 

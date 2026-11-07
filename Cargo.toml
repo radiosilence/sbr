@@ -34,6 +34,19 @@ lto = "fat"
 codegen-units = 1
 opt-level = 3
 
+# The GUI app's development build (`cargo run -p sbr-gui --profile gui-dev`):
+# dependencies, GPUI among them, optimised fully and built once; the
+# workspace's own crates at opt-level 1, rebuilt incrementally. Unoptimised,
+# GPUI cannot keep up with scrolling.
+[profile.gui-dev]
+inherits = "dev"
+opt-level = 1
+
+[profile.gui-dev.package."*"]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
 [profile.bench]
 inherits = "release"
 

@@ -251,7 +251,7 @@ jobs:
         if: ${{ !cancelled() && steps.xcframework.outcome == 'success' }}
         working-directory: apple/App
         run: |
-          for spec in Sbr:iOS Sbr:tvOS Sbr:macOS SbrMac:macOS; do
+          for spec in Sbr:iOS SbrTV:tvOS Sbr:macOS SbrMac:macOS; do
             scheme=${spec%%:*} platform=${spec##*:}
             echo "::group::$scheme ($platform)"
             log="$RUNNER_TEMP/build-$scheme-$platform.log"
@@ -269,7 +269,7 @@ jobs:
           done
       # Tarred: an artifact keeps neither symlinks nor modes.
       - if: ${{ github.event_name != 'pull_request' && steps.xcframework.outcome == 'success' }}
-        run: tar czf "$RUNNER_TEMP/SbrCore.xcframework.tar.gz" -C apple SbrCore.xcframework
+        run: tar czf "$RUNNER_TEMP/SbrCore.xcframework.tar.gz" -C apple SbrCore.xcframework SbrTunnel.xcframework SbrGui.xcframework
       - if: ${{ github.event_name != 'pull_request' && steps.xcframework.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -366,7 +366,7 @@ jobs:
       - run: apple/build-xcframework.sh
         env:
           SBR_SKIP_CATALYST: "1"
-      - run: tar czf "$RUNNER_TEMP/SbrCore.xcframework.tar.gz" -C apple SbrCore.xcframework
+      - run: tar czf "$RUNNER_TEMP/SbrCore.xcframework.tar.gz" -C apple SbrCore.xcframework SbrTunnel.xcframework SbrGui.xcframework
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: SbrCore.xcframework

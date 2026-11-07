@@ -1,0 +1,43 @@
+[package]
+name = "sbr-tunnel-ext"
+description = "sbr's packet tunnel provider: an NEPacketTunnelProvider subclass in Rust, linked into the tunnel extensions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+# The staticlib is what the app extension and the system extension link.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+sbr-message = { path = "../sbr-message" }
+serde.workspace = true
+serde_json.workspace = true
+
+# The provider exists only on Apple targets; elsewhere the crate holds the
+# portable config transforms and their tests.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+sbr-apple = { path = "../sbr-apple" }
+libc = "0.2"
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "block2",
+  "NSArray",
+  "NSBundle",
+  "NSData",
+  "NSDictionary",
+  "NSError",
+  "NSFileManager",
+  "NSObject",
+  "NSPathUtilities",
+  "NSString",
+  "NSURL",
+  "NSValue",
+] }
+objc2-network-extension = { version = "0.3.2", default-features = false, features = ["std", "block2"] }
+
+[build-dependencies]
+cc = "1"

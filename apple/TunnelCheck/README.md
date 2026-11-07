@@ -16,13 +16,15 @@ check runs one.
 
 ## What runs
 
-`SbrTunnelCheck.app` is a windowless host app with the shipping
-`PacketTunnelProvider` (`apple/App/Tunnel`) embedded as a packet tunnel app
-extension. Its bundle IDs (`cc.blit.sbr.check`, `.tunnel`) are separate from
-the real app's, so it never touches that app's VPN configuration. SbrKit is
-compiled from `apple/Sources/SbrKit` and linked against the release
-`libsbr_apple.a` for the host architecture, so the check neither needs nor
-rebuilds `apple/SbrCore.xcframework`.
+`SbrTunnelCheck.app` is a windowless host app with the shipping provider,
+`SbrTunnelProvider` from `crates/sbr-tunnel-ext`, embedded as a packet tunnel
+app extension. Its bundle IDs (`cc.blit.sbr.check`, `.tunnel`) are separate
+from the real app's, so it never touches that app's VPN configuration. The
+host drives it with SbrKit, compiled from `apple/Sources/SbrKit`, so every run
+also checks that the Swift app's messages and the Rust tunnel agree. Both link
+the release static libraries for the host architecture (`libsbr_apple.a`,
+`libsbr_tunnel_ext.a`), so the check neither needs nor rebuilds the
+xcframeworks.
 
 The script passes the test config inline (`providerConfiguration["config"]`),
 starts the tunnel, runs the checks and always stops it on exit. The tun
