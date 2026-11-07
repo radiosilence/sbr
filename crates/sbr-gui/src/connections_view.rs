@@ -264,7 +264,8 @@ struct Detail {
     id: String,
     last: Option<Live>,
     /// The selector groups shown open among the route choices; none until
-    /// one is toggled, when the group the domain is routed through is open.
+    /// one is toggled, when the group the domain is routed through is open,
+    /// or else the first.
     open: Option<BTreeSet<String>>,
     connections: Entity<Connections>,
     vpn: Entity<Vpn>,
@@ -343,11 +344,14 @@ impl Detail {
             .find(|r| r.domains == [domain.clone()])
             .map(|r| r.outbound.clone());
         let routed_through = |(g, m): &(String, Vec<String>)| ruled.as_ref().is_some_and(|r| r == g || m.contains(r));
-        let routed: BTreeSet<String> = groups
+        let mut routed: BTreeSet<String> = groups
             .iter()
             .filter(|g| routed_through(g))
             .map(|(g, _)| g.clone())
             .collect();
+        if routed.is_empty() {
+            routed.extend(groups.first().map(|(g, _)| g.clone()));
+        }
         let open = self.open.clone().unwrap_or_else(|| routed.clone());
         let mut section = div()
             .flex()
