@@ -306,7 +306,13 @@ impl Engine {
                         // retry is answered at once instead of being routed,
                         // dialled and logged again. QUIC clients retry many
                         // times a second.
-                        warn!(dest = %first_dest, outbound = out.tag(), error = %e, "udp connect failed");
+                        // An outbound that does not carry this traffic by
+                        // design (Vision and QUIC) is no fault to warn of.
+                        if e.kind() == io::ErrorKind::Unsupported {
+                            debug!(dest = %first_dest, outbound = out.tag(), error = %e, "udp refused");
+                        } else {
+                            warn!(dest = %first_dest, outbound = out.tag(), error = %e, "udp connect failed");
+                        }
                         back.unreachable(&meta.destination, source);
                         while let Ok(Some(p)) = tokio::time::timeout(FAILED_UDP_HOLD, rx.recv()).await {
                             back.unreachable(&p.0, source);
