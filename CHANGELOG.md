@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1
+
+### Changed
+
+- **Selector groups fold, the route's own first.** The group the profile's route ends in leads the tunnel page and a connection's route choices; the others start folded.
+
+### Fixed
+
+- **Pages scroll clear of the tab strip.** The end of a long page, such as the tunnel page's last selector group, sat behind the tab strip and could not be reached.
+
 ## 0.3.0
 
 ### Added
