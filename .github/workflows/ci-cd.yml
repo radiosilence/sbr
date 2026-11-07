@@ -251,7 +251,7 @@ jobs:
         if: ${{ !cancelled() && steps.xcframework.outcome == 'success' }}
         working-directory: apple/App
         run: |
-          for spec in Sbr:iOS Sbr:tvOS Sbr:macOS SbrMac:macOS; do
+          for spec in Sbr:iOS SbrTV:tvOS Sbr:macOS SbrMac:macOS; do
             scheme=${spec%%:*} platform=${spec##*:}
             echo "::group::$scheme ($platform)"
             log="$RUNNER_TEMP/build-$scheme-$platform.log"
