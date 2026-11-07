@@ -1,0 +1,1 @@
+- **Quieter logs for Vision's QUIC refusal.** A VLESS Vision outbound refusing UDP/443 is expected, and is now logged at debug rather than as a warning on every QUIC attempt.

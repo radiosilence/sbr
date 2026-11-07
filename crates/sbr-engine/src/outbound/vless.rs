@@ -134,10 +134,11 @@ impl Outbound for Vless {
             // Xray's Vision client refuses QUIC: carried inside TLS-over-TCP it
             // is slow and stands out, while the browser's TCP fallback rides
             // Vision's splice. Failing it (the TUN answers ICMP unreachable)
-            // makes clients fall back at once.
+            // makes clients fall back at once. Unsupported, as other
+            // refusals by policy are: expected, and logged quietly.
             if self.vision && dest.port == 443 {
                 return Err(io::Error::new(
-                    io::ErrorKind::ConnectionRefused,
+                    io::ErrorKind::Unsupported,
                     "XTLS rejected UDP/443 traffic",
                 ));
             }
