@@ -108,7 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         pressed_button: None,
                         modifiers: Default::default(),
                     }),
-                    gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                    gpui::PlatformInput::Scroll(gpui::ScrollEvent {
                         position,
                         delta: gpui::ScrollDelta::Pixels(gpui::point(
                             px(0.0),

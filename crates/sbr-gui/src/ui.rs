@@ -75,7 +75,9 @@ pub fn page(toolbar: Toolbar, id: &'static str, content: Div, look: &Look) -> Di
         .flex_col()
         .bg(look.palette.bg.hsla())
         .child(toolbar)
-        .child(koan_kit::components::ScrollArea::new(id, content))
+        // The rest of the height under the toolbar, not the whole of it,
+        // which would run its foot under what stands below the page.
+        .child(koan_kit::components::ScrollArea::new(id, content).shrinks())
 }
 
 /// A page's column of sections, closer to the edges on a narrow screen.

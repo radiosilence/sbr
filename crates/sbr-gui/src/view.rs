@@ -2,6 +2,8 @@
 //! over the last two minutes, the extension's memory, CPU and connections,
 //! and each selector group with its members' latency.
 
+use std::collections::BTreeSet;
+
 use koan_kit::app::*;
 use koan_kit::components::{Button, ButtonKind, ScrollArea, SectionHeading};
 use koan_kit::raw::{Hsla, px};
@@ -18,6 +20,9 @@ pub struct TunnelPage {
     gauges: [graph::LiveChart; 3],
     /// The groups' latency bars.
     bars: graph::Bars,
+    /// The groups shown open; none until one is toggled, when only the
+    /// first is.
+    open: Option<BTreeSet<String>>,
     /// The VPN configuration, for whether the system extension waits for
     /// the user's approval. From the app's models, when they are set up.
     vpn: Option<Entity<crate::install::Vpn>>,
@@ -36,6 +41,7 @@ impl TunnelPage {
             chart: graph::LiveChart::default(),
             gauges: Default::default(),
             bars: Default::default(),
+            open: None,
             vpn,
             _observe,
         }
@@ -173,10 +179,21 @@ impl Render for TunnelPage {
             .child(graph::throughput(&self.chart, look, px(200.0)))
             .child(gauges);
 
-        // One-member selectors are aliases.
-        for g in t.groups.iter().filter(|g| g.members.len() > 1) {
+        // One-member selectors are aliases. The profile's order, with the
+        // group its route ends in first.
+        let order = self.vpn.as_ref().map(|v| v.read(cx).route_groups()).unwrap_or_default();
+        let place = |tag: &str| order.iter().position(|(g, _)| g == tag).unwrap_or(usize::MAX);
+        let mut groups: Vec<&Group> = t.groups.iter().filter(|g| g.members.len() > 1).collect();
+        groups.sort_by_key(|g| place(&g.tag));
+        let open = self
+            .open
+            .clone()
+            .unwrap_or_else(|| groups.first().map(|g| g.tag.clone()).into_iter().collect());
+        let this = cx.entity();
+        for g in groups {
             let testing = t.testing.contains(&g.tag);
-            content = content.child(self.group(g, testing, narrow, &look));
+            let shown = open.contains(&g.tag);
+            content = content.child(self.group(g, testing, shown, &open, &this, narrow, &look));
         }
 
         div()
@@ -185,7 +202,9 @@ impl Render for TunnelPage {
             .flex_col()
             .bg(look.palette.bg.hsla())
             .child(toolbar)
-            .child(ScrollArea::new("tunnel", content))
+            // The rest of the height under the toolbar, not the whole of it,
+            // which would run its foot under the tab strip.
+            .child(ScrollArea::new("tunnel", content).shrinks())
     }
 }
 
@@ -213,27 +232,52 @@ fn gauge(name: &str, value: String, chart: &graph::LiveChart, look: &Look) -> Di
 }
 
 impl TunnelPage {
-    fn group(&self, g: &Group, testing: bool, narrow: bool, look: &Look) -> Div {
+    /// A group under its heading, which folds it away; open, its members.
+    #[allow(clippy::too_many_arguments)]
+    fn group(
+        &self,
+        g: &Group,
+        testing: bool,
+        shown: bool,
+        open: &BTreeSet<String>,
+        this: &Entity<Self>,
+        narrow: bool,
+        look: &Look,
+    ) -> Div {
         let tunnel = self.tunnel.clone();
         let tag = g.tag.clone();
         let test = Button::new(SharedString::from(format!("test-{}", g.tag)), ButtonKind::Compact)
             .label(if testing { "testing" } else { "test" })
             .disabled(testing)
             .on_click(move |_, _, cx| {
+                cx.stop_propagation();
                 let tag = tag.clone();
                 tunnel.update(cx, |t, cx| t.url_test(tag, cx))
             });
+        let (this, toggled, now) = (this.clone(), g.tag.clone(), open.clone());
+        let heading = div()
+            .id(SharedString::from(format!("fold-{}", g.tag)))
+            .cursor_pointer()
+            .on_click(move |_, _, cx| {
+                this.update(cx, |page, cx| {
+                    let set = page.open.get_or_insert_with(|| now.clone());
+                    if !set.remove(&toggled) {
+                        set.insert(toggled.clone());
+                    }
+                    cx.notify();
+                })
+            })
+            .child(SectionHeading::new(format!("{} {}", if shown { "▾" } else { "▸" }, g.tag)).trailing(test));
+        if !shown {
+            return div().flex().flex_col().child(heading);
+        }
         let fastest = g.members.iter().filter_map(|m| m.delay).min();
         let slowest = g.members.iter().filter_map(|m| m.delay).max().unwrap_or(1).max(1);
         let mut rows = div().flex().flex_col();
         for m in g.members.iter().cloned() {
             rows = rows.child(self.member(g, m, fastest, slowest, narrow, look));
         }
-        div()
-            .flex()
-            .flex_col()
-            .child(SectionHeading::new(&g.tag).trailing(test))
-            .child(rows)
+        div().flex().flex_col().child(heading).child(rows)
     }
 
     /// A member's row: its name, type, latency bar and figure. On a narrow
