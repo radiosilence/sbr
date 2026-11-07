@@ -4,7 +4,8 @@
 //! cargo run -p sbr-gui --features runtime-shaders --example shot -- target/shot.png [tunnel|profiles|connections|logs|settings] [--phone]
 //!
 //! `--phone` draws the window's shell at an iPhone's 390 x 844 points, with
-//! touch on and the phone's layout (`SBR_GUI_PHONE`).
+//! touch on and the phone's layout (`SBR_GUI_PHONE`). `--click x,y` clicks
+//! there, and `--scroll x,y,dy` scrolls there, in order, before the capture.
 
 #[cfg(target_vendor = "apple")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -15,7 +16,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let phone = args.iter().any(|a| a == "--phone");
-    let mut args = args.into_iter().filter(|a| a != "--phone");
+    let mut inputs = Vec::new();
+    let mut rest = Vec::new();
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--phone" => {}
+            "--click" | "--scroll" => {
+                let at: Vec<f32> = it
+                    .next()
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter_map(|n| n.parse().ok())
+                    .collect();
+                inputs.push((a == "--click", at));
+            }
+            _ => rest.push(a),
+        }
+    }
+    let mut args = rest.into_iter();
     let out = args.next().unwrap_or_else(|| "target/shot.png".into());
     let named = args.next().and_then(|name| sbr_gui::shell::Tab::named(&name));
     // The tunnel page alone, or another page in the window's shell; on a
@@ -63,6 +82,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
         cx.update_window(window.into(), |_, window, _| window.refresh())?;
         cx.run_until_parked();
+        for (click, at) in &inputs {
+            let [x, y, rest @ ..] = at.as_slice() else { continue };
+            let position = gpui::point(px(*x), px(*y));
+            let events = if *click {
+                vec![
+                    gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                        position,
+                        button: gpui::MouseButton::Left,
+                        modifiers: Default::default(),
+                        click_count: 1,
+                        first_mouse: false,
+                    }),
+                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                        position,
+                        button: gpui::MouseButton::Left,
+                        modifiers: Default::default(),
+                        click_count: 1,
+                    }),
+                ]
+            } else {
+                vec![
+                    gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                        position,
+                        pressed_button: None,
+                        modifiers: Default::default(),
+                    }),
+                    gpui::PlatformInput::Scroll(gpui::ScrollEvent {
+                        position,
+                        delta: gpui::ScrollDelta::Pixels(gpui::point(
+                            px(0.0),
+                            px(-rest.first().copied().unwrap_or(400.0)),
+                        )),
+                        ..Default::default()
+                    }),
+                ]
+            };
+            for event in events {
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.dispatch_event(event, cx);
+                })?;
+                cx.run_until_parked();
+            }
+            cx.advance_clock(std::time::Duration::from_secs(1));
+            cx.update_window(window.into(), |_, window, _| window.refresh())?;
+            cx.run_until_parked();
+        }
         shots.push(cx.capture_screenshot(window.into())?);
     }
     let (w, h) = (shots[0].width(), shots[0].height());

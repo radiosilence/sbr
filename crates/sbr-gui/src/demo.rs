@@ -125,3 +125,11 @@ pub fn test(groups: &mut [Group], tag: &str) {
         }
     }
 }
+
+/// The demo's profile, as far as its route choices read it: selector groups
+/// in profile order, the route's final one last.
+pub const CONFIG: &str = r#"{"outbounds":[
+    {"type":"selector","tag":"entry-select","outbounds":["auto","hk-01","hk-02","jp-01","sg-01","us-01"]},
+    {"type":"selector","tag":"streaming","outbounds":["hk-01","jp-01","direct"]},
+    {"type":"selector","tag":"exit-select","outbounds":["exit-direct","exit-lon","exit-ams"]}],
+  "route":{"final":"exit-select"}}"#;

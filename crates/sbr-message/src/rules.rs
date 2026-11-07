@@ -84,12 +84,15 @@ fn tags(root: &Map<String, Value>) -> BTreeSet<&str> {
 }
 
 /// The config's selector groups and their members, in profile order: what
-/// a rule can route through, grouped as the profile groups it.
+/// a rule can route through, grouped as the profile groups it. The group
+/// the route ends in comes first, as the one most traffic takes.
 pub fn selector_groups(config: &str) -> Vec<(String, Vec<String>)> {
     let Ok(Value::Object(root)) = serde_json::from_str::<Value>(config) else {
         return Vec::new();
     };
-    root.get("outbounds")
+    let last = root.get("route").and_then(|r| r.get("final")).and_then(Value::as_str);
+    let mut groups: Vec<(String, Vec<String>)> = root
+        .get("outbounds")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -108,7 +111,9 @@ pub fn selector_groups(config: &str) -> Vec<(String, Vec<String>)> {
                 .collect();
             Some((tag, members))
         })
-        .collect()
+        .collect();
+    groups.sort_by_key(|(tag, _)| Some(tag.as_str()) != last);
+    groups
 }
 
 /// What a rule can route through: the members of the config's selector
@@ -231,6 +236,8 @@ mod tests {
             {"type":"selector","tag":"proxy","outbounds":["auto","hk","hk","jp"]},
             {"type":"direct","tag":"direct"},
             {"type":"selector","tag":"streaming","outbounds":["jp","direct"]}]}"#;
+        let ends_in_streaming = format!(r#"{},"route":{{"final":"streaming"}}}}"#, &config[..config.len() - 1]);
+        assert_eq!(selector_groups(&ends_in_streaming)[0].0, "streaming");
         assert_eq!(
             selector_groups(config),
             vec![

@@ -1,0 +1,1 @@
+- **Selector groups fold, the route's own first.** The group the profile's route ends in leads the tunnel page and a connection's route choices; the others start folded.
