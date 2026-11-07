@@ -264,9 +264,11 @@ impl Vpn {
     /// The active profile's selector groups and their members, which a
     /// personal rule can route through.
     pub fn route_groups(&self) -> Vec<(String, Vec<String>)> {
+        let demo = self.demo.then_some(crate::demo::CONFIG);
         self.active
             .config
             .as_deref()
+            .or(demo)
             .map(rules::selector_groups)
             .unwrap_or_default()
     }
