@@ -176,6 +176,7 @@ impl Engine {
                     });
                 match connected {
                     Ok(mut remote) => {
+                        self.connects_ok.fetch_add(1, Ordering::Relaxed);
                         // sing-box `route-options` `tls_fragment`: split the
                         // client's own ClientHello on its way out.
                         if let Some(opts) = crate::tls::FragmentOptions::configured(
@@ -208,6 +209,7 @@ impl Engine {
                         r
                     }
                     Err(e) => {
+                        self.connects_failed.fetch_add(1, Ordering::Relaxed);
                         warn!(inbound = %meta.inbound, dest = %dest, outbound = out.tag(), error = %e, "connect failed");
                         if out.kind() != "block"
                             && let Some(leaf) = self.chain(outbound).first()

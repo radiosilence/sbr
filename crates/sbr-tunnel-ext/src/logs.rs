@@ -109,26 +109,21 @@ fn core() -> &'static Logger {
     L.get_or_init(|| Logger::new("core"))
 }
 
-/// Send the core's logs to the recent lines and to the unified log. Its
-/// messages name destinations, so they are private there.
+/// Send the core's logs to the recent lines and to the unified log, where
+/// destinations, domains and error text are private and the rest public.
 pub fn forward_core_logs() {
-    unsafe extern "C" fn on_log(level: i32, message: *const c_char, _: *mut c_void) {
-        if message.is_null() {
-            return;
-        }
-        // SAFETY: sbr passes a valid C string for the duration of the call.
-        let message = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    sbr_apple::api::set_split_log_callback(Some(Box::new(|level, public, private| {
         let level = Level::of_core(level);
-        append(level, &message);
+        append(level, &format!("{public}{private}"));
+        // Info is the default type so the unified log keeps it: the periodic
+        // status line and network changes are what a stall is read from.
         let kind = match level {
             Level::Trace | Level::Debug => OS_LOG_TYPE_DEBUG,
-            Level::Info => OS_LOG_TYPE_INFO,
-            Level::Warn => OS_LOG_TYPE_DEFAULT,
+            Level::Info | Level::Warn => OS_LOG_TYPE_DEFAULT,
             Level::Error => OS_LOG_TYPE_ERROR,
         };
-        core().raw(kind, "", &message);
-    }
-    sbr_apple::api::set_log_callback(Some(on_log), std::ptr::null_mut());
+        core().raw(kind, public, private);
+    })));
 }
 
 const CAPACITY: usize = 1000;

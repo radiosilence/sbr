@@ -25,9 +25,13 @@ pub const INFO: i32 = 2;
 pub const WARN: i32 = 3;
 pub const ERROR: i32 = 4;
 
-struct Sink {
-    f: LogFn,
-    ctx: usize,
+/// A Rust host's log sink: level, then the message split into a public part
+/// and a private one (see [`Message`]).
+pub type SplitLogFn = Box<dyn Fn(i32, &str, &str) + Send + Sync>;
+
+enum Sink {
+    C { f: LogFn, ctx: usize },
+    Split(SplitLogFn),
 }
 
 /// Held for reading while the callback runs, so once `set_callback` returns
@@ -54,7 +58,12 @@ pub fn install() {
 
 pub fn set_callback(f: Option<LogFn>, ctx: *mut c_void) {
     install();
-    *SINK.write().unwrap_or_else(|e| e.into_inner()) = f.map(|f| Sink { f, ctx: ctx as usize });
+    *SINK.write().unwrap_or_else(|e| e.into_inner()) = f.map(|f| Sink::C { f, ctx: ctx as usize });
+}
+
+pub fn set_split_callback(f: Option<SplitLogFn>) {
+    install();
+    *SINK.write().unwrap_or_else(|e| e.into_inner()) = f.map(Sink::Split);
 }
 
 /// Apply a sing-box `log` section.
@@ -88,7 +97,7 @@ impl<S: Subscriber> Layer<S> for CallbackLayer {
         {
             return;
         }
-        let mut v = Message(String::new());
+        let mut v = Message::default();
         event.record(&mut v);
         let level = match *event.metadata().level() {
             Level::TRACE => TRACE,
@@ -99,36 +108,84 @@ impl<S: Subscriber> Layer<S> for CallbackLayer {
         };
         let sink = SINK.read().unwrap_or_else(|e| e.into_inner());
         match &*sink {
-            Some(s) => {
-                let Ok(msg) = CString::new(v.0.replace('\0', " ")) else {
+            Some(Sink::C { f, ctx }) => {
+                let Ok(msg) = CString::new(v.joined().replace('\0', " ")) else {
                     return;
                 };
                 // SAFETY: the host registered `f` with this context and keeps
                 // both valid until it replaces the callback.
-                unsafe { (s.f)(level, msg.as_ptr(), s.ctx as *mut c_void) };
+                unsafe { f(level, msg.as_ptr(), *ctx as *mut c_void) };
             }
+            Some(Sink::Split(f)) => f(level, &v.public, &v.private),
             // stderr from a Network Extension lands in the unified log.
-            None => eprintln!("{} {}", event.metadata().level(), v.0),
+            None => eprintln!("{} {}", event.metadata().level(), v.joined()),
         }
     }
 }
 
-/// `message key=value ...`, the shape `tracing_subscriber::fmt` prints.
-struct Message(String);
+/// Fields that name no destination, domain, address or error text, so a
+/// host may log them where others can read them (the unified log). Every
+/// other field goes in the private part.
+const PUBLIC_FIELDS: &[&str] = &[
+    "closed",
+    "connects_failed",
+    "connects_ok",
+    "consecutive",
+    "down_kib",
+    "group",
+    "inbound",
+    "interface",
+    "limit",
+    "migrated",
+    "qtype",
+    "rcode",
+    "reason",
+    "retry_in",
+    "rule_set",
+    "tag",
+    "tcp",
+    "tun_packets_in",
+    "tun_read_errors",
+    "udp",
+    "udp_sessions",
+    "udp_sessions_dropped",
+    "up_kib",
+    "verdict",
+];
+
+/// `message key=value ...`, the shape `tracing_subscriber::fmt` prints,
+/// with the message and [`PUBLIC_FIELDS`] in `public` and the rest in
+/// `private`.
+#[derive(Default)]
+struct Message {
+    public: String,
+    private: String,
+}
+
+impl Message {
+    fn joined(&self) -> String {
+        format!("{}{}", self.public, self.private)
+    }
+
+    fn field(&mut self, field: &Field, value: std::fmt::Arguments<'_>) {
+        if field.name() == "message" {
+            self.public.insert_str(0, &value.to_string());
+        } else {
+            let out = if PUBLIC_FIELDS.contains(&field.name()) {
+                &mut self.public
+            } else {
+                &mut self.private
+            };
+            let _ = write!(out, " {}={}", field.name(), value);
+        }
+    }
+}
 
 impl Visit for Message {
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.0.insert_str(0, value);
-        } else {
-            let _ = write!(self.0, " {}={}", field.name(), value);
-        }
+        self.field(field, format_args!("{value}"));
     }
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            self.0.insert_str(0, &format!("{value:?}"));
-        } else {
-            let _ = write!(self.0, " {}={:?}", field.name(), value);
-        }
+        self.field(field, format_args!("{value:?}"));
     }
 }
