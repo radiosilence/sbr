@@ -1,7 +1,7 @@
 //! The unified log, and the last log lines kept in memory for the app.
 
 use std::collections::VecDeque;
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{CString, c_char, c_void};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
