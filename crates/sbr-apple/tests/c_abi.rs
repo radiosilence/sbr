@@ -33,13 +33,17 @@ fn header_declares_every_export() {
 }
 
 /// The staticlib cargo built for this test run: the newest
-/// `libsbr_apple-*.a` under the target directory. Newer cargo puts test
-/// binaries and libraries in separate per-crate directories (the build-dir
-/// layout), so it is not necessarily next to the test binary.
+/// `libsbr_apple-*.a` in this profile's directory (`target/debug`). Newer
+/// cargo puts test binaries and libraries in separate per-crate directories
+/// (the build-dir layout), so it is not necessarily next to the test binary.
+/// Other profiles and cross targets are siblings of this directory and are
+/// not searched.
 fn staticlib() -> Option<PathBuf> {
-    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).parent()?.to_path_buf();
+    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).parent()?;
+    let exe = std::env::current_exe().ok()?;
+    let profile = exe.ancestors().find(|a| a.parent() == Some(target))?.to_path_buf();
     let mut found: Option<(std::time::SystemTime, PathBuf)> = None;
-    let mut dirs = vec![(target, 0)];
+    let mut dirs = vec![(profile, 0)];
     while let Some((dir, depth)) = dirs.pop() {
         for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let path = e.path();
