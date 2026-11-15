@@ -22,7 +22,8 @@ pub mod udp;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use sbr_config::{InboundKind, Options};
 use sbr_core::Metadata;
@@ -485,7 +486,9 @@ async fn status(engine: Arc<Engine>, tuns: Vec<Arc<sbr_tun::Stack>>) {
     let totals = |engine: &Engine| {
         let (up, down) = engine.traffic.snapshot();
         let tun = |f: fn(&sbr_tun::stack::Counters) -> &AtomicU64| {
-            tuns.iter().map(|t| f(t.counters()).load(Ordering::Relaxed)).sum::<u64>()
+            tuns.iter()
+                .map(|t| f(t.counters()).load(Ordering::Relaxed))
+                .sum::<u64>()
         };
         [
             up,
