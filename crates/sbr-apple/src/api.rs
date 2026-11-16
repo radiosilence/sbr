@@ -207,3 +207,10 @@ pub fn set_default_interface(name: Option<&str>) {
 pub fn set_log_callback(callback: Option<LogFn>, context: *mut std::ffi::c_void) {
     guard((), || crate::log::set_callback(callback, context))
 }
+
+/// Receive sbr's logs with each message split in two: the message and the
+/// fields that name no destination, then the rest (destinations, domains,
+/// error text), for a host that logs the second part privately.
+pub fn set_split_log_callback(callback: Option<crate::log::SplitLogFn>) {
+    guard((), || crate::log::set_split_callback(callback))
+}

@@ -1,0 +1,1 @@
+- **A failed TUN read no longer stops traffic for good.** Any read error other than the interface going away ended the packet loop, leaving the tunnel connected with nothing flowing until it was reconnected. Such errors are now retried with a back-off, and an interrupted read is retried at once.

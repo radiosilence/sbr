@@ -61,7 +61,13 @@ The provider:
    `UTUN_OPT_IFNAME` name against "utun", like WireGuard-apple and sing-box) and
    starts sbr with that fd.
 4. Forwards sbr's logs to the unified log (category `core`) and keeps the
-   last 1000 lines in memory for `SbrRequest.logs`. Messages are private.
+   last 1000 lines in memory for `SbrRequest.logs`. In the unified log a
+   message and its tags and counts are public, so a stall can be read back
+   with `log show` after the in-memory lines have rolled over; destinations,
+   domains and error text are private. Info is logged at the default type so
+   it is kept, including a `status` line every five minutes with the
+   connections open, bytes moved, connects that succeeded and failed, and
+   packets read from the TUN.
 5. Watches `NWPathMonitor` and calls `sbr_network_migrate` when the set of physical
    interfaces changes. `wake()` calls it too, because UDP NAT mappings are likely gone
    after sleep. `sleep()` returns immediately: an idle sbr arms no timers, so there is

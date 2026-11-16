@@ -22,7 +22,8 @@ pub mod udp;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use sbr_config::{InboundKind, Options};
 use sbr_core::Metadata;
@@ -134,6 +135,10 @@ pub struct Engine {
     pub(crate) remote_sets: Option<Arc<ruleset::RemoteSets>>,
     pub(crate) http: fetch::HttpClient,
     pub(crate) max_connections: usize,
+    /// Outbound connects since start, TCP and UDP together, for the
+    /// periodic status line.
+    pub(crate) connects_ok: AtomicU64,
+    pub(crate) connects_failed: AtomicU64,
 }
 
 impl Engine {
@@ -193,6 +198,8 @@ impl Engine {
             active: AtomicUsize::new(0),
             relay_buffer: settings.relay_buffer,
             max_connections: settings.max_connections,
+            connects_ok: AtomicU64::new(0),
+            connects_failed: AtomicU64::new(0),
             tracker,
             cache,
             groups,
@@ -450,6 +457,7 @@ impl Instance {
             let ctx = Arc::new(inbound::Context::new(engine.clone(), &ib.tag, &ib.kind));
             tasks.spawn(accept_loop(listener, ctx));
         }
+        tasks.spawn(status(engine.clone(), tuns.clone()));
         Ok(Self {
             engine,
             listening,
@@ -467,6 +475,51 @@ impl Instance {
         self.tuns.clear();
     }
 }
+
+/// Every [`STATUS_INTERVAL`], one info line with what moved since the last:
+/// when traffic stops while the tunnel stays up, the lines either side of the
+/// stall show whether packets still arrived from the apps, whether connects
+/// were attempted and failed, or whether nothing was asked of the engine.
+async fn status(engine: Arc<Engine>, tuns: Vec<Arc<sbr_tun::Stack>>) {
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + STATUS_INTERVAL, STATUS_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let totals = |engine: &Engine| {
+        let (up, down) = engine.traffic.snapshot();
+        let tun = |f: fn(&sbr_tun::stack::Counters) -> &AtomicU64| {
+            tuns.iter()
+                .map(|t| f(t.counters()).load(Ordering::Relaxed))
+                .sum::<u64>()
+        };
+        [
+            up,
+            down,
+            engine.connects_ok.load(Ordering::Relaxed),
+            engine.connects_failed.load(Ordering::Relaxed),
+            tun(|c| &c.packets_in),
+            tun(|c| &c.read_errors),
+        ]
+    };
+    let mut last = totals(&engine);
+    loop {
+        tick.tick().await;
+        let now = totals(&engine);
+        let d: Vec<u64> = now.iter().zip(&last).map(|(n, l)| n.saturating_sub(*l)).collect();
+        last = now;
+        info!(
+            tcp = engine.active_connections(),
+            udp = engine.udp_sessions(),
+            up_kib = d[0] >> 10,
+            down_kib = d[1] >> 10,
+            connects_ok = d[2],
+            connects_failed = d[3],
+            tun_packets_in = d[4],
+            tun_read_errors = d[5],
+            "status"
+        );
+    }
+}
+
+const STATUS_INTERVAL: Duration = Duration::from_secs(300);
 
 async fn accept_loop(listener: TcpListener, ctx: Arc<inbound::Context>) {
     loop {

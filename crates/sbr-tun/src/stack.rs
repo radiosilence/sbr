@@ -6,7 +6,7 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -184,7 +184,39 @@ pub struct Stack {
     mtu: usize,
     /// IP identification for fragments sbr originates (IPv4 uses the low 16 bits).
     ids: Arc<AtomicU32>,
+    counters: Arc<Counters>,
     tasks: JoinSet<()>,
+}
+
+/// Totals since the stack started, for a periodic status line: whether
+/// packets still arrive from the apps is the first question when traffic
+/// stops while the tunnel is up.
+#[derive(Debug, Default)]
+pub struct Counters {
+    pub packets_in: AtomicU64,
+    /// Reads that failed and were retried.
+    pub read_errors: AtomicU64,
+}
+
+/// A read error the packet loop cannot wait out: the descriptor or the
+/// interface is gone. Anything else (ENOBUFS or ENOMEM under memory
+/// pressure, say) is retried; a loop that stopped on it would leave the
+/// tunnel up with nothing flowing until it was reconnected.
+fn read_error_is_fatal(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(libc::EBADF | libc::ENXIO | libc::ENODEV))
+}
+
+/// Back-off after a failed read, doubling from 10 ms to 1 s while reads keep
+/// failing. `failures` counts consecutive ones; the first and each power of
+/// two are logged, so a persistent error does not flood the log.
+async fn read_failed(e: &io::Error, failures: &mut u32, counters: &Counters) {
+    *failures += 1;
+    counters.read_errors.fetch_add(1, Ordering::Relaxed);
+    if failures.is_power_of_two() {
+        warn!(error = %e, consecutive = *failures, "tun read failed; retrying");
+    }
+    let wait = Duration::from_millis(10u64 << (*failures - 1).min(7)).min(Duration::from_secs(1));
+    tokio::time::sleep(wait).await;
 }
 
 impl Stack {
@@ -237,16 +269,24 @@ impl Stack {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
         let ids = Arc::new(AtomicU32::new(seed));
+        let counters = Arc::new(Counters::default());
         match cfg.tcp {
             TcpStack::System => {
-                let (device, ids, on_udp) = (device.clone(), ids.clone(), Arc::new(on_udp));
+                let (device, ids, on_udp, counters) = (device.clone(), ids.clone(), Arc::new(on_udp), counters.clone());
                 tasks.spawn(supervise(move || {
-                    packet_loop(device.clone(), fams.clone(), cfg.mtu, ids.clone(), on_udp.clone())
+                    packet_loop(
+                        device.clone(),
+                        fams.clone(),
+                        cfg.mtu,
+                        ids.clone(),
+                        on_udp.clone(),
+                        counters.clone(),
+                    )
                 }));
             }
             TcpStack::User(tcfg) => {
                 debug!(rx = tcfg.rx_buffer, tx = tcfg.tx_buffer, "userspace TCP stack");
-                let (device, on_udp) = (device.clone(), Arc::new(on_udp));
+                let (device, on_udp, counters) = (device.clone(), Arc::new(on_udp), counters.clone());
                 tasks.spawn(supervise(move || {
                     user_loop(
                         device.clone(),
@@ -255,6 +295,7 @@ impl Stack {
                         on_udp.clone(),
                         on_tcp.clone(),
                         tcfg.clone(),
+                        counters.clone(),
                     )
                 }));
             }
@@ -263,8 +304,13 @@ impl Stack {
             device,
             mtu: cfg.mtu,
             ids,
+            counters,
             tasks,
         })
+    }
+
+    pub fn counters(&self) -> &Counters {
+        &self.counters
     }
 
     /// Deliver a datagram to an app: `from` is what the app will see as the
@@ -556,19 +602,27 @@ async fn packet_loop(
     mtu: usize,
     ids: Arc<AtomicU32>,
     on_udp: Arc<impl Fn(UdpIn) + Send + Sync + 'static>,
+    counters: Arc<Counters>,
 ) {
     reset_poisoned(&fams);
     let mut batch = RecvBatch::new(BATCH.0, BATCH.1, mtu.max(1500) + 64);
     let mut reasm = Reassembler::new(HEADROOM);
     let mut frag = Vec::new();
+    let mut failures = 0;
     loop {
         let n = match device.recv_batch(&mut batch).await {
             Ok(n) => n,
-            Err(e) => {
-                warn!(error = %e, "tun read failed; stopping");
+            Err(e) if read_error_is_fatal(&e) => {
+                error!(error = %e, "tun read failed; stopping");
                 return;
             }
+            Err(e) => {
+                read_failed(&e, &mut failures, &counters).await;
+                continue;
+            }
         };
+        failures = 0;
+        counters.packets_in.fetch_add(n as u64, Ordering::Relaxed);
         for i in 0..n {
             let len = batch.len(i);
             if len == 0 {
@@ -720,7 +774,9 @@ async fn user_loop(
     on_udp: Arc<impl Fn(UdpIn) + Send + Sync + 'static>,
     on_tcp: Arc<dyn Fn(Accepted) + Send + Sync>,
     cfg: TcpConfig,
+    counters: Arc<Counters>,
 ) {
+    let mut failures = 0;
     let mut batch = RecvBatch::new(BATCH.0, BATCH.1, mtu.max(1500) + 64);
     let mut reasm = Reassembler::new(HEADROOM);
     let mut tcp = Tcp::new(
@@ -754,11 +810,19 @@ async fn user_loop(
         if let Some(r) = got {
             let n = match r {
                 Ok(n) => n,
-                Err(e) => {
-                    warn!(error = %e, "tun read failed; stopping");
+                Err(e) if read_error_is_fatal(&e) => {
+                    error!(error = %e, "tun read failed; stopping");
                     return;
                 }
+                Err(e) => {
+                    read_failed(&e, &mut failures, &counters).await;
+                    0
+                }
             };
+            if n > 0 {
+                failures = 0;
+                counters.packets_in.fetch_add(n as u64, Ordering::Relaxed);
+            }
             for i in 0..n {
                 let len = batch.len(i);
                 if len == 0 {

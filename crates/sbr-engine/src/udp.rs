@@ -300,8 +300,12 @@ impl Engine {
                 let first_dest_c = first_dest.clone();
                 debug!(source = %source, dest = %meta.destination, outbound = out.tag(), "udp route");
                 let conn: Arc<dyn sbr_core::PacketConn> = match out.connect_udp(&first_dest).await {
-                    Ok(c) => Arc::from(c),
+                    Ok(c) => {
+                        self.connects_ok.fetch_add(1, Ordering::Relaxed);
+                        Arc::from(c)
+                    }
                     Err(e) => {
+                        self.connects_failed.fetch_add(1, Ordering::Relaxed);
                         // Keep the session as a dead end for a while: each
                         // retry is answered at once instead of being routed,
                         // dialled and logged again. QUIC clients retry many

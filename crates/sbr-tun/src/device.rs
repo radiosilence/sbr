@@ -93,6 +93,7 @@ impl Device {
                     guard.clear_ready();
                     continue;
                 }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
             }
         }
@@ -113,6 +114,7 @@ impl Device {
                 }
             }) {
                 Ok(Ok(n)) if self.af_header => return Ok(n.saturating_sub(HEADROOM)),
+                Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Ok(r) => return r,
                 Err(_would_block) => continue,
             }

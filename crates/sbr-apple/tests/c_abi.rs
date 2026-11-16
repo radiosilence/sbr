@@ -32,19 +32,37 @@ fn header_declares_every_export() {
     assert_eq!(exported, declared);
 }
 
-/// The staticlib cargo built alongside this test (same profile).
+/// The staticlib cargo built for this test run: the newest
+/// `libsbr_apple-*.a` in this profile's directory (`target/debug`). Newer
+/// cargo puts test binaries and libraries in separate per-crate directories
+/// (the build-dir layout), so it is not necessarily next to the test binary.
+/// Other profiles and cross targets are siblings of this directory and are
+/// not searched.
 fn staticlib() -> Option<PathBuf> {
-    let deps = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    std::fs::read_dir(&deps)
-        .ok()?
-        .flatten()
-        .filter(|e| {
-            let n = e.file_name();
-            let n = n.to_string_lossy();
-            n.starts_with("libsbr_apple-") && n.ends_with(".a")
-        })
-        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
-        .map(|e| e.path())
+    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).parent()?;
+    let exe = std::env::current_exe().ok()?;
+    let profile = exe.ancestors().find(|a| a.parent() == Some(target))?.to_path_buf();
+    let mut found: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut dirs = vec![(profile, 0)];
+    while let Some((dir, depth)) = dirs.pop() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = e.path();
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            let Ok(meta) = e.metadata() else { continue };
+            if meta.is_dir() {
+                if depth < 6 && name != "incremental" && name != ".fingerprint" {
+                    dirs.push((path, depth + 1));
+                }
+            } else if name.starts_with("libsbr_apple-") && name.ends_with(".a") {
+                let modified = meta.modified().ok()?;
+                if found.as_ref().is_none_or(|(t, _)| modified > *t) {
+                    found = Some((modified, path));
+                }
+            }
+        }
+    }
+    found.map(|(_, p)| p)
 }
 
 fn have(tool: &str) -> bool {
