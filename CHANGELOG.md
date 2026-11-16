@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2
+
+### Changed
+
+- **A status line every five minutes, readable from the unified log.** Connections open, bytes moved, connects that succeeded and failed, and packets read from the TUN, so a stall can be told apart: apps stopped sending, connects failing, or the engine idle. On Apple platforms the message, tags and counts of each log line are public in the unified log and info lines are kept; destinations, domains and error text stay private.
+
+### Fixed
+
+- **A failed TUN read no longer stops traffic for good.** Any read error other than the interface going away ended the packet loop, leaving the tunnel connected with nothing flowing until it was reconnected. Such errors are now retried with a back-off, and an interrupted read is retried at once.
+
 ## 0.3.1
 
 ### Changed
