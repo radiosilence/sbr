@@ -1,0 +1,1 @@
+- **The Apple build fetches the Metal toolchain when it is missing.** GPUI compiles Metal shaders, and the macOS runner images stopped including the toolchain, which failed the v0.3.2 macOS release job.

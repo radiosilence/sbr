@@ -27,6 +27,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# GPUI compiles Metal shaders in its build script. Xcode 26 ships the Metal
+# toolchain as a separate component, which runner images do not always have.
+if ! xcrun metal --version >/dev/null 2>&1; then
+  xcodebuild -downloadComponent MetalToolchain
+fi
+
 export IPHONEOS_DEPLOYMENT_TARGET=15.0 MACOSX_DEPLOYMENT_TARGET=12.0 TVOS_DEPLOYMENT_TARGET=17.0
 export CARGO_PROFILE_RELEASE_DEBUG=0
 
