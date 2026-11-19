@@ -5,21 +5,16 @@
 use std::collections::BTreeSet;
 
 use koan_kit::app::*;
-use koan_kit::components::{Button, ButtonKind, ScrollArea, SectionHeading};
+use koan_kit::components::{Button, ButtonKind, Meter, ScrollArea, SectionHeading};
 use koan_kit::raw::{Hsla, px};
 use koan_kit::theme::{KoanStyled, Look, Space, Tone, TypeRole, label};
 
 use crate::graph;
 use crate::proto::{Group, Member};
-use crate::tunnel::{Sample, Tunnel};
+use crate::tunnel::{POLL, Sample, Tunnel};
 
 pub struct TunnelPage {
     tunnel: Entity<Tunnel>,
-    chart: graph::LiveChart,
-    /// Memory, CPU and connections.
-    gauges: [graph::LiveChart; 3],
-    /// The groups' latency bars.
-    bars: graph::Bars,
     /// The groups shown open; none until one is toggled, when only the
     /// first is.
     open: Option<BTreeSet<String>>,
@@ -38,9 +33,6 @@ impl TunnelPage {
         }
         Self {
             tunnel,
-            chart: graph::LiveChart::default(),
-            gauges: Default::default(),
-            bars: Default::default(),
             open: None,
             vpn,
             _observe,
@@ -58,21 +50,8 @@ fn text(s: impl Into<SharedString>, role: TypeRole, tone: Tone, look: &Look) -> 
 impl Render for TunnelPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
-        self.bars.sweep();
         let narrow = crate::ui::narrow(window);
         let toolbar = crate::ui::toolbar("sbr", window, cx);
-        let (taken, history) = {
-            let t = self.tunnel.read(cx);
-            (t.taken, t.history.clone())
-        };
-        self.chart
-            .update(taken, &look, window, cx, |look| graph::throughput_lines(&history, look));
-        let series: [fn(&Sample) -> f64; 3] = [|s| s.memory as f64, |s| s.cpu, |s| s.connections as f64];
-        for (gauge, value) in self.gauges.iter_mut().zip(series) {
-            gauge.update(taken, &look, window, cx, |look| {
-                graph::trend_lines(history.iter().map(value).collect(), look)
-            });
-        }
         let t = self.tunnel.read(cx);
         let on = t.status.is_on();
         let samples: Vec<Sample> = t.history.iter().copied().collect();
@@ -123,19 +102,19 @@ impl Render for TunnelPage {
             .child(gauge(
                 "memory",
                 graph::bytes(latest.memory as f64),
-                &self.gauges[0],
+                samples.iter().map(|s| s.memory as f64).collect(),
                 &look,
             ))
             .child(gauge(
                 "cpu",
                 format!("{:.0} %", latest.cpu * 100.0),
-                &self.gauges[1],
+                samples.iter().map(|s| s.cpu).collect(),
                 &look,
             ))
             .child(gauge(
                 "connections",
                 latest.connections.to_string(),
-                &self.gauges[2],
+                samples.iter().map(|s| s.connections as f64).collect(),
                 &look,
             ));
 
@@ -176,7 +155,7 @@ impl Render for TunnelPage {
         }
         content = content
             .child(figures)
-            .child(graph::throughput(&self.chart, look, px(200.0)))
+            .child(graph::throughput(&t.history, look, px(200.0)))
             .child(gauges);
 
         // One-member selectors are aliases. The profile's order, with the
@@ -217,7 +196,7 @@ fn figure(name: &str, value: String, tone: Tone, look: &Look) -> Div {
 }
 
 /// A figure with its last two minutes as a line beneath.
-fn gauge(name: &str, value: String, chart: &graph::LiveChart, look: &Look) -> Div {
+fn gauge(name: &str, value: String, trend: Vec<f64>, look: &Look) -> Div {
     div()
         .flex_1()
         .flex()
@@ -228,7 +207,7 @@ fn gauge(name: &str, value: String, chart: &graph::LiveChart, look: &Look) -> Di
         .border_color(look.palette.rule.hsla())
         .child(text(label(name), TypeRole::Meta, Tone::Muted, look))
         .child(text(value, TypeRole::TitleSmall, Tone::Strong, look))
-        .child(chart.quad(px(36.0)))
+        .child(graph::trend(name, trend, look, px(36.0)))
 }
 
 impl TunnelPage {
@@ -349,13 +328,14 @@ impl TunnelPage {
                         .child(text(m.kind.clone(), TypeRole::Meta, Tone::Muted, look)),
                 )
             })
-            .child(div().flex_1().child(self.bars.bar(
-                format!("{}/{}", g.tag, m.tag),
-                share,
-                bar_color,
-                look.palette.rule.hsla(),
-                px(4.0),
-            )))
+            .child(
+                div().flex_1().child(
+                    Meter::new(SharedString::from(format!("{}/{}", g.tag, m.tag)), share)
+                        .color(bar_color)
+                        .height(px(4.0))
+                        .ease(POLL),
+                ),
+            )
             .child(
                 div()
                     .w(look.sized(if narrow { 90.0 } else { 120.0 }))

@@ -30,7 +30,7 @@ uuid = { version = "1.18", features = ["v4"] }
 # koan-kit and GPUI pinned together: koan-kit's revision of koan, and the
 # radiosilence/zed revision that koan's workspace pins, so Cargo builds a
 # single GPUI. Bump them together.
-koan-kit = { git = "https://github.com/radiosilence/koan", rev = "d80e298e07a96cbf369a8c6f7103f63bc1faf909" }
+koan-kit = { git = "https://github.com/radiosilence/koan", rev = "d115fae29ce67f64f77419848225360fc78afaaf" }
 gpui = { package = "gpui-koan", git = "https://github.com/radiosilence/zed", rev = "be8db535bac465333448ec87099ba5faa7fd37aa" }
 gpui_platform = { package = "gpui-koan-platform", git = "https://github.com/radiosilence/zed", rev = "be8db535bac465333448ec87099ba5faa7fd37aa", features = ["font-kit"] }
 futures = "0.3"

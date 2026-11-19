@@ -3739,7 +3739,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 [[package]]
 name = "koan-kit"
 version = "0.72.4"
-source = "git+https://github.com/radiosilence/koan?rev=d80e298e07a96cbf369a8c6f7103f63bc1faf909#d80e298e07a96cbf369a8c6f7103f63bc1faf909"
+source = "git+https://github.com/radiosilence/koan?rev=d115fae29ce67f64f77419848225360fc78afaaf#d115fae29ce67f64f77419848225360fc78afaaf"
 dependencies = [
  "ashpd 0.14.0",
  "block2 0.6.2",

@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use koan_kit::app::*;
 use koan_kit::components::sheet;
 use koan_kit::components::{
-    Badge, Button, ButtonKind, Chip, DetailGroup, FieldState, FilterField, InputEvent, SectionHeading,
+    Badge, Button, ButtonKind, Chip, DetailGroup, FieldState, FilterField, InputEvent, Meter, SectionHeading,
 };
 use koan_kit::raw::px;
 use koan_kit::theme::{Look, Space, Tone, TypeRole, label};
@@ -20,14 +20,13 @@ use crate::connections::{Connections, Live};
 use crate::graph;
 use crate::install::Vpn;
 use crate::proto::Connection;
+use crate::tunnel::POLL;
 use crate::ui::{age, column, narrow, page, problem, row_height, text, toolbar};
 
 pub struct ConnectionsPage {
     connections: Entity<Connections>,
     vpn: Entity<Vpn>,
     filter: Entity<FieldState>,
-    /// The rate bars, gliding over each 250 ms poll.
-    bars: graph::Bars,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -51,7 +50,6 @@ impl ConnectionsPage {
             connections,
             vpn,
             filter,
-            bars: graph::Bars::default(),
             _subscriptions,
         }
     }
@@ -95,7 +93,6 @@ fn matches(c: &Connection, filter: &str) -> bool {
 impl Render for ConnectionsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
-        self.bars.sweep();
         let toolbar = toolbar("connections", window, cx);
         let c = self.connections.read(cx);
         let connected = c.connected(cx);
@@ -179,20 +176,22 @@ impl ConnectionsPage {
             .flex()
             .flex_col()
             .gap(px(3.0))
-            .child(self.bars.bar(
-                format!("down-{}", c.id),
-                (live.down / peak).sqrt() as f32,
-                look.color(Tone::Accent),
-                look.palette.rule.hsla(),
-                px(3.0),
-            ))
-            .child(self.bars.bar(
-                format!("up-{}", c.id),
-                (live.up / peak).sqrt() as f32,
-                look.color(Tone::Ink),
-                look.palette.rule.hsla(),
-                px(3.0),
-            ))
+            .child(
+                Meter::new(
+                    SharedString::from(format!("down-{}", c.id)),
+                    (live.down / peak).sqrt() as f32,
+                )
+                .color(look.color(Tone::Accent))
+                .ease(POLL),
+            )
+            .child(
+                Meter::new(
+                    SharedString::from(format!("up-{}", c.id)),
+                    (live.up / peak).sqrt() as f32,
+                )
+                .color(look.color(Tone::Ink))
+                .ease(POLL),
+            )
             .child(text(
                 format!("↓ {}  ↑ {}", graph::rate(live.down), graph::rate(live.up)),
                 TypeRole::Meta,
