@@ -1,0 +1,1 @@
+- **Page titles line up with the page on macOS, and the phone's toolbar actions are text buttons.** The title moved out of the toolbar, where it stood past the window buttons, into kōan's page header on the page's margin.
