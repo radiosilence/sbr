@@ -10,7 +10,9 @@ use std::collections::BTreeSet;
 
 use koan_kit::app::*;
 use koan_kit::components::sheet;
-use koan_kit::components::{Badge, Button, ButtonKind, Chip, FieldState, InputEvent, SectionHeading, TextField};
+use koan_kit::components::{
+    Badge, Button, ButtonKind, Chip, DetailGroup, FieldState, FilterField, InputEvent, Meter, SectionHeading,
+};
 use koan_kit::raw::px;
 use koan_kit::theme::{Look, Space, Tone, TypeRole, label};
 
@@ -18,14 +20,13 @@ use crate::connections::{Connections, Live};
 use crate::graph;
 use crate::install::Vpn;
 use crate::proto::Connection;
+use crate::tunnel::POLL;
 use crate::ui::{age, column, narrow, page, problem, row_height, text, toolbar};
 
 pub struct ConnectionsPage {
     connections: Entity<Connections>,
     vpn: Entity<Vpn>,
     filter: Entity<FieldState>,
-    /// The rate bars, gliding over each 250 ms poll.
-    bars: graph::Bars,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -49,7 +50,6 @@ impl ConnectionsPage {
             connections,
             vpn,
             filter,
-            bars: graph::Bars::default(),
             _subscriptions,
         }
     }
@@ -93,7 +93,6 @@ fn matches(c: &Connection, filter: &str) -> bool {
 impl Render for ConnectionsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
-        self.bars.sweep();
         let toolbar = toolbar("connections", window, cx);
         let c = self.connections.read(cx);
         let connected = c.connected(cx);
@@ -127,7 +126,7 @@ impl Render for ConnectionsPage {
                 .flex_col()
                 .gap(look.space(Space::S))
                 .child(text(summary, TypeRole::Meta, Tone::Muted, &look))
-                .child(TextField::new(&self.filter).label("filter connections")),
+                .child(FilterField::new(&self.filter).label("filter connections").fill()),
         );
 
         let mut list = div().flex().flex_col();
@@ -177,20 +176,22 @@ impl ConnectionsPage {
             .flex()
             .flex_col()
             .gap(px(3.0))
-            .child(self.bars.bar(
-                format!("down-{}", c.id),
-                (live.down / peak).sqrt() as f32,
-                look.color(Tone::Accent),
-                look.palette.rule.hsla(),
-                px(3.0),
-            ))
-            .child(self.bars.bar(
-                format!("up-{}", c.id),
-                (live.up / peak).sqrt() as f32,
-                look.color(Tone::Ink),
-                look.palette.rule.hsla(),
-                px(3.0),
-            ))
+            .child(
+                Meter::new(
+                    SharedString::from(format!("down-{}", c.id)),
+                    (live.down / peak).sqrt() as f32,
+                )
+                .color(look.color(Tone::Accent))
+                .ease(POLL),
+            )
+            .child(
+                Meter::new(
+                    SharedString::from(format!("up-{}", c.id)),
+                    (live.up / peak).sqrt() as f32,
+                )
+                .color(look.color(Tone::Ink))
+                .ease(POLL),
+            )
             .child(text(
                 format!("↓ {}  ↑ {}", graph::rate(live.down), graph::rate(live.up)),
                 TypeRole::Meta,
@@ -295,27 +296,6 @@ impl Detail {
             _observe,
         }
     }
-}
-
-fn field(name: &str, value: String, look: &Look) -> Div {
-    div()
-        .flex()
-        .items_baseline()
-        .gap(look.space(Space::M))
-        .py(look.space(Space::S))
-        .border_b(look.hairline)
-        .border_color(look.palette.rule.hsla())
-        .child(
-            div()
-                .w(look.sized(96.0))
-                .child(text(label(name), TypeRole::Meta, Tone::Muted, look)),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(text(value, TypeRole::Meta, Tone::Ink, look)),
-        )
 }
 
 fn figure(name: &str, rate: String, total: String, look: &Look) -> Div {
@@ -467,25 +447,20 @@ impl Render for Detail {
                         graph::bytes(c.download as f64),
                         &look,
                     )),
-            )
-            .child(SectionHeading::new("connection"))
-            .child(field("destination", c.destination.clone(), &look));
-        if let Some(ip) = &c.ip {
-            body = body.child(field("address", ip.clone(), &look));
-        }
-        if let Some(d) = &c.domain {
-            body = body.child(field("domain", d.clone(), &look));
-        }
-        body = body.child(field("network", c.network.clone(), &look));
-        if let Some(p) = &c.sniffed {
-            body = body.child(field("protocol", p.clone(), &look));
-        }
-        body = body
-            .child(field("inbound", c.inbound.clone(), &look))
-            .child(field("source", c.source.clone(), &look))
-            .child(field("rule", c.rule.clone(), &look))
-            .child(field("started", format!("{} ago", age(started_secs_ago(c))), &look))
-            .child(field("id", c.id.clone(), &look));
+            );
+        let mut fields = vec![("destination", c.destination.clone())];
+        fields.extend(c.ip.clone().map(|ip| ("address", ip)));
+        fields.extend(c.domain.clone().map(|d| ("domain", d)));
+        fields.push(("network", c.network.clone()));
+        fields.extend(c.sniffed.clone().map(|p| ("protocol", p)));
+        fields.extend([
+            ("inbound", c.inbound.clone()),
+            ("source", c.source.clone()),
+            ("rule", c.rule.clone()),
+            ("started", format!("{} ago", age(started_secs_ago(c)))),
+            ("id", c.id.clone()),
+        ]);
+        body = body.child(DetailGroup::new("connection").rows(fields));
 
         let mut actions = div().flex().gap(look.space(Space::M)).pt(look.space(Space::L));
         if open {

@@ -30,9 +30,9 @@ uuid = { version = "1.18", features = ["v4"] }
 # koan-kit and GPUI pinned together: koan-kit's revision of koan, and the
 # radiosilence/zed revision that koan's workspace pins, so Cargo builds a
 # single GPUI. Bump them together.
-koan-kit = { git = "https://github.com/radiosilence/koan", rev = "2891ec6dfa94deb034b807df0c2adcb2864cfa72" }
-gpui = { package = "gpui-koan", git = "https://github.com/radiosilence/zed", rev = "5f97692fdd8bb4def13321cd26d84f9a7ad282f3" }
-gpui_platform = { package = "gpui-koan-platform", git = "https://github.com/radiosilence/zed", rev = "5f97692fdd8bb4def13321cd26d84f9a7ad282f3", features = ["font-kit"] }
+koan-kit = { git = "https://github.com/radiosilence/koan", rev = "7c87324b82090d4863165bcfef07832caa04c640" }
+gpui = { package = "gpui-koan", git = "https://github.com/radiosilence/zed", rev = "be8db535bac465333448ec87099ba5faa7fd37aa" }
+gpui_platform = { package = "gpui-koan-platform", git = "https://github.com/radiosilence/zed", rev = "be8db535bac465333448ec87099ba5faa7fd37aa", features = ["font-kit"] }
 futures = "0.3"
 block2 = "0.6"
 objc2 = "0.6"
@@ -82,6 +82,6 @@ objc2-system-extensions = "0.3.2"
 dispatch2 = "0.3"
 
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
-gpui = { package = "gpui-koan", git = "https://github.com/radiosilence/zed", rev = "5f97692fdd8bb4def13321cd26d84f9a7ad282f3", features = ["test-support"] }
-gpui_platform = { package = "gpui-koan-platform", git = "https://github.com/radiosilence/zed", rev = "5f97692fdd8bb4def13321cd26d84f9a7ad282f3", features = ["font-kit", "test-support"] }
+gpui = { package = "gpui-koan", git = "https://github.com/radiosilence/zed", rev = "be8db535bac465333448ec87099ba5faa7fd37aa", features = ["test-support"] }
+gpui_platform = { package = "gpui-koan-platform", git = "https://github.com/radiosilence/zed", rev = "be8db535bac465333448ec87099ba5faa7fd37aa", features = ["font-kit", "test-support"] }
 image = { version = "0.25.1", default-features = false, features = ["png"] }
