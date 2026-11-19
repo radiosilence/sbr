@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1
+
+### Added
+
+- **A mint wash while connected.** koan-kit's wash, the drifting colour field kōan paints from the playing record, runs under the window in mint while the tunnel is on and fades to the plain ground when it goes off. Reduce Transparency keeps the plain ground.
+
+### Fixed
+
+- **Page titles line up with the page on macOS, and the phone's toolbar actions are text buttons.** The title moved out of the toolbar, where it stood past the window buttons, into kōan's page header on the page's margin.
+- **Pages open with kōan's page header on both platforms, on koan-kit's page margin.** The phone's toolbar held the title and a text button eight points from the edge while the page sat at sixteen; the title, the tunnel's state and route, and the page's button now stand in the header, aligned with everything under it.
+- **The download and upload rates stack on a narrow screen,** where two long rates side by side ran off its edge.
+
 ## 0.4.0
 
 ### Changed
