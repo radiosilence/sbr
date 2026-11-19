@@ -100,7 +100,6 @@ impl Render for SettingsPage {
             .size_full()
             .flex()
             .flex_col()
-            .bg(look.palette.bg.hsla())
             .child(toolbar)
             .child(Form::new("settings").sections(sections).build(&look).shrinks())
     }

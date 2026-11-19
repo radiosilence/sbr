@@ -1,0 +1,1 @@
+- **A mint wash while connected.** koan-kit's wash, the drifting colour field kōan paints from the playing record, runs under the window in mint while the tunnel is on and fades to the plain ground when it goes off. Reduce Transparency keeps the plain ground.

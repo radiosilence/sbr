@@ -152,7 +152,7 @@ impl Render for ConnectionsPage {
             list = list.child(self.row(live, peak, narrow, &look));
         }
         content = content.child(list);
-        page(toolbar, "connections", content, &look)
+        page(toolbar, "connections", content)
     }
 }
 

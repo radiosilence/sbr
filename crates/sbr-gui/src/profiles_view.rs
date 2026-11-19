@@ -141,7 +141,7 @@ impl Render for ProfilesPage {
             .child(list)
             .child(self.add_section(store.adding, &look, cx.entity()))
             .child(self.rules_section(&look, cx));
-        page(toolbar, "profiles", content, &look)
+        page(toolbar, "profiles", content)
     }
 }
 
