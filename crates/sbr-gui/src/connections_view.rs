@@ -10,7 +10,9 @@ use std::collections::BTreeSet;
 
 use koan_kit::app::*;
 use koan_kit::components::sheet;
-use koan_kit::components::{Badge, Button, ButtonKind, Chip, FieldState, InputEvent, SectionHeading, TextField};
+use koan_kit::components::{
+    Badge, Button, ButtonKind, Chip, DetailGroup, FieldState, FilterField, InputEvent, SectionHeading,
+};
 use koan_kit::raw::px;
 use koan_kit::theme::{Look, Space, Tone, TypeRole, label};
 
@@ -127,7 +129,7 @@ impl Render for ConnectionsPage {
                 .flex_col()
                 .gap(look.space(Space::S))
                 .child(text(summary, TypeRole::Meta, Tone::Muted, &look))
-                .child(TextField::new(&self.filter).label("filter connections")),
+                .child(FilterField::new(&self.filter).label("filter connections").fill()),
         );
 
         let mut list = div().flex().flex_col();
@@ -297,27 +299,6 @@ impl Detail {
     }
 }
 
-fn field(name: &str, value: String, look: &Look) -> Div {
-    div()
-        .flex()
-        .items_baseline()
-        .gap(look.space(Space::M))
-        .py(look.space(Space::S))
-        .border_b(look.hairline)
-        .border_color(look.palette.rule.hsla())
-        .child(
-            div()
-                .w(look.sized(96.0))
-                .child(text(label(name), TypeRole::Meta, Tone::Muted, look)),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(text(value, TypeRole::Meta, Tone::Ink, look)),
-        )
-}
-
 fn figure(name: &str, rate: String, total: String, look: &Look) -> Div {
     div()
         .flex()
@@ -467,25 +448,20 @@ impl Render for Detail {
                         graph::bytes(c.download as f64),
                         &look,
                     )),
-            )
-            .child(SectionHeading::new("connection"))
-            .child(field("destination", c.destination.clone(), &look));
-        if let Some(ip) = &c.ip {
-            body = body.child(field("address", ip.clone(), &look));
-        }
-        if let Some(d) = &c.domain {
-            body = body.child(field("domain", d.clone(), &look));
-        }
-        body = body.child(field("network", c.network.clone(), &look));
-        if let Some(p) = &c.sniffed {
-            body = body.child(field("protocol", p.clone(), &look));
-        }
-        body = body
-            .child(field("inbound", c.inbound.clone(), &look))
-            .child(field("source", c.source.clone(), &look))
-            .child(field("rule", c.rule.clone(), &look))
-            .child(field("started", format!("{} ago", age(started_secs_ago(c))), &look))
-            .child(field("id", c.id.clone(), &look));
+            );
+        let mut fields = vec![("destination", c.destination.clone())];
+        fields.extend(c.ip.clone().map(|ip| ("address", ip)));
+        fields.extend(c.domain.clone().map(|d| ("domain", d)));
+        fields.push(("network", c.network.clone()));
+        fields.extend(c.sniffed.clone().map(|p| ("protocol", p)));
+        fields.extend([
+            ("inbound", c.inbound.clone()),
+            ("source", c.source.clone()),
+            ("rule", c.rule.clone()),
+            ("started", format!("{} ago", age(started_secs_ago(c)))),
+            ("id", c.id.clone()),
+        ]);
+        body = body.child(DetailGroup::new("connection").rows(fields));
 
         let mut actions = div().flex().gap(look.space(Space::M)).pt(look.space(Space::L));
         if open {
