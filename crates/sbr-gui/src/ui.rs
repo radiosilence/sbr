@@ -68,12 +68,11 @@ pub fn chrome(title: &str, verbs: Vec<AnyElement>, window: &mut Window, cx: &mut
 }
 
 /// A page under its toolbar, scrolling.
-pub fn page(toolbar: Toolbar, id: &'static str, content: Div, look: &Look) -> Div {
+pub fn page(toolbar: Toolbar, id: &'static str, content: Div) -> Div {
     div()
         .size_full()
         .flex()
         .flex_col()
-        .bg(look.palette.bg.hsla())
         .child(toolbar)
         // The rest of the height under the toolbar, not the whole of it,
         // which would run its foot under what stands below the page.

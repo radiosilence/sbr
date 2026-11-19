@@ -73,6 +73,6 @@ impl Render for LogsPage {
             lines = lines.child(text(line.clone(), TypeRole::Meta, tone, &look));
         }
         content = content.child(lines);
-        page(toolbar, "logs", content, &look)
+        page(toolbar, "logs", content)
     }
 }

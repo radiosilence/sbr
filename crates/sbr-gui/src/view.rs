@@ -88,9 +88,11 @@ impl Render for TunnelPage {
             )
             .child(route);
 
+        // Stacked on a narrow screen, where two long rates would run off it.
         let figures = div()
             .flex()
-            .gap(look.space(Space::Xxl))
+            .when(narrow, |f| f.flex_col().gap(look.space(Space::M)))
+            .when(!narrow, |f| f.gap(look.space(Space::Xxl)))
             .child(figure("down", graph::rate(down), Tone::Accent, &look))
             .child(figure("up", graph::rate(up), Tone::Ink, &look));
 
@@ -179,7 +181,6 @@ impl Render for TunnelPage {
             .size_full()
             .flex()
             .flex_col()
-            .bg(look.palette.bg.hsla())
             .child(toolbar)
             // The rest of the height under the toolbar, not the whole of it,
             // which would run its foot under the tab strip.

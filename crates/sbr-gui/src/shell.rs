@@ -1,10 +1,12 @@
-//! The window's pages, the tab bar between them, and the sheet and question
-//! drawn over them.
+//! The window's pages, the tab bar between them, the sheet and question
+//! drawn over them, and koan-kit's wash beneath them: mint while the tunnel
+//! is on, the bare ground while it is off.
 
 use koan_kit::app::*;
 use koan_kit::components::sheet::{self, Layer};
 use koan_kit::components::{Clear, TabStrip, system_insets};
-use koan_kit::theme::{Icon, Look};
+use koan_kit::theme::wash::{Sleeve, Wash, WindowWash};
+use koan_kit::theme::{Icon, KoanTheme, Look};
 
 use crate::Models;
 use crate::connections::Connections;
@@ -64,7 +66,37 @@ pub struct Shell {
     connections_page: Entity<ConnectionsPage>,
     logs_page: Entity<LogsPage>,
     settings_page: Entity<SettingsPage>,
+    /// Under every page; the pages draw no ground of their own.
+    wash: Entity<Wash>,
+    /// Whether the wash shows mint: the tunnel was on when last looked at.
+    washed: bool,
     _asking: Subscription,
+    _tunnel: Subscription,
+}
+
+/// The wash's sleeve while connected: a small field of mints, which the kit
+/// blurs, holds to the appearance's contrast and drifts.
+fn mint() -> Option<Sleeve> {
+    const SIDE: u32 = 8;
+    let corners = [
+        [168.0, 232.0, 200.0],
+        [52.0, 160.0, 120.0],
+        [96.0, 200.0, 190.0],
+        [140.0, 220.0, 150.0],
+    ];
+    let mut rgba = Vec::with_capacity((SIDE * SIDE * 4) as usize);
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            let (u, v) = (x as f32 / (SIDE - 1) as f32, y as f32 / (SIDE - 1) as f32);
+            let w = [(1.0 - u) * (1.0 - v), u * (1.0 - v), (1.0 - u) * v, u * v];
+            for c in 0..3 {
+                let value: f32 = corners.iter().zip(w).map(|(k, w)| k[c] * w).sum();
+                rgba.push(value.round() as u8);
+            }
+            rgba.push(255);
+        }
+    }
+    Sleeve::new(rgba.into(), SIDE, SIDE)
 }
 
 impl Shell {
@@ -72,6 +104,26 @@ impl Shell {
         let Models { tunnel, profiles, vpn } = models;
         let connections = cx.new(|cx| Connections::new(tunnel.clone(), cx));
         let logs = cx.new(|cx| Logs::new(tunnel.clone(), &vpn, cx));
+        let washed = tunnel.read(cx).status.is_on();
+        let wash = cx.new(|cx| {
+            let mut wash = Wash::new();
+            if washed {
+                wash.set_sleeve(mint(), cx);
+                wash.drift(true, cx);
+            }
+            wash
+        });
+        WindowWash::set(window, (!KoanTheme::opaque(cx)).then_some(&wash), cx);
+        let _tunnel = cx.observe(&tunnel, |shell: &mut Shell, tunnel, cx| {
+            let on = tunnel.read(cx).status.is_on();
+            if on != shell.washed {
+                shell.washed = on;
+                shell.wash.update(cx, |wash, cx| {
+                    wash.set_sleeve(if on { mint() } else { None }, cx);
+                    wash.drift(on, cx);
+                });
+            }
+        });
         let tunnel_page = cx.new(|cx| TunnelPage::new(tunnel, cx));
         let profiles_page = cx.new(|cx| ProfilesPage::new(profiles.clone(), vpn.clone(), window, cx));
         let connections_page = cx.new(|cx| ConnectionsPage::new(connections.clone(), vpn.clone(), window, cx));
@@ -90,7 +142,10 @@ impl Shell {
             connections_page,
             logs_page,
             settings_page,
+            wash,
+            washed,
             _asking,
+            _tunnel,
         };
         shell.show(tab, cx);
         shell
@@ -139,12 +194,18 @@ impl Render for Shell {
         } else {
             look.palette.bg.hsla()
         };
-        div()
+        let ground = div().absolute().size_full().map(|d| {
+            if KoanTheme::opaque(cx) {
+                d.bg(look.palette.bg.hsla())
+            } else {
+                d.child(self.wash.clone().cached(StyleRefinement::default().size_full()))
+            }
+        });
+        let shell = div()
             .relative()
             .size_full()
             .flex()
             .flex_col()
-            .bg(look.palette.bg.hsla())
             .pt(insets.top)
             .pl(insets.left)
             .pr(insets.right)
@@ -159,6 +220,7 @@ impl Render for Shell {
                     .child(tabs),
             )
             .children(sheet::presented(window, cx).map(|s| sheet::layered(Layer::Sheet, s)))
-            .children(sheet::overlay(window, cx).map(|q| sheet::layered(Layer::Question, q)))
+            .children(sheet::overlay(window, cx).map(|q| sheet::layered(Layer::Question, q)));
+        div().relative().size_full().child(ground).child(shell)
     }
 }

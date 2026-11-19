@@ -1,0 +1,1 @@
+- **The download and upload rates stack on a narrow screen,** where two long rates side by side ran off its edge.
