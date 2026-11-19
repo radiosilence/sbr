@@ -53,7 +53,7 @@ impl Render for TunnelPage {
         let narrow = crate::ui::narrow(window);
         let on = self.tunnel.read(cx).status.is_on();
         let tunnel = self.tunnel.clone();
-        let connect = Button::new("connect", crate::ui::verb())
+        let connect = Button::new("connect", ButtonKind::Bordered)
             .label(if on { "disconnect" } else { "connect" })
             .on_click(move |_, _, cx| tunnel.update(cx, |t, cx| t.set_on(!on, cx)));
         let crate::ui::Chrome { toolbar, header } =
@@ -75,17 +75,18 @@ impl Render for TunnelPage {
                 None => format!("via {}", g.now),
             })
             .unwrap_or_default();
+        // The header's detail line: the state in the accent while it is on,
+        // then the route, in the line's own type.
         let status = div()
             .flex()
-            .items_center()
-            .gap(look.space(Space::S))
-            .child(div().size(px(10.0)).rounded_full().bg(if on {
-                look.color(Tone::Accent)
-            } else {
-                look.color(Tone::Muted)
-            }))
-            .child(text(label(t.status.label()), TypeRole::Title, Tone::Strong, &look))
-            .child(text(route, TypeRole::Body, Tone::Muted, &look));
+            .flex_wrap()
+            .gap_x(look.space(Space::S))
+            .child(
+                div()
+                    .text_color(look.text_color(if on { Tone::Accent } else { Tone::Muted }))
+                    .child(label(t.status.label())),
+            )
+            .child(route);
 
         let figures = div()
             .flex()
@@ -117,7 +118,7 @@ impl Render for TunnelPage {
                 &look,
             ));
 
-        let mut content = crate::ui::column(&look, window).children(header).child(status);
+        let mut content = crate::ui::column(&look).child(header.detail(status));
         if let Some(vpn) = self.vpn.clone().filter(|v| v.read(cx).needs_approval) {
             let allow = Button::new("allow-extension", ButtonKind::Bordered)
                 .label("open system settings")

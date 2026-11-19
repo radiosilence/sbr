@@ -79,7 +79,7 @@ impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
         let Chrome { toolbar, header } = chrome("settings", Vec::new(), window, cx);
-        let mut sections: Vec<AnyElement> = header.into_iter().collect();
+        let mut sections: Vec<AnyElement> = vec![header.into_any_element()];
         if let Some(e) = self.vpn.read(cx).error.clone() {
             let vpn = self.vpn.clone();
             sections.push(

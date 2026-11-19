@@ -113,7 +113,7 @@ impl Render for ConnectionsPage {
             "off".into()
         };
 
-        let mut content = column(&look, window).children(header);
+        let mut content = column(&look).child(header);
         if let Some(e) = c.error.clone() {
             let connections = self.connections.clone();
             content = content.child(problem("connections-problem", e, &look, move |cx| {

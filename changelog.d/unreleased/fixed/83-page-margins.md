@@ -1,0 +1,1 @@
+- **Pages open with kōan's page header on both platforms, on koan-kit's page margin.** The phone's toolbar held the title and a text button eight points from the edge while the page sat at sixteen; the title, the tunnel's state and route, and the page's button now stand in the header, aligned with everything under it.
