@@ -12,7 +12,7 @@ use crate::install::Vpn;
 use crate::profile::Profile;
 use crate::profiles::Profiles;
 use crate::swift::Date;
-use crate::ui::{column, narrow, page, problem, row_height, text, toolbar};
+use crate::ui::{Chrome, chrome, column, narrow, page, problem, row_height, text, verb};
 
 pub struct ProfilesPage {
     profiles: Entity<Profiles>,
@@ -92,12 +92,12 @@ impl Render for ProfilesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
         let vpn = self.vpn.clone();
-        let refresh = Button::new("refresh-all", ButtonKind::Bordered)
+        let refresh = Button::new("refresh-all", verb())
             .label("update")
             .on_click(move |_, _, cx| vpn.update(cx, |v, cx| v.refresh_profiles(cx)));
-        let toolbar = toolbar("profiles", window, cx).trailing(refresh);
+        let Chrome { toolbar, header } = chrome("profiles", vec![refresh.into_any_element()], window, cx);
 
-        let mut content = column(&look, window);
+        let mut content = column(&look, window).children(header);
         let store = self.profiles.read(cx);
         if let Some(e) = store.problem.clone() {
             let profiles = self.profiles.clone();
