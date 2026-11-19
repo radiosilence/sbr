@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+### Changed
+
+- **The app is built from koan-kit's components throughout, at koan's current main.** The tab bar is kōan's, a fixed 49 points with one rule that glides to the chosen tab; settings lay out as a kōan form; a connection's fields are a detail group; the connections filter is kōan's filter field; and the throughput chart, gauges and rate bars are koan-kit's `Chart` and `Meter`, so sbr-gui draws nothing of its own and takes the kit's improvements as its pin moves.
+
+### Internal
+
+- **The Apple build fetches the Metal toolchain when it is missing.** GPUI compiles Metal shaders, and the macOS runner images stopped including the toolchain, which failed the v0.3.2 macOS release job.
+
 ## 0.3.2
 
 ### Changed
