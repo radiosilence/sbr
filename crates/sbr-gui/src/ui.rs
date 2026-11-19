@@ -1,9 +1,9 @@
 //! Pieces the app's pages share: a line of text in a role and tone, a
-//! dismissable problem, a page's toolbar and column, how pages fold on a
+//! dismissable problem, a page's chrome and column, how pages fold on a
 //! phone, and how long ago something was.
 
 use koan_kit::app::*;
-use koan_kit::components::{Toolbar, ToolbarTitle, moves_window};
+use koan_kit::components::{ButtonKind, PageHeader, Toolbar, ToolbarTitle, moves_window};
 use koan_kit::raw::{Pixels, px};
 use koan_kit::theme::{HIT, KoanStyled, Look, Space, Tone, TypeRole};
 
@@ -47,24 +47,36 @@ pub fn problem(id: &'static str, message: String, look: &Look, dismiss: impl Fn(
         .child(text(message, TypeRole::Body, Tone::Bad, look))
 }
 
-/// A page's toolbar: on a phone flush with the page, as koan-gui's; on a
-/// desktop under the window buttons, its title moving the window.
-pub fn toolbar(title: &str, window: &mut Window, cx: &mut App) -> Toolbar {
+/// A page's title and verbs, laid out as kōan lays out its own: on a phone
+/// the title in the flush toolbar and the verbs at its trailing edge; on a
+/// desktop a bare toolbar under the window buttons, which moves the window,
+/// with the title and verbs opening the page as its `PageHeader`, on the
+/// page's margin rather than past the window buttons.
+pub struct Chrome {
+    pub toolbar: Toolbar,
+    pub header: Option<AnyElement>,
+}
+
+/// The kind of button a page's verb takes: a toolbar's text button on a
+/// phone, a header's compact button on a desktop.
+pub fn verb() -> ButtonKind {
+    if phone() { ButtonKind::Text } else { ButtonKind::Compact }
+}
+
+pub fn chrome(title: &str, verbs: Vec<AnyElement>, window: &mut Window, cx: &mut App) -> Chrome {
     if phone() {
         let title = div().size_full().flex().items_center().child(ToolbarTitle::new(title));
-        return Toolbar::new().flush().principal(title);
+        let toolbar = verbs
+            .into_iter()
+            .fold(Toolbar::new().flush().principal(title), Toolbar::trailing);
+        return Chrome { toolbar, header: None };
     }
-    let title = moves_window(
-        div()
-            .id("title")
-            .size_full()
-            .flex()
-            .items_center()
-            .child(ToolbarTitle::new(title)),
-        window,
-        cx,
-    );
-    Toolbar::new().under_window_buttons(true).principal(title)
+    let strip = moves_window(div().id("title").size_full(), window, cx);
+    let header = verbs.into_iter().fold(PageHeader::new(title), PageHeader::action);
+    Chrome {
+        toolbar: Toolbar::new().flush().under_window_buttons(true).principal(strip),
+        header: Some(header.into_any_element()),
+    }
 }
 
 /// A page under its toolbar, scrolling.

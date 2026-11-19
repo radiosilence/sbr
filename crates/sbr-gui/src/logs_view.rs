@@ -4,12 +4,12 @@
 //! device unless copied.
 
 use koan_kit::app::*;
-use koan_kit::components::{Button, ButtonKind, Toggle};
+use koan_kit::components::{Button, Toggle};
 use koan_kit::theme::{Look, Space, Tone, TypeRole, label};
 
 use crate::install::Vpn;
 use crate::logs::{Level, Logs, level};
-use crate::ui::{column, page, text, toolbar};
+use crate::ui::{Chrome, chrome, column, page, text, verb};
 
 pub struct LogsPage {
     logs: Entity<Logs>,
@@ -34,15 +34,17 @@ impl LogsPage {
 impl Render for LogsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
-        let toolbar = toolbar("logs", window, cx);
+        let (all, empty) = {
+            let logs = self.logs.read(cx);
+            (logs.lines.join("\n"), logs.lines.is_empty())
+        };
+        let copy = Button::new("copy-logs", verb())
+            .label("copy")
+            .disabled(empty)
+            .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(all.clone())));
+        let Chrome { toolbar, header } = chrome("logs", vec![copy.into_any_element()], window, cx);
         let logs = self.logs.read(cx);
         let connected = logs.connected(cx);
-        let all = logs.lines.join("\n");
-        let copy = Button::new("copy-logs", ButtonKind::Bordered)
-            .label("copy")
-            .disabled(logs.lines.is_empty())
-            .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(all.clone())));
-        let toolbar = toolbar.trailing(copy);
 
         let vpn = self.vpn.clone();
         let verbose =
@@ -50,7 +52,7 @@ impl Render for LogsPage {
                 let on = *on;
                 vpn.update(cx, |v, cx| v.set_verbose(on, cx))
             });
-        let mut content = column(&look, window).child(verbose);
+        let mut content = column(&look, window).children(header).child(verbose);
 
         let note = match (connected, logs.lines.is_empty()) {
             (true, true) => Some("nothing yet."),

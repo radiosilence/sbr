@@ -51,22 +51,21 @@ impl Render for TunnelPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
         let narrow = crate::ui::narrow(window);
-        let toolbar = crate::ui::toolbar("sbr", window, cx);
+        let on = self.tunnel.read(cx).status.is_on();
+        let tunnel = self.tunnel.clone();
+        let connect = Button::new("connect", crate::ui::verb())
+            .label(if on { "disconnect" } else { "connect" })
+            .on_click(move |_, _, cx| tunnel.update(cx, |t, cx| t.set_on(!on, cx)));
+        let crate::ui::Chrome { toolbar, header } =
+            crate::ui::chrome("sbr", vec![connect.into_any_element()], window, cx);
+
         let t = self.tunnel.read(cx);
-        let on = t.status.is_on();
         let samples: Vec<Sample> = t.history.iter().copied().collect();
         let latest = samples.last().copied().unwrap_or_default();
         // The figures over the last second, which hold still enough to read.
         let recent = &samples[samples.len().saturating_sub(4)..];
         let mean = |f: fn(&Sample) -> f64| recent.iter().map(f).sum::<f64>() / recent.len().max(1) as f64;
         let (down, up) = (mean(|s| s.down), mean(|s| s.up));
-
-        let tunnel = self.tunnel.clone();
-        let connect = Button::new("connect", ButtonKind::Bordered)
-            .label(if on { "disconnect" } else { "connect" })
-            .on_click(move |_, _, cx| tunnel.update(cx, |t, cx| t.set_on(!on, cx)));
-
-        let toolbar = toolbar.trailing(connect);
 
         let route = t
             .groups
@@ -118,7 +117,7 @@ impl Render for TunnelPage {
                 &look,
             ));
 
-        let mut content = crate::ui::column(&look, window).child(status);
+        let mut content = crate::ui::column(&look, window).children(header).child(status);
         if let Some(vpn) = self.vpn.clone().filter(|v| v.read(cx).needs_approval) {
             let allow = Button::new("allow-extension", ButtonKind::Bordered)
                 .label("open system settings")

@@ -14,7 +14,7 @@ use crate::diagnose::Diagnose;
 use crate::install::Vpn;
 use crate::logs::Logs;
 use crate::profiles::Profiles;
-use crate::ui::{problem, toolbar};
+use crate::ui::{Chrome, chrome, problem};
 
 pub struct SettingsPage {
     vpn: Entity<Vpn>,
@@ -78,8 +78,8 @@ fn note(s: &str, look: &Look) -> AnyElement {
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
-        let toolbar = toolbar("settings", window, cx);
-        let mut sections = Vec::new();
+        let Chrome { toolbar, header } = chrome("settings", Vec::new(), window, cx);
+        let mut sections: Vec<AnyElement> = header.into_iter().collect();
         if let Some(e) = self.vpn.read(cx).error.clone() {
             let vpn = self.vpn.clone();
             sections.push(

@@ -21,7 +21,7 @@ use crate::graph;
 use crate::install::Vpn;
 use crate::proto::Connection;
 use crate::tunnel::POLL;
-use crate::ui::{age, column, narrow, page, problem, row_height, text, toolbar};
+use crate::ui::{Chrome, age, chrome, column, narrow, page, problem, row_height, text};
 
 pub struct ConnectionsPage {
     connections: Entity<Connections>,
@@ -93,7 +93,7 @@ fn matches(c: &Connection, filter: &str) -> bool {
 impl Render for ConnectionsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let look = Look::of(window, cx);
-        let toolbar = toolbar("connections", window, cx);
+        let Chrome { toolbar, header } = chrome("connections", Vec::new(), window, cx);
         let c = self.connections.read(cx);
         let connected = c.connected(cx);
         let filter = self.filter.read(cx).value().to_string();
@@ -113,7 +113,7 @@ impl Render for ConnectionsPage {
             "off".into()
         };
 
-        let mut content = column(&look, window);
+        let mut content = column(&look, window).children(header);
         if let Some(e) = c.error.clone() {
             let connections = self.connections.clone();
             content = content.child(problem("connections-problem", e, &look, move |cx| {
