@@ -4,12 +4,12 @@
 //! device unless copied.
 
 use koan_kit::app::*;
-use koan_kit::components::{Button, Toggle};
+use koan_kit::components::{Button, ButtonKind, Toggle};
 use koan_kit::theme::{Look, Space, Tone, TypeRole, label};
 
 use crate::install::Vpn;
 use crate::logs::{Level, Logs, level};
-use crate::ui::{Chrome, chrome, column, page, text, verb};
+use crate::ui::{Chrome, chrome, column, page, text};
 
 pub struct LogsPage {
     logs: Entity<Logs>,
@@ -38,7 +38,7 @@ impl Render for LogsPage {
             let logs = self.logs.read(cx);
             (logs.lines.join("\n"), logs.lines.is_empty())
         };
-        let copy = Button::new("copy-logs", verb())
+        let copy = Button::new("copy-logs", ButtonKind::Bordered)
             .label("copy")
             .disabled(empty)
             .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(all.clone())));
@@ -52,7 +52,7 @@ impl Render for LogsPage {
                 let on = *on;
                 vpn.update(cx, |v, cx| v.set_verbose(on, cx))
             });
-        let mut content = column(&look, window).children(header).child(verbose);
+        let mut content = column(&look).child(header).child(verbose);
 
         let note = match (connected, logs.lines.is_empty()) {
             (true, true) => Some("nothing yet."),

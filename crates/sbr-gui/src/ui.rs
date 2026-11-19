@@ -3,7 +3,7 @@
 //! phone, and how long ago something was.
 
 use koan_kit::app::*;
-use koan_kit::components::{ButtonKind, PageHeader, Toolbar, ToolbarTitle, moves_window};
+use koan_kit::components::{PageHeader, RowMetrics, Toolbar, moves_window};
 use koan_kit::raw::{Pixels, px};
 use koan_kit::theme::{HIT, KoanStyled, Look, Space, Tone, TypeRole};
 
@@ -47,36 +47,24 @@ pub fn problem(id: &'static str, message: String, look: &Look, dismiss: impl Fn(
         .child(text(message, TypeRole::Body, Tone::Bad, look))
 }
 
-/// A page's title and verbs, laid out as kōan lays out its own: on a phone
-/// the title in the flush toolbar and the verbs at its trailing edge; on a
-/// desktop a bare toolbar under the window buttons, which moves the window,
-/// with the title and verbs opening the page as its `PageHeader`, on the
-/// page's margin rather than past the window buttons.
+/// A page's title and verbs, laid out as kōan's library pages are: a bare
+/// toolbar (on a desktop under the window buttons, moving the window) and the
+/// page opening with its `PageHeader`, the verbs as buttons at its trailing
+/// edge, on the kit's page margin.
 pub struct Chrome {
     pub toolbar: Toolbar,
-    pub header: Option<AnyElement>,
-}
-
-/// The kind of button a page's verb takes: a toolbar's text button on a
-/// phone, a header's compact button on a desktop.
-pub fn verb() -> ButtonKind {
-    if phone() { ButtonKind::Text } else { ButtonKind::Compact }
+    pub header: PageHeader,
 }
 
 pub fn chrome(title: &str, verbs: Vec<AnyElement>, window: &mut Window, cx: &mut App) -> Chrome {
-    if phone() {
-        let title = div().size_full().flex().items_center().child(ToolbarTitle::new(title));
-        let toolbar = verbs
-            .into_iter()
-            .fold(Toolbar::new().flush().principal(title), Toolbar::trailing);
-        return Chrome { toolbar, header: None };
-    }
-    let strip = moves_window(div().id("title").size_full(), window, cx);
-    let header = verbs.into_iter().fold(PageHeader::new(title), PageHeader::action);
-    Chrome {
-        toolbar: Toolbar::new().flush().under_window_buttons(true).principal(strip),
-        header: Some(header.into_any_element()),
-    }
+    let toolbar = if phone() {
+        Toolbar::new().flush()
+    } else {
+        let strip = moves_window(div().id("title").size_full(), window, cx);
+        Toolbar::new().flush().under_window_buttons(true).principal(strip)
+    };
+    let header = verbs.into_iter().fold(PageHeader::new(title), PageHeader::trailing);
+    Chrome { toolbar, header }
 }
 
 /// A page under its toolbar, scrolling.
@@ -92,10 +80,13 @@ pub fn page(toolbar: Toolbar, id: &'static str, content: Div, look: &Look) -> Di
         .child(koan_kit::components::ScrollArea::new(id, content).shrinks())
 }
 
-/// A page's column of sections, closer to the edges on a narrow screen.
-pub fn column(look: &Look, window: &Window) -> Div {
-    let edge = if narrow(window) { Space::L } else { Space::Xl };
-    div().flex().flex_col().gap(look.space(Space::Xl)).p(look.space(edge))
+/// A page's column of sections, on the kit's page margin.
+pub fn column(look: &Look) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(look.space(Space::Xl))
+        .p(RowMetrics::page_margin(look))
 }
 
 /// Seconds as the fewest words: `42s`, `5m`, `3h 12m`, `2d 4h`.
