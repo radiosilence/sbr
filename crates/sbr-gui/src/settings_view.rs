@@ -92,7 +92,7 @@ impl Render for SettingsPage {
         sections.extend(self.auto_connect(&look, cx));
         sections.extend([
             self.protection(&look, cx),
-            self.engine(cx),
+            self.engine(&look, cx),
             self.diagnose(&look, cx),
             self.erase(&look),
         ]);
@@ -181,7 +181,7 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    fn engine(&self, cx: &App) -> AnyElement {
+    fn engine(&self, look: &Look, cx: &App) -> AnyElement {
         let s = &self.vpn.read(cx).settings;
         let (tcp, verbose) = (self.vpn.clone(), self.vpn.clone());
         FormSection::titled("engine")
@@ -191,15 +191,16 @@ impl SettingsPage {
                     tcp.update(cx, |v, cx| v.set_userspace_tcp(on, cx))
                 }),
             )
+            .row(note(
+                "sbr's own tcp stack. off uses the kernel's, which ios stops under heavy load. reconnects.",
+                look,
+            ))
             .row(
                 Toggle::new("verbose-settings", "verbose logs", s.verbose).on_change(move |on, _, cx| {
                     let on = *on;
                     verbose.update(cx, |v, cx| v.set_verbose(on, cx))
                 }),
             )
-            .footer(label(
-                "userspace tcp is sbr's own tcp stack; off uses the kernel's, which ios stops under heavy load. changing it reconnects.",
-            ))
             .into_any_element()
     }
 
