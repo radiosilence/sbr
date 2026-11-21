@@ -30,6 +30,19 @@ struct UdpConn {
     reader: AbortHandle,
 }
 
+impl UdpConn {
+    /// A failed send retires the socket: a proxied association whose
+    /// connection died can keep failing sends while its reads never end, so
+    /// the next query dials a new one rather than reusing it.
+    async fn send(&self, raw: &[u8]) -> io::Result<()> {
+        let r = self.pc.send_to(raw, &self.dest).await;
+        if r.is_err() {
+            self.pending.close();
+        }
+        r
+    }
+}
+
 impl Drop for UdpConn {
     fn drop(&mut self) {
         self.reader.abort();
@@ -94,11 +107,11 @@ impl Transport for Udp {
             let c = self.conn().await?;
             let (id, mut rx, _unregister) = c.pending.register(query)?;
             let raw = encode_with_id(query, id)?;
-            c.pc.send_to(&raw, &c.dest).await?;
+            c.send(&raw).await?;
             let resp = match tokio::time::timeout(RETRANSMIT, &mut rx).await {
                 Ok(r) => r,
                 Err(_) => {
-                    c.pc.send_to(&raw, &c.dest).await?;
+                    c.send(&raw).await?;
                     rx.await
                 }
             }

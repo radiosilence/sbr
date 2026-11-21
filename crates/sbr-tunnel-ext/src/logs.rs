@@ -1,7 +1,11 @@
-//! The unified log, and the last log lines kept in memory for the app.
+//! The unified log, the last log lines kept in memory for the app, and the
+//! session log on disk.
 
 use std::collections::VecDeque;
 use std::ffi::{CString, c_char, c_void};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
@@ -130,14 +134,76 @@ const CAPACITY: usize = 1000;
 
 static RECENT: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 
-/// Keep a line for the app's log view: memory only, never written to disk
-/// except the short tail kept for an abnormal end.
+/// The session log in the private directory, and its previous half.
+pub const FILE: &str = "tunnel.log";
+const FILE_PREVIOUS: &str = "tunnel.log.1";
+
+/// Where the session log rolls over: the log on disk stays under twice this.
+const FILE_LIMIT: u64 = 2 * 1024 * 1024;
+
+struct Sink {
+    file: File,
+    len: u64,
+}
+
+static SINK: Mutex<Option<Sink>> = Mutex::new(None);
+
+/// Keep a line for the app's log view and append it to the session log.
 pub fn append(level: Level, message: &str) {
     let line = format!("{} {} {}", clock(SystemTime::now()), level.tag(), message);
+    write_line(&line);
     let mut lines = RECENT.lock().unwrap_or_else(|e| e.into_inner());
     lines.push_back(line);
     while lines.len() > CAPACITY {
         lines.pop_front();
+    }
+}
+
+/// Open the session log in `dir`, and bring its last lines back into the
+/// recent ones, so the log view and a copy of it span a restart of the
+/// extension: by update, by the system or by a crash. The log names
+/// destinations and domains like the recent lines; it stays in the
+/// extension's private directory, out of backups, and Erase removes it.
+pub fn open_file(dir: &Path) {
+    let path = dir.join(FILE);
+    let earlier = [dir.join(FILE_PREVIOUS), path.clone()]
+        .iter()
+        .filter_map(|p| File::open(p).ok())
+        .flat_map(|f| BufReader::new(f).lines().map_while(Result::ok))
+        .collect::<Vec<_>>();
+    {
+        let mut lines = RECENT.lock().unwrap_or_else(|e| e.into_inner());
+        if lines.is_empty() {
+            lines.extend(earlier[earlier.len().saturating_sub(CAPACITY)..].iter().cloned());
+        }
+    }
+    let Ok(file) = OpenOptions::new().create(true).append(true).open(&path) else {
+        return;
+    };
+    let len = file.metadata().map_or(0, |m| m.len());
+    *SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(Sink { file, len });
+}
+
+/// Stop writing the session log, before its directory is erased.
+pub fn close_file() {
+    *SINK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn write_line(line: &str) {
+    let mut sink = SINK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(s) = sink.as_mut() else { return };
+    if s.file.write_all(format!("{line}\n").as_bytes()).is_err() {
+        return;
+    }
+    s.len += line.len() as u64 + 1;
+    if s.len >= FILE_LIMIT
+        && let Some(dir) = crate::store::private_dir()
+    {
+        let _ = std::fs::rename(dir.join(FILE), dir.join(FILE_PREVIOUS));
+        match OpenOptions::new().create(true).append(true).open(dir.join(FILE)) {
+            Ok(file) => *s = Sink { file, len: 0 },
+            Err(_) => *sink = None,
+        }
     }
 }
 
@@ -150,7 +216,7 @@ pub fn snapshot() -> Vec<String> {
         .collect()
 }
 
-/// Local time as `HH:mm:ss`.
+/// Local time as `MM-dd HH:mm:ss`: the session log spans days.
 fn clock(t: SystemTime) -> String {
     let secs = t.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
     // SAFETY: localtime_r writes only into `tm`.
@@ -158,7 +224,14 @@ fn clock(t: SystemTime) -> String {
     if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
         return "--:--:--".into();
     }
-    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+    format!(
+        "{:02}-{:02} {:02}:{:02}:{:02}",
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
 }
 
 /// UTC as ISO 8601 (`2026-11-06T15:02:17Z`), as `ISO8601DateFormatter` writes.

@@ -94,6 +94,9 @@ impl Tunnel {
     }
 
     pub fn start(self: &Arc<Self>, erase: bool) -> Result<(), String> {
+        if let Some(dir) = store::private_dir() {
+            logs::open_file(dir);
+        }
         logs::forward_core_logs();
         logs::tunnel().info(&format!("starting sbr {}", sbr_apple::api::version()));
         if erase {
@@ -422,6 +425,7 @@ impl Tunnel {
     /// the tunnel next.
     fn erase(&self) {
         self.stop_heartbeat();
+        logs::close_file();
         let Some(dir) = store::private_dir() else { return };
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for e in entries.flatten() {
