@@ -301,6 +301,7 @@ async fn recv_datagrams(conn: Connection, sessions: Arc<Sessions<u16>>) {
     while let Ok(d) = conn.read_datagram().await {
         deliver(&sessions, &d);
     }
+    sessions.close();
 }
 
 async fn recv_uni(conn: Connection, sessions: Arc<Sessions<u16>>) {

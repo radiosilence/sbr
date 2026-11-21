@@ -611,7 +611,7 @@ impl Pool {
             closed: AtomicBool::new(false),
             reader: Mutex::new(None),
         });
-        debug!(server = %self.server, "anytls: new session");
+        debug!(remote = %self.server, "anytls: new session");
         let task = tokio::spawn(session.clone().read_loop(r));
         *session.reader.lock().unwrap() = Some(task);
         Ok(session)

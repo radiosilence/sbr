@@ -253,6 +253,7 @@ async fn recv_datagrams(conn: Connection, sessions: Arc<Sessions<u32>>) {
         let data = d.slice(start + alen as usize..);
         sessions.deliver(&sid, pid, frag, total, Some(dest), data);
     }
+    sessions.close();
 }
 
 impl Outbound for Hysteria2 {

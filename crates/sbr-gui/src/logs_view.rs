@@ -1,7 +1,8 @@
 //! The logs page: the tunnel's recent log lines, newest first, errors in
 //! the bad tone and warnings in ink; the last session's lines while the
-//! tunnel is down. They come from the extension's memory and stay on this
-//! device unless copied.
+//! tunnel is down. They come from the extension, which keeps them across
+//! its restarts in its private directory, and stay on this device unless
+//! copied.
 
 use koan_kit::app::*;
 use koan_kit::components::{Button, ButtonKind, Toggle};

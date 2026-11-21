@@ -548,6 +548,13 @@ impl<K: std::hash::Hash + Eq> Sessions<K> {
         }
     }
 
+    /// The connection is gone: end every session's receive queue, so a
+    /// reader waiting on one sees the connection closed instead of waiting
+    /// for packets that will never come.
+    pub(crate) fn close(&self) {
+        self.map.lock().unwrap().clear();
+    }
+
     pub(crate) fn deliver(&self, key: &K, id: u16, index: u8, total: u8, dest: Option<Destination>, data: Bytes) {
         let mut map = self.map.lock().unwrap();
         let Some(e) = map.get_mut(key) else { return };

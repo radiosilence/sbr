@@ -123,7 +123,8 @@ impl<S: Subscriber> Layer<S> for CallbackLayer {
     }
 }
 
-/// Fields that name no destination, domain, address or error text, so a
+/// Fields that name no destination, domain, address or error text (tags
+/// from the profile, such as `server` and `outbound`, name only its parts), so a
 /// host may log them where others can read them (the unified log). Every
 /// other field goes in the private part.
 const PUBLIC_FIELDS: &[&str] = &[
@@ -137,11 +138,13 @@ const PUBLIC_FIELDS: &[&str] = &[
     "interface",
     "limit",
     "migrated",
+    "outbound",
     "qtype",
     "rcode",
     "reason",
     "retry_in",
     "rule_set",
+    "server",
     "tag",
     "tcp",
     "tun_packets_in",

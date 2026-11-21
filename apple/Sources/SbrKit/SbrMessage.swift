@@ -12,7 +12,8 @@ public enum SbrRequest: Codable, Sendable {
     case connections
     /// Close one connection; answers with the connections left.
     case closeConnection(id: String)
-    /// The extension's recent log lines (memory only).
+    /// The extension's recent log lines, including those from before its
+    /// last restart.
     case logs
     /// Run this config (a no-op when it is already running), or re-read the
     /// saved one when nil. The app also saves it into `providerConfiguration`
