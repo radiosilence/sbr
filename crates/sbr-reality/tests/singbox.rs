@@ -24,24 +24,15 @@ const UUID: &str = "41fe9881-4fc4-4757-8d3b-0337b1a17bda";
 const SHORT_ID: &str = "0123456789abcdef";
 
 /// A sing-box binary built with `-tags with_utls` (REALITY needs it).
+/// Taken from the environment alone: a default path would hold only on the
+/// machine that wrote it.
 fn sing_box() -> Option<PathBuf> {
-    const REF: &str = "/tmp/claude-0/-home-user-sbr/f8826c5d-a757-5d8c-a19d-5dec2bf91f74/scratchpad/ref";
-    let candidates: Vec<PathBuf> = match std::env::var_os("SBR_SING_BOX") {
-        Some(p) => vec![p.into()],
-        None => vec![
-            format!("{REF}/sing-box-utls").into(),
-            format!("{REF}/sing-box-bin").into(),
-        ],
-    };
-    for p in candidates {
-        let Ok(out) = std::process::Command::new(&p).arg("version").output() else {
-            continue;
-        };
-        if String::from_utf8_lossy(&out.stdout).contains("with_utls") {
-            return Some(p);
-        }
-        println!("{} lacks the with_utls build tag", p.display());
+    let p = PathBuf::from(std::env::var_os("SBR_SING_BOX")?);
+    let out = std::process::Command::new(&p).arg("version").output().ok()?;
+    if String::from_utf8_lossy(&out.stdout).contains("with_utls") {
+        return Some(p);
     }
+    println!("{} lacks the with_utls build tag", p.display());
     None
 }
 

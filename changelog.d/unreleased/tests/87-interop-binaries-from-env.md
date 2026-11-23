@@ -1,0 +1,1 @@
+- **The sing-box interop tests take their binaries from the environment alone.** They defaulted to a scratch path from one machine, which exists nowhere else; without `SBR_SING_BOX` (or `SBR_SINGBOX_BIN` and `SBR_SINGBOX_UTLS_BIN`) they now say they skipped.
