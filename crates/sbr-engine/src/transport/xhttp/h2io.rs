@@ -66,10 +66,6 @@ impl H2Conn {
                 h2_err(e)
             })?;
         let dead = self.dead.clone();
-        #[expect(
-            clippy::manual_option_zip,
-            reason = "zip would take the connection's PingPong even when no keepalive is configured"
-        )]
         let ping = keepalive.and_then(|p| conn.ping_pong().map(|pp| (pp, p)));
         tokio::spawn(async move {
             let r = match ping {
