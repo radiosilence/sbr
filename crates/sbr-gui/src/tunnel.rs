@@ -47,9 +47,9 @@ pub struct Tunnel {
     pub history: VecDeque<Sample>,
     /// Counts samples taken, so a graph knows when to take the next.
     pub taken: u64,
-    /// Whether a window shows the graphs or the menu bar's menu is open:
-    /// the tunnel is polled only then.
+    /// Whether a window shows the graphs: the tunnel is polled then.
     watched: bool,
+    /// Whether the menu bar's menu is open: the tunnel is polled then too.
     peeking: bool,
     /// Groups whose latency test is running.
     pub testing: BTreeSet<String>,
@@ -208,13 +208,19 @@ impl Tunnel {
 
     /// Polls the tunnel while `on`: while the menu bar's menu is open, which
     /// shows the live rates and the groups' latencies.
+    /// Figures from when it was last open are not live: they start again.
     pub fn peek(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on && !self.peeking && !self.watched && !self.demo {
+            self.history.clear();
+            self.stats = None;
+            self.taken += 1;
+        }
         self.peeking = on;
         cx.notify();
     }
 
-    /// The next poll's requests, or none while the tunnel is down or no
-    /// window shows it.
+    /// The next poll's requests, or none while the tunnel is down, no
+    /// window shows it and the menu bar's menu is closed.
     #[allow(clippy::type_complexity)]
     fn poll(
         &mut self,
@@ -317,6 +323,17 @@ impl Tunnel {
             }
             for _ in 0..20 {
                 cx.background_executor().timer(Duration::from_millis(300)).await;
+                // Nothing polls with the window and the menu closed, as after
+                // a test chosen from the menu: ask for the groups here.
+                let polled = this.update(cx, |t, _| t.watched || t.peeking).unwrap_or(true);
+                if let (false, Some(m)) = (polled, &manager) {
+                    let groups = m.send(&Request::Groups {}).await.ok().and_then(|r| r.groups);
+                    let _ = this.update(cx, |t, _| {
+                        if let Some(groups) = groups.filter(|_| t.status == Status::On) {
+                            t.groups = groups;
+                        }
+                    });
+                }
                 let changed = this
                     .update(cx, |t, _| {
                         if t.demo {

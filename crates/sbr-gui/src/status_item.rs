@@ -114,13 +114,13 @@ impl Entry {
 }
 
 enum Event {
-    Chosen(usize),
+    Chosen(Run),
     Opened(bool),
 }
 
 thread_local! {
     /// The current menu's closures, by the tag of their item, and where
-    /// a chosen tag or the menu opening goes: the task on GPUI's side.
+    /// a chosen closure or the menu opening goes: the task on GPUI's side.
     static RUNS: RefCell<Vec<Run>> = const { RefCell::new(Vec::new()) };
     static EVENTS: RefCell<Option<UnboundedSender<Event>>> = const { RefCell::new(None) };
 }
@@ -145,8 +145,11 @@ define_class!(
         #[unsafe(method(chosen:))]
         fn chosen(&self, sender: Option<&NSMenuItem>) {
             let Some(item) = sender else { return };
-            if let Ok(tag) = usize::try_from(item.tag()) {
-                send(Event::Chosen(tag));
+            // Looked up now: a refresh before the event is handled may
+            // number the items differently.
+            let Ok(tag) = usize::try_from(item.tag()) else { return };
+            if let Some(run) = RUNS.with(|runs| runs.borrow().get(tag).cloned()) {
+                send(Event::Chosen(run));
             }
         }
     }
@@ -204,12 +207,7 @@ impl StatusItem {
         let events = cx.spawn(async move |cx| {
             while let Some(event) = received.next().await {
                 match event {
-                    Event::Chosen(tag) => {
-                        let run = RUNS.with(|runs| runs.borrow().get(tag).cloned());
-                        if let Some(run) = run {
-                            cx.update(|cx| run(cx));
-                        }
-                    }
+                    Event::Chosen(run) => cx.update(|cx| run(cx)),
                     Event::Opened(open) => cx.update(|cx| opened(open, cx)),
                 }
             }
