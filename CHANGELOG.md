@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.2
+
+### Changed
+
+- **The tunnel keeps its log on disk, and names servers in the unified log.** The log view now carries the lines from before the extension's last restart (an update, the system ending it, a crash), from a session log of up to 4 MB in the extension's private directory, out of backups and removed by Erase. The unified log shows which DNS server and outbound a line is about; destinations, domains and error text stay private.
+
+### Fixed
+
+- **DNS through a QUIC proxy recovers when the proxy's connection drops.** A DNS server reached over UDP through Hysteria2 or TUIC kept its association after the QUIC connection died: every send failed with "connection lost" while the reader waited forever, so the association was never replaced and that server failed every query until the tunnel restarted. A failed send now retires the association, and a dead QUIC connection ends its UDP sessions.
+
 ## 0.4.1
 
 ### Added

@@ -6304,7 +6304,7 @@ dependencies = [
 
 [[package]]
 name = "sbr"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -6318,7 +6318,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-apple"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "ipnet",
  "libc",
@@ -6331,7 +6331,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-config"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -6343,7 +6343,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "aho-corasick",
  "arc-swap",
@@ -6359,7 +6359,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-dns"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -6386,7 +6386,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-engine"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "aes 0.9.3",
  "aws-lc-rs",
@@ -6442,7 +6442,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-gui"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -6470,7 +6470,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-message"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -6479,7 +6479,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-reality"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -6499,7 +6499,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-tun"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "bytes",
  "ipnet",
@@ -6512,7 +6512,7 @@ dependencies = [
 
 [[package]]
 name = "sbr-tunnel-ext"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "block2 0.6.2",
  "cc",
