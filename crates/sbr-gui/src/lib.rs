@@ -5,6 +5,9 @@ pub mod profile;
 /// The app's side of the tunnel messages; the tunnel extension shares them.
 pub use sbr_message as proto;
 pub mod rules;
+
+#[cfg(target_os = "macos")]
+pub mod app_menu;
 pub mod swift;
 
 #[cfg(target_vendor = "apple")]
@@ -198,6 +201,7 @@ pub fn run() {
             cx.set_quit_mode(QuitMode::Explicit);
             dock::show(false);
             menubar::install(&models, cx);
+            app_menu::install(cx);
             // Opened at launch only when there is nothing to connect yet,
             // or for the demo; otherwise from the menu bar, or by opening
             // sbr again.
