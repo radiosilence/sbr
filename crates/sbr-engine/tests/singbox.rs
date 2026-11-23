@@ -3,9 +3,9 @@
 //! Every case pushes 1 MiB through a TCP echo and back, byte-exact, and
 //! (where the protocol carries UDP) a set of datagrams through a UDP echo.
 //!
-//! Needs a sing-box binary: `$SBR_SINGBOX_BIN` or `$SBR_SING_BOX`, else the
-//! path below (REALITY needs one built with `with_utls`). Without one the
-//! tests print a note and pass.
+//! Needs a sing-box binary: `$SBR_SINGBOX_BIN` or `$SBR_SING_BOX`, and for
+//! REALITY one built with `with_utls` (`$SBR_SINGBOX_UTLS_BIN`, else
+//! `$SBR_SING_BOX`). Without one the tests print that they skipped and pass.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -22,19 +22,20 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 
-const DEFAULT_BIN: &str =
-    "/tmp/claude-0/-home-user-sbr/f8826c5d-a757-5d8c-a19d-5dec2bf91f74/scratchpad/ref/sing-box-bin";
-const DEFAULT_UTLS_BIN: &str =
-    "/tmp/claude-0/-home-user-sbr/f8826c5d-a757-5d8c-a19d-5dec2bf91f74/scratchpad/ref/sing-box-utls";
 const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
 const PASSWORD: &str = "trojan-password";
 const MIB: usize = 1024 * 1024;
 
+/// The binary named by the environment, and nothing else: a default path would
+/// hold only on the machine that wrote it.
 fn singbox() -> Option<PathBuf> {
-    let p = std::env::var_os("SBR_SINGBOX_BIN")
+    let Some(p) = std::env::var_os("SBR_SINGBOX_BIN")
         .or_else(|| std::env::var_os("SBR_SING_BOX"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_BIN));
+    else {
+        eprintln!("skipped: no sing-box binary (set SBR_SING_BOX)");
+        return None;
+    };
     if p.exists() {
         Some(p)
     } else {
@@ -585,10 +586,13 @@ async fn inner_tls_roundtrips(out: &Arc<dyn Outbound>, pki: &Pki) {
 }
 
 fn singbox_utls() -> Option<PathBuf> {
-    let p = std::env::var_os("SBR_SINGBOX_UTLS_BIN")
+    let Some(p) = std::env::var_os("SBR_SINGBOX_UTLS_BIN")
         .or_else(|| std::env::var_os("SBR_SING_BOX"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_UTLS_BIN));
+    else {
+        eprintln!("skipped: no sing-box (with_utls) binary (set SBR_SING_BOX)");
+        return None;
+    };
     if p.exists() {
         Some(p)
     } else {

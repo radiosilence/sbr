@@ -1,0 +1,24 @@
+# Advisories present in the current lockfile, acknowledged so that `cargo audit`
+# still fails on anything new. Remove an entry as soon as its cause clears: an
+# ignore that outlives its cause is worse than no gate at all.
+#
+# Every one below is an unmaintained crate with no fixed release, reached only
+# through GPUI (koan's fork of Zed, pinned by koan-kit) in sbr-gui. None of them
+# is in sbr-engine, sbr-reality or anything else that parses traffic. They go
+# when GPUI drops or replaces them and the koan-kit pin moves past that.
+[advisories]
+ignore = [
+    # chrono, unmaintained. Held by gpui-koan and its platform crates.
+    "RUSTSEC-2026-0543",
+    # paste, unmaintained. Held by pulp, through exr and image, under gpui-koan.
+    "RUSTSEC-2024-0436",
+    # rustybuzz, unmaintained. Held by usvg under gpui-koan.
+    "RUSTSEC-2026-0206",
+    # ttf-parser, unmaintained. Held by fontdb and usvg under gpui-koan.
+    "RUSTSEC-2026-0192",
+    # zbus_names, zvariant and zvariant_derive, unmaintained. Held by zbus, which
+    # gpui-koan-linux reaches through oo7, ashpd and notify-rust.
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0372",
+]

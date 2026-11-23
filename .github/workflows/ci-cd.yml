@@ -52,7 +52,8 @@ jobs:
   # to main that changes the workspace version, or a manual run on main, when
   # that version has no GitHub release yet. Answered first, so the release
   # build can start alongside the checks, and a release that would fail late
-  # fails before any macOS runner starts.
+  # fails before any macOS runner starts. Also whether the dependencies are
+  # audited (`deps`).
   changes:
     name: Changes
     runs-on: ubuntu-latest
@@ -60,6 +61,7 @@ jobs:
     outputs:
       release: ${{ steps.check.outputs.release }}
       version: ${{ steps.check.outputs.version }}
+      deps: ${{ steps.deps.outputs.deps }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -99,6 +101,23 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "release=$release" >> "$GITHUB_OUTPUT"
           echo "v$version: release=$release"
+      # A pull request audits when it changes what is in the lockfile or how
+      # cargo resolves it; its diff is against its base, the merge commit's
+      # first parent. Main and a manual run audit every time, since a new
+      # advisory can land on any day without a change here. A diff that cannot
+      # be worked out audits. Steps run under `bash -eo pipefail`, so the grep
+      # is asked in a condition rather than left to fail the step.
+      - id: deps
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          deps=true
+          if [ "$EVENT" = pull_request ] && files=$(git diff --name-only HEAD^1 HEAD); then
+            if ! printf '%s\n' "$files" | grep -E '^Cargo\.lock$|(^|/)Cargo\.toml$|^\.cargo/|^\.github/' > /dev/null; then
+              deps=false
+            fi
+          fi
+          echo "deps=$deps" | tee -a "$GITHUB_OUTPUT"
 
   # GitHub has no priority among its runners, and the account's few macOS ones
   # are what a release waits on. A release cancels this repository's pull
@@ -307,12 +326,34 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
 
+  # Blocking, for an engine that parses hostile input. The advisories already
+  # in the lockfile are acknowledged in .cargo/audit.toml, each with why it does
+  # not reach the engine, so this fails on anything new.
+  #
+  # cargo-audit run directly: its exit code is the gate. Unsound and
+  # unmaintained advisories are printed as warnings and do not fail it; a
+  # vulnerability does. rustsec/audit-check reported through a check run it
+  # created and then updated, and that update came back 404 now and then,
+  # failing the job after a clean audit.
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: changes
+    if: needs.changes.outputs.deps == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo install cargo-audit --locked --version 0.23.0
+      - run: cargo audit
+
   # The one status a ruleset needs to require.
   checks:
     name: Checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [changes, actionlint, fmt, linux, apple, changelog]
+    needs: [changes, actionlint, fmt, linux, apple, changelog, audit]
     if: always()
     steps:
       - env:

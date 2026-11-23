@@ -1,0 +1,1 @@
+- **CI audits the dependencies.** A blocking `Security Audit` job runs `cargo audit` on every push to main and on pull requests that change a manifest, the lockfile, `.cargo/` or `.github/`; `url` moves to 2.5.9 and `heapless` to 0.9.4 for the advisories against them, and the unmaintained crates GPUI holds are acknowledged in `.cargo/audit.toml`.
