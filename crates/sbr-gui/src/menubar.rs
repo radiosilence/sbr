@@ -1,15 +1,22 @@
 //! sbr on macOS lives in the menu bar: the arch, lit while the tunnel is up,
-//! and a menu to connect and disconnect, switch profiles, open the window,
-//! launch at login and quit. The menu is rebuilt only when what it shows
-//! changes. Its commands use macOS title case, as system chrome beside other
-//! apps' menus; the status line is the app's own label and stays lowercase.
+//! and a menu to connect and disconnect, switch profiles, pick each group's
+//! route, open the window, launch at login and quit. While the menu is open
+//! the tunnel is polled, so the rates and latencies in it are live; the
+//! menu is rebuilt only when what it shows changes. Its commands use macOS
+//! title case, as system chrome beside other apps' menus; the status line
+//! is the app's own label and stays lowercase.
+
+use std::collections::BTreeSet;
 
 use koan_kit::app::*;
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
 use crate::Models;
+use crate::graph::{bytes, rate};
+use crate::proto::Group;
 use crate::status_item::{Entry, StatusItem};
 use crate::swift::Uuid;
+use crate::view::failure;
 
 const ON: &[u8] = include_bytes!("../../../apple/App/App/Assets.xcassets/MenuBarOn.imageset/MenuBarOn.pdf");
 const OFF: &[u8] = include_bytes!("../../../apple/App/App/Assets.xcassets/MenuBarOff.imageset/MenuBarOff.pdf");
@@ -20,10 +27,15 @@ struct Shown {
     lit: bool,
     error: Option<String>,
     status: String,
+    /// Throughput and connections while the tunnel is up and polled.
+    live: String,
     on: bool,
     can_connect: bool,
-    profiles: Vec<(Uuid, String)>,
+    /// Each profile's id, name and where it downloads from.
+    profiles: Vec<(Uuid, String, Option<String>)>,
     active: Option<Uuid>,
+    groups: Vec<Group>,
+    testing: BTreeSet<String>,
     login: Login,
     /// The system extension waits for the user to allow it.
     needs_approval: bool,
@@ -54,7 +66,9 @@ impl Global for MenuBar {}
 
 /// Puts sbr in the menu bar, following `models` from then on.
 pub fn install(models: &Models, cx: &mut App) {
-    let Some(item) = StatusItem::install("sbr", cx) else {
+    let tunnel = models.tunnel.clone();
+    let opened = move |open: bool, cx: &mut App| tunnel.update(cx, |t, cx| t.peek(open, cx));
+    let Some(item) = StatusItem::install("sbr", opened, cx) else {
         return;
     };
     let refresh = |cx: &mut App| {
@@ -88,14 +102,47 @@ fn shown(models: &Models, cx: &App) -> Shown {
         Some(p) => format!("{state} · {}", p.name),
         None => state.to_string(),
     };
+    let on = tunnel.status.is_on();
+    // Over the last second, as the window's header reads them.
+    let recent: Vec<_> = tunnel.history.iter().rev().take(4).collect();
+    let live = match (on, recent.is_empty(), &tunnel.stats) {
+        (true, false, Some(stats)) => {
+            let mean =
+                |f: fn(&crate::tunnel::Sample) -> f64| recent.iter().map(|s| f(s)).sum::<f64>() / recent.len() as f64;
+            format!(
+                "↓ {}  ↑ {} · {} {}",
+                rate(mean(|s| s.down)),
+                rate(mean(|s| s.up)),
+                stats.active_connections,
+                if stats.active_connections == 1 {
+                    "connection"
+                } else {
+                    "connections"
+                },
+            )
+        }
+        (true, _, Some(stats)) => format!(
+            "↓ {}  ↑ {} in all",
+            bytes(stats.downlink_bytes as f64),
+            bytes(stats.uplink_bytes as f64)
+        ),
+        _ => String::new(),
+    };
     Shown {
         lit: tunnel.status == crate::ne::Status::On,
         error: tunnel.error.clone().or_else(|| vpn.error.clone()).map(|e| brief(&e)),
         status,
-        on: tunnel.status.is_on(),
+        live,
+        on,
         can_connect: profiles.active().is_some(),
-        profiles: profiles.profiles.iter().map(|p| (p.id, p.name.clone())).collect(),
+        profiles: profiles
+            .profiles
+            .iter()
+            .map(|p| (p.id, p.name.clone(), p.host()))
+            .collect(),
         active: profiles.active_id,
+        groups: if on { tunnel.groups.clone() } else { Vec::new() },
+        testing: tunnel.testing.clone(),
         login: login(),
         needs_approval: vpn.needs_approval,
     }
@@ -109,6 +156,90 @@ fn brief(message: &str) -> String {
     } else {
         line.to_string()
     }
+}
+
+fn ms(delay: Option<u32>) -> Option<String> {
+    delay.map(|d| format!("{d} ms"))
+}
+
+/// A group's line: where it sends traffic now, and a submenu of its members
+/// to choose from (a selector) or to read (a urltest, which chooses itself).
+fn group_entry(g: &Group, all: &[Group], testing: bool, models: &Models) -> Entry {
+    let selectable = g.selectable();
+    let fastest = g
+        .members
+        .iter()
+        .filter(|m| m.degraded != Some(true))
+        .filter_map(|m| m.delay)
+        .min();
+    let mut members: Vec<Entry> = g
+        .members
+        .iter()
+        .map(|m| {
+            let degraded = m.degraded == Some(true);
+            // A member that is itself a group: where it leads.
+            let inner = all
+                .iter()
+                .find(|o| o.tag == m.tag)
+                .map(|o| format!("{} → {}", m.kind, o.now));
+            let subtitle = match (degraded, m.retry_in) {
+                (true, Some(s)) => format!("{} · retry in {s}s", failure(m.reason.as_deref().unwrap_or("down"))),
+                (true, None) => failure(m.reason.as_deref().unwrap_or("down")).to_string(),
+                (false, _) => inner.unwrap_or_else(|| m.kind.clone()),
+            };
+            let picked = if selectable {
+                g.selected == m.tag
+            } else {
+                g.now == m.tag
+            };
+            let (tunnel, group, member) = (models.tunnel.clone(), g.tag.clone(), m.tag.clone());
+            let entry = Entry::action(m.tag.clone(), move |cx| {
+                let (group, member) = (group.clone(), member.clone());
+                tunnel.update(cx, |t, cx| t.select(group, member, cx));
+            })
+            .subtitle(subtitle)
+            .badge(if degraded { None } else { ms(m.delay) })
+            .checked(picked)
+            .enabled(selectable);
+            if degraded {
+                entry.symbol("exclamationmark.triangle.fill")
+            } else if m.delay.is_some() && m.delay == fastest {
+                entry.symbol("bolt.fill")
+            } else {
+                entry
+            }
+        })
+        .collect();
+    // Latency is tested on urltest groups: this one, or those it holds.
+    let testable = g.kind == "urltest" || g.members.iter().any(|m| m.kind == "urltest");
+    if testable {
+        let (tunnel, tag) = (models.tunnel.clone(), g.tag.clone());
+        members.push(Entry::Separator);
+        members.push(
+            Entry::action(if testing { "Testing Latency…" } else { "Test Latency" }, move |cx| {
+                let tag = tag.clone();
+                tunnel.update(cx, |t, cx| t.url_test(tag, cx));
+            })
+            .symbol("gauge.with.needle")
+            .enabled(!testing),
+        );
+    }
+    let route = if g.selected == g.now || !selectable {
+        g.now.clone()
+    } else {
+        format!("{} → {}", g.selected, g.now)
+    };
+    let down = g.members.iter().any(|m| m.tag == g.now && m.degraded == Some(true));
+    Entry::submenu(g.tag.clone(), members)
+        .subtitle(route)
+        .badge(ms(g.delay))
+        .symbol(if down {
+            "exclamationmark.triangle.fill"
+        } else if selectable {
+            "arrow.triangle.branch"
+        } else {
+            "bolt.horizontal"
+        })
 }
 
 impl MenuBar {
@@ -127,14 +258,17 @@ impl MenuBar {
 
         let mut entries = Vec::new();
         if let Some(error) = &shown.error {
-            entries.push(Entry::Label(format!("Error: {error}")));
+            entries.push(Entry::label(error.clone()).symbol("exclamationmark.triangle.fill"));
         }
-        entries.push(Entry::Label(shown.status.clone()));
+        entries.push(Entry::label(shown.status.clone()).subtitle(shown.live.clone()));
         if shown.needs_approval {
             let vpn = models.vpn.clone();
-            entries.push(Entry::action("Allow sbr in System Settings…", move |cx| {
-                vpn.read(cx).open_approval_settings()
-            }));
+            entries.push(
+                Entry::action("Allow sbr in System Settings…", move |cx| {
+                    vpn.read(cx).open_approval_settings()
+                })
+                .symbol("lock.shield"),
+            );
         }
         let on = shown.on;
         let tunnel = models.tunnel.clone();
@@ -142,28 +276,40 @@ impl MenuBar {
             Entry::action(if on { "Disconnect" } else { "Connect" }, move |cx| {
                 tunnel.update(cx, |t, cx| t.set_on(!on, cx));
             })
+            .symbol(if on { "stop.circle" } else { "play.circle" })
             .enabled(on || shown.can_connect),
         );
+
         if !shown.profiles.is_empty() {
-            let choices = shown
-                .profiles
-                .iter()
-                .map(|(id, name)| {
-                    let (id, profiles) = (*id, models.profiles.clone());
+            entries.push(Entry::Separator);
+            entries.push(Entry::Header("Profiles".into()));
+            for (id, name, host) in &shown.profiles {
+                let (id, profiles) = (*id, models.profiles.clone());
+                entries.push(
                     Entry::action(name.clone(), move |cx| {
                         profiles.update(cx, |p, cx| p.activate(id, cx));
                     })
-                    .checked(shown.active == Some(id))
-                })
-                .collect();
-            entries.push(Entry::Submenu {
-                title: "Profile".into(),
-                entries: choices,
-            });
+                    .subtitle(host.clone().unwrap_or_default())
+                    .checked(shown.active == Some(id)),
+                );
+            }
         }
+
+        if !shown.groups.is_empty() {
+            entries.push(Entry::Separator);
+            entries.push(Entry::Header("Routes".into()));
+            for g in &shown.groups {
+                entries.push(group_entry(g, &shown.groups, shown.testing.contains(&g.tag), models));
+            }
+        }
+
         entries.push(Entry::Separator);
         let opening = models.clone();
-        entries.push(Entry::action("Open sbr", move |cx| crate::open_window(&opening, cx)).key("o"));
+        entries.push(
+            Entry::action("Open sbr", move |cx| crate::open_window(&opening, cx))
+                .symbol("macwindow")
+                .key("o"),
+        );
         entries.push(match shown.login {
             Login::NeedsApproval => Entry::action("Launch at Login: Allow in System Settings…", |_| unsafe {
                 SMAppService::openSystemSettingsLoginItems();

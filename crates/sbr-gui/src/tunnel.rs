@@ -47,8 +47,10 @@ pub struct Tunnel {
     pub history: VecDeque<Sample>,
     /// Counts samples taken, so a graph knows when to take the next.
     pub taken: u64,
-    /// Whether a window shows the graphs: the tunnel is polled only then.
+    /// Whether a window shows the graphs: the tunnel is polled then.
     watched: bool,
+    /// Whether the menu bar's menu is open: the tunnel is polled then too.
+    peeking: bool,
     /// Groups whose latency test is running.
     pub testing: BTreeSet<String>,
     pub error: Option<String>,
@@ -71,6 +73,7 @@ impl Tunnel {
             history: VecDeque::with_capacity(KEPT),
             taken: 0,
             watched: false,
+            peeking: false,
             testing: BTreeSet::new(),
             error: None,
             manager: None,
@@ -162,11 +165,16 @@ impl Tunnel {
         let (mut statuses, observer) = m.statuses();
         self._observer = Some(observer);
         self.manager = Some(m);
+        if self.status == Status::On {
+            self.fetch_groups(cx);
+        }
         self._tasks.push(cx.spawn(async move |this, cx| {
             while let Some(status) = statuses.next().await {
                 let _ = this.update(cx, |t, cx| {
                     t.status = status;
-                    if status != Status::On {
+                    if status == Status::On {
+                        t.fetch_groups(cx);
+                    } else {
                         t.groups.clear();
                         t.stats = None;
                         t.history.clear();
@@ -198,8 +206,21 @@ impl Tunnel {
         cx.notify();
     }
 
-    /// The next poll's requests, or none while the tunnel is down or no
-    /// window shows it.
+    /// Polls the tunnel while `on`: while the menu bar's menu is open, which
+    /// shows the live rates and the groups' latencies.
+    /// Figures from when it was last open are not live: they start again.
+    pub fn peek(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on && !self.peeking && !self.watched && !self.demo {
+            self.history.clear();
+            self.stats = None;
+            self.taken += 1;
+        }
+        self.peeking = on;
+        cx.notify();
+    }
+
+    /// The next poll's requests, or none while the tunnel is down, no
+    /// window shows it and the menu bar's menu is closed.
     #[allow(clippy::type_complexity)]
     fn poll(
         &mut self,
@@ -209,7 +230,7 @@ impl Tunnel {
             let stats = crate::demo::stats(self.stats.as_ref());
             return Some(Box::pin(async move { (Some(stats), None) }));
         }
-        if self.status != Status::On || !self.watched {
+        if self.status != Status::On || !(self.watched || self.peeking) {
             return None;
         }
         let m = self.manager.clone()?;
@@ -218,6 +239,21 @@ impl Tunnel {
             let groups = m.send(&Request::Groups {}).await.ok().and_then(|r| r.groups);
             (stats, groups)
         }))
+    }
+
+    /// Asks for the groups once, so the menu has them before it first opens.
+    fn fetch_groups(&mut self, cx: &mut Context<Self>) {
+        let Some(m) = self.manager.clone() else { return };
+        cx.spawn(async move |this, cx| {
+            let groups = m.send(&Request::Groups {}).await.ok().and_then(|r| r.groups);
+            let _ = this.update(cx, |t, cx| {
+                if let Some(groups) = groups.filter(|_| t.status == Status::On) {
+                    t.groups = groups;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn set_on(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -287,6 +323,17 @@ impl Tunnel {
             }
             for _ in 0..20 {
                 cx.background_executor().timer(Duration::from_millis(300)).await;
+                // Nothing polls with the window and the menu closed, as after
+                // a test chosen from the menu: ask for the groups here.
+                let polled = this.update(cx, |t, _| t.watched || t.peeking).unwrap_or(true);
+                if let (false, Some(m)) = (polled, &manager) {
+                    let groups = m.send(&Request::Groups {}).await.ok().and_then(|r| r.groups);
+                    let _ = this.update(cx, |t, _| {
+                        if let Some(groups) = groups.filter(|_| t.status == Status::On) {
+                            t.groups = groups;
+                        }
+                    });
+                }
                 let changed = this
                     .update(cx, |t, _| {
                         if t.demo {
