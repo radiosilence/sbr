@@ -1,10 +1,12 @@
-# Advisories present in the current lockfile, acknowledged so that `cargo audit`
-# still fails on anything new. Remove an entry as soon as its cause clears: an
-# ignore that outlives its cause is worse than no gate at all.
+# Advisories present in the current lockfile, acknowledged with the reason each
+# is there. All are unmaintained warnings, which never fail `cargo audit`; the
+# entries quiet them so a new warning stands out. Remove one as soon as its
+# cause clears.
 #
 # Every one below is an unmaintained crate with no fixed release, reached only
 # through GPUI (koan's fork of Zed, pinned by koan-kit) in sbr-gui. None of them
-# is in sbr-engine, sbr-reality or anything else that parses traffic. They go
+# is built into sbr-engine (chrono reaches it through russh-util only on
+# wasm32), sbr-reality or anything else that parses traffic. They go
 # when GPUI drops or replaces them and the koan-kit pin moves past that.
 [advisories]
 ignore = [

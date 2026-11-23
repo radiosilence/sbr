@@ -113,7 +113,7 @@ jobs:
         run: |
           deps=true
           if [ "$EVENT" = pull_request ] && files=$(git diff --name-only HEAD^1 HEAD); then
-            if ! printf '%s\n' "$files" | grep -E '^Cargo\.lock$|(^|/)Cargo\.toml$|^\.cargo/|^\.github/' > /dev/null; then
+            if ! printf '%s\n' "$files" | grep -E '(^|/)Cargo\.lock$|(^|/)Cargo\.toml$|^\.cargo/|^\.github/' > /dev/null; then
               deps=false
             fi
           fi
@@ -326,9 +326,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
 
-  # Blocking, for an engine that parses hostile input. The advisories already
-  # in the lockfile are acknowledged in .cargo/audit.toml, each with why it does
-  # not reach the engine, so this fails on anything new.
+  # Blocking, for an engine that parses hostile input: any vulnerability fails
+  # it. Both lockfiles, since the fuzz targets build against their own and feed
+  # the engine hostile input too. The unmaintained crates acknowledged in
+  # .cargo/audit.toml are warnings either way; the file says why each is there.
   #
   # cargo-audit run directly: its exit code is the gate. Unsound and
   # unmaintained advisories are printed as warnings and do not fail it; a
@@ -347,6 +348,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: cargo install cargo-audit --locked --version 0.23.0
       - run: cargo audit
+      - run: cargo audit -f fuzz/Cargo.lock
 
   # The one status a ruleset needs to require.
   checks:
