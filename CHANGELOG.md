@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0
+
+### Added
+
+- **An application menu on macOS.** While the window is open, the sbr menu offers About sbr, Hide, Hide Others, Show All and Quit, with the standard shortcuts including ⌘Q, and a Window menu offers Minimize. Quitting the app leaves the tunnel as it is.
+- **Routes from the menu bar.** On macOS the menu bar menu lists each outbound group of the running profile (entry, exit and so on) with where its traffic goes, its latency and its members, so a route can be chosen or a latency test run without opening the window. Profiles are listed in the menu rather than a submenu, and while the menu is open its status line shows live throughput and connections.
+
+### Changed
+
+- **Quieter logs for Vision's QUIC refusal.** A VLESS Vision outbound refusing UDP/443 is expected, and is now logged at debug rather than as a warning on every QUIC attempt.
+
+### Tests
+
+- **The sing-box interop tests take their binaries from the environment alone.** They defaulted to a scratch path from one machine, which exists nowhere else; without `SBR_SING_BOX` (or `SBR_SINGBOX_BIN` and `SBR_SINGBOX_UTLS_BIN`) they now say they skipped.
+
+### Internal
+
+- **CI audits the dependencies.** A blocking `Security Audit` job runs `cargo audit` over the workspace and fuzz lockfiles on every push to main and on pull requests that change a manifest, a lockfile, `.cargo/` or `.github/`; `url` moves to 2.5.9 and `heapless` to 0.9.4 for the advisories against them, in both, and the unmaintained crates GPUI holds are acknowledged in `.cargo/audit.toml`.
+- **The About action builds without warnings.** An `unsafe` block objc2 does not require is removed, which failed the Apple job's lint.
+
 ## 0.4.2
 
 ### Changed
