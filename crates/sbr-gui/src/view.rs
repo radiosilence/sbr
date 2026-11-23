@@ -353,7 +353,7 @@ impl TunnelPage {
 }
 
 /// Why failover dropped a member, as the engine reports it, in words.
-fn failure(reason: &str) -> &str {
+pub fn failure(reason: &str) -> &str {
     match reason {
         "no_response" => "no response",
         "connect" => "can't connect",
