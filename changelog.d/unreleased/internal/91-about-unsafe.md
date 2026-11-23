@@ -1,0 +1,1 @@
+- **The About action builds without warnings.** An `unsafe` block objc2 does not require is removed, which failed the Apple job's lint.
