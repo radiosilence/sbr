@@ -13,7 +13,7 @@ pub fn install(cx: &mut App) {
         // AppKit's panel takes the name, version, build and icon from the bundle.
         if let Some(mtm) = MainThreadMarker::new() {
             let app = NSApplication::sharedApplication(mtm);
-            unsafe { app.orderFrontStandardAboutPanel(None) };
+            app.orderFrontStandardAboutPanel(None);
             #[allow(deprecated)]
             app.activateIgnoringOtherApps(true);
         }
