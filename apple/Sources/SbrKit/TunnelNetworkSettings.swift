@@ -122,7 +122,9 @@ extension Sbr {
         enabled: Bool,
         allowLocalNetwork: Bool = false
     ) {
-        #if !os(tvOS)
+        // iOS keeps blocking traffic while an update replaces the extension
+        // and can strand the device until it restarts.
+        #if os(macOS)
         proto.includeAllNetworks = enabled
         proto.excludeLocalNetworks = enabled && allowLocalNetwork
         #endif

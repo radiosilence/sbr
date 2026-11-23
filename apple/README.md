@@ -128,7 +128,13 @@ either way. It stays off otherwise because it breaks local traffic.
 | `excludeLocalNetworks` | off; on with "allow local network" | It exempts whatever the current network calls local. TunnelCrack's LocalNet attack declares public ranges local to take them out of the tunnel. |
 | `enforceRoutes` | on | The tunnel's routes win over more specific ones the network pushes (DHCP option 121, TunnelVision; LocalNet). |
 
-The tvOS SDK has only `enforceRoutes`, so on tvOS strict mode is that alone. Apple
+On iOS and tvOS strict mode is `enforceRoutes` and an on-demand rule that restarts a
+tunnel the system stopped, without `includeAllNetworks`. tvOS has no such property. On
+iOS, an app update stops the extension while `includeAllNetworks` keeps blocking traffic,
+and the device was left with no network until it restarted: the update could not finish
+and deleting the app did not release it (Mullvad reports the same). The cost is that
+traffic can leave outside the tunnel for the moment between the system stopping the
+tunnel and on demand restarting it. Apple
 still exempts DHCP, captive-portal probes, carrier cellular services and, by default,
 APNs (`excludeAPNs`, `excludeCellularServices`, left at their defaults), and Proton and
 IVPN report Apple-service traffic leaving regardless.
