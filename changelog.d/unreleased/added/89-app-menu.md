@@ -1,0 +1,1 @@
+- **An application menu on macOS.** While the window is open, the sbr menu offers About sbr, Hide, Hide Others, Show All and Quit, with the standard shortcuts including ⌘Q, and a Window menu offers Minimize. Quitting the app leaves the tunnel as it is.
