@@ -1,0 +1,1 @@
+- **The site's accent is red.** sbr's site uses an intense red where it took the koan app's mint.
