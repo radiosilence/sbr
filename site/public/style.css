@@ -1,6 +1,8 @@
 /*
  * kōan's design language, as the app uses it (apple/App/App/Theme.swift): one mono face, lowercase headings, square
- * corners, hairlines instead of shadows, a neutral ground and a single mint accent.
+ * corners, hairlines instead of shadows, a neutral ground and a single accent.
+ * sbr's is red where the app's is mint: #ff5252 is the most intense red over 4.5:1 on --surface, and #cc0000 is 5.3:1
+ * on the light one.
  */
 @font-face {
   font-family: "Geist Mono";
@@ -19,7 +21,7 @@
   --ink: #cccccc;
   --strong: #ffffff;
   --muted: #919191;
-  --accent: #7dd3a7;
+  --accent: #ff5252;
   --bad: #ef6b73;
 }
 
@@ -32,7 +34,7 @@
     --ink: #333333;
     --strong: #111111;
     --muted: #666666;
-    --accent: #1f7a50;
+    --accent: #cc0000;
     --bad: #c43f3f;
   }
 }
