@@ -1,0 +1,1 @@
+- **The Homebrew cask and the release notes require macOS 26.** They said macOS 15, which the app has not supported since the GPUI app in 0.3.0, so Homebrew would install it on a Mac where it cannot run. The cask takes the change at the next release.

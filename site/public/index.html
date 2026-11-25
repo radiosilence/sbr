@@ -21,25 +21,28 @@
 
 <main class="wrap">
 <h1>a proxy core in rust that runs sing-box configs</h1>
-<p class="lede">sbr reads the same configuration files as <a href="https://github.com/SagerNet/sing-box">sing-box</a> and runs them on a core written in Rust. The app for iPhone, iPad, Mac and Apple TV is native SwiftUI around that core, which runs in the system's packet tunnel extension.</p>
+<p class="lede">sbr reads the same configuration files as <a href="https://github.com/SagerNet/sing-box">sing-box</a> and runs them on a core written in Rust. Its app for iPhone, iPad, Mac and Apple TV runs that core inside the system's network extension.</p>
 
 <h2>why</h2>
 <ul class="rows">
 <li><span class="name">faster</span><div><p>On most encrypted paths measured, sbr moves more data per second than sing-box with the same config file and spends less CPU per byte: trojan over TLS is 14–23% faster on Linux, and WireGuard on Apple silicon uploads at about a third of sing-box's CPU per GB. The <a href="/benchmarks/">benchmarks</a> include the paths where sbr is slower.</p></div></li>
 <li><span class="name">lighter</span><div><p>iOS stops a packet tunnel extension that uses more than about 50 MB of memory, and Go's garbage-collected heap is why sing-box needs constant tuning to stay under it. sbr has no garbage collector, and a relayed connection costs about 32 KB by default inside the extension.</p></div></li>
-<li><span class="name">harder to block</span><div><p>Every TLS connection over TCP sends a ClientHello captured from Chrome, Safari or Firefox. Failover notices servers that complete a handshake and then stop carrying data, and a handshake reset before the server answers is retried with its ClientHello fragmented. See <a href="/features/">features</a> and <a href="/censorship/">censorship</a>.</p></div></li>
-<li><span class="name">yours</span><div><p>sbr connects only to what your profile names. Where sing-box falls back to a third-party default, such as measuring latency against gstatic.com or downloading a dashboard from GitHub, sbr does neither. The app has no account, no server of its own and no analytics; see the <a href="/privacy/">privacy policy</a>.</p></div></li>
+<li><span class="name">harder to block</span><div><p>Every TLS connection over TCP sends a ClientHello captured from Chrome, Safari or Firefox. A handshake that is reset or goes unanswered is retried with its ClientHello fragmented, and failover notices servers that complete a handshake and then stop carrying data. See <a href="/features/">features</a> and <a href="/censorship/">censorship</a>.</p></div></li>
+<li><span class="name">private</span><div><p>sbr connects only to what your profile names: where sing-box falls back to a third-party default, such as measuring latency against gstatic.com or downloading a dashboard from GitHub, sbr does neither. The app keeps profiles and their credentials in the Keychain, and has no account, no server of its own and no analytics; see the <a href="/privacy/">privacy policy</a>.</p></div></li>
 <li><span class="name">compatible</span><div><p>Profiles written for sing-box run unchanged, including remote profiles and rule-sets. A field sbr has not implemented is rejected at import with its JSON path, so a profile never routes differently without saying so.</p></div></li>
 </ul>
 
 <h2 id="get">get it</h2>
 <ul class="rows">
-<li><span class="name">iphone and ipad</span><div><p>In beta on TestFlight. An App Store release is planned.</p></div></li>
-<li><span class="name">mac and apple tv</span><div><p>Built from source with Xcode; see <a href="https://github.com/radiosilence/sbr/blob/main/apple/App/README.md">apple/App/README.md</a>.</p></div></li>
-<li><span class="name">command line</span><div><p>The <code>sbr</code> binary takes sing-box's flags, on macOS and Linux.</p>
-<pre>cargo build --release -p sbr
-sbr check -c config.json
-sbr run -c config.json</pre></div></li>
+<li><span class="name">iphone, ipad and apple tv</span><div><p>In beta on <a href="https://testflight.apple.com/join/mubsuUwB">TestFlight</a>, where one invitation covers both iOS and tvOS. iOS 26 or tvOS 17 or later. An App Store release is planned.</p></div></li>
+<li><span class="name">mac</span><div><p>A notarised app, from Homebrew or as a disk image from the <a href="https://github.com/radiosilence/sbr/releases/latest">latest release</a>. macOS 26 or later. On first connect, allow its network extension under System Settings › General › Login Items &amp; Extensions.</p>
+<pre>brew install --cask radiosilence/tap/sbr</pre></div></li>
+<li><span class="name">command line</span><div><p>The <code>sbr</code> binary takes sing-box's flags, on macOS and Linux. It is built from source with Rust's toolchain.</p>
+<pre>git clone https://github.com/radiosilence/sbr
+cd sbr
+cargo build --release -p sbr
+target/release/sbr check -c config.json
+target/release/sbr run -c config.json</pre></div></li>
 </ul>
 <p>Source, issues and documentation are on <a href="https://github.com/radiosilence/sbr">GitHub</a>.</p>
 </main>

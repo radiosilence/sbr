@@ -30,10 +30,10 @@
 
 <h2>what sbr does</h2>
 <ul class="rows">
-<li><span class="name">server-name filtering</span><div><p>A handshake reset before the server answers is retried with the ClientHello split across TLS records and then TCP segments, cutting inside every label of the name. For QUIC, the name's halves travel in separate Initial packets.</p></div></li>
+<li><span class="name">server-name filtering</span><div><p>A handshake reset before the server answers, or left unanswered for 6 s, is retried with the ClientHello split across TLS records and then TCP segments, cutting inside every label of the name. <code>fragment_split</code> varies the split on every connection, so a censor cannot learn one pattern. For QUIC, the name's halves travel in separate Initial packets. Where a server publishes an ECH config, the name can be encrypted instead.</p></div></li>
 <li><span class="name">tls fingerprinting</span><div><p>TLS over TCP sends a ClientHello captured from Chrome, Safari or Firefox, including REALITY's, which carries the X25519MLKEM768 share current servers require.</p></div></li>
-<li><span class="name">blocking after the handshake</span><div><p>Servers that complete a handshake and then stop carrying data are detected by a data probe and in live traffic, and failover moves to another server without waiting for the next probe interval.</p></div></li>
-<li><span class="name">dns poisoning</span><div><p>DNS servers in a profile can be routed through the tunnel, and a query fails over to the next server when one stops answering.</p></div></li>
+<li><span class="name">blocking after the handshake</span><div><p>Servers that complete a handshake and then stop carrying data are detected by a data probe and in live traffic, and failover moves to another server without waiting for the next probe interval. A connect that fails is retried once through the next server.</p></div></li>
+<li><span class="name">dns poisoning</span><div><p>DNS servers in a profile can be routed through the tunnel, and a query fails over to the next server when one stops answering. The app warns when a profile's DNS server would resolve outside the tunnel.</p></div></li>
 <li><span class="name">probe patterns</span><div><p>Latency probes to members that share a server are spaced apart and their period varies, so the client does not open several handshakes to one address at once on a fixed clock.</p></div></li>
 </ul>
 <p>None of this has been measured from inside China; the china document says what has been tested and how.</p>
