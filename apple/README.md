@@ -354,6 +354,46 @@ UTC time as `YYYYMMDDHHMM`, because App Store Connect accepts only rising build
 numbers within a version. The export runs with the system `PATH`, since
 Homebrew's `rsync` breaks its copy step.
 
+## App Store
+
+```sh
+APPLE_API_KEY_PATH=AuthKey.p8 APPLE_API_KEY_ID=... APPLE_API_ISSUER_ID=... \
+  just app-store [--platform ios|tvos] [--version X.Y.Z] [--submit] [iphone=DIR ipad=DIR | tv=DIR]
+```
+
+Only iOS and tvOS are listed; the Mac app ships as a Developer ID disk image.
+Apple accepts VPN apps only from developer accounts enrolled as an
+organisation (guideline 5.4).
+
+`store/listing.toml` is the listing: name, subtitle, category, description,
+keywords and the App Review notes, with a `[tv]` table for what differs on the
+Apple TV. `store/push.py` writes it through the App Store Connect API to the
+platform's version in preparation (creating one if there is none), attaches
+the newest processed build of the version (the workspace version unless
+`--version` is given), and with `--submit` sends it to App Review. A
+submission still waiting for review is cancelled first so the version can be
+edited and submitted again; one App Review answered is resubmitted with its
+items marked resolved. Keeping the listing in the repository lets it be
+reviewed and changed with the code it describes.
+
+App Review needs a profile to connect with, since sbr provides no server. Its
+link carries a server's credentials, so it is not committed: push.py appends
+`APPLE_REVIEW_PROFILE_URL` to the review notes, and `--submit` refuses to run
+without it. `APPLE_REVIEW_PHONE` gives App Review's contact number the same
+way.
+
+Screenshots are taken on a Mac and passed as directories, one per display
+type; `just app-store-shots SRC OUT` frames them with the captions in
+`store/captions.toml` (`captions-tv` for the Apple TV), whose keys name the
+files to capture. `--screenshots` uses `store/screenshots/{iphone,ipad,tv}`
+once they are committed there. `--attachment FILE` replaces the App Review
+attachment, such as a screen recording.
+
+`.github/workflows/store.yml` runs push.py by hand for iOS, tvOS or both, once a
+release's TestFlight builds have processed. It uses the `APPLE_API_*` secrets
+below, and `APPLE_REVIEW_PHONE` and `APPLE_REVIEW_PROFILE_URL` when they are set.
+Submitting is never started by a merge.
+
 ## CI
 
 `.github/workflows/ci-cd.yml` runs on every push and pull request to `main`:
@@ -392,6 +432,8 @@ These jobs use these repository secrets, the same names kōan uses:
 | `IOS_CERTIFICATE_PASSWORD` | its password |
 | `MACOS_CERTIFICATE_P12` | base64 of the Developer ID Application certificate (`.p12`) |
 | `MACOS_CERTIFICATE_PASSWORD` | its password |
+| `APPLE_REVIEW_PHONE` | App Review's contact number, in international format (optional; `store.yml`) |
+| `APPLE_REVIEW_PROFILE_URL` | the demonstration profile App Review connects with (`store.yml`; needed to submit) |
 | `RELEASE_TOKEN` | a token with `contents: write` on this repository and radiosilence/homebrew-tap, which creates the release and its tag and updates the cask |
 
 Without the key or the certificate, the TestFlight job is skipped. The macOS
