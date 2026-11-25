@@ -1,0 +1,1 @@
+- **The command line installs with Homebrew.** `brew install radiosilence/tap/sbr` installs the `sbr` binary on macOS (Apple silicon) and on Linux (x86_64 and arm64, glibc 2.35 or later); each release also carries the binaries as tarballs. The formula sits beside the Mac app's cask, which installs with `--cask`.

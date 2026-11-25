@@ -8,10 +8,12 @@ name: CI/CD
 # release push `Release (macOS)`'s. A
 # push that changes the workspace version to one not yet released (a merged
 # `just release` pull request) also releases: the Developer ID macOS disk
-# image and the GitHub release, whose tag CI creates. The Mac app's release
-# build is the longest job and publishes nothing, so it starts alongside the
-# checks rather than after them; the release waits for both. Apple's notary
-# comes last, after the release is out, so its queue holds up nothing.
+# image, the command-line binaries and the GitHub release, whose tag CI
+# creates, then the Homebrew formula for the command line. The Mac app's
+# release build is the longest job and publishes nothing, so it starts
+# alongside the checks rather than after them; the release waits for both.
+# Apple's notary comes last, after the release is out, so its queue holds up
+# nothing.
 on:
   push:
     branches: [main]
@@ -53,7 +55,7 @@ jobs:
   # that version has no GitHub release yet. Answered first, so the release
   # build can start alongside the checks, and a release that would fail late
   # fails before any macOS runner starts. Also whether the dependencies are
-  # audited (`deps`).
+  # audited and the Linux command line built (`deps`).
   changes:
     name: Changes
     runs-on: ubuntu-latest
@@ -101,12 +103,14 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "release=$release" >> "$GITHUB_OUTPUT"
           echo "v$version: release=$release"
-      # A pull request audits when it changes what is in the lockfile or how
-      # cargo resolves it; its diff is against its base, the merge commit's
-      # first parent. Main and a manual run audit every time, since a new
-      # advisory can land on any day without a change here. A diff that cannot
-      # be worked out audits. Steps run under `bash -eo pipefail`, so the grep
-      # is asked in a condition rather than left to fail the step.
+      # A pull request audits, and builds the Linux command line, when it
+      # changes what is in the lockfile or how cargo resolves or builds it;
+      # its diff is against its base, the merge commit's first parent. Main
+      # and a manual run do both every time: a new advisory can land on any
+      # day without a change here, and main's build keeps the cache a release
+      # builds from warm. A diff that cannot be worked out does both. Steps
+      # run under `bash -eo pipefail`, so the grep is asked in a condition
+      # rather than left to fail the step.
       - id: deps
         env:
           EVENT: ${{ github.event_name }}
@@ -350,12 +354,56 @@ jobs:
       - run: cargo audit
       - run: cargo audit -f fuzz/Cargo.lock
 
+  # The Linux command-line binaries a release attaches and the Homebrew
+  # formula installs, built once, each on its own architecture. glibc rather
+  # than musl, whose ioctl takes the request as a c_int where sbr-tun passes a
+  # c_ulong. On the oldest runners, since a binary needs at least the glibc it
+  # was built with: 2.35, Ubuntu 22.04 and Debian 12 or later. The binary is
+  # run from its tarball, so one that would not start fails here.
+  cli:
+    name: CLI (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    needs: changes
+    if: needs.changes.outputs.deps == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-22.04
+          - name: linux-arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: cli-${{ matrix.name }}
+      # Tarred, because an artifact does not keep the executable bit; the
+      # tarball is the release's download as it stands.
+      - run: |
+          cargo build --release --locked -p sbr
+          tar czf "sbr-${{ matrix.name }}.tar.gz" -C target/release sbr
+          mkdir "$RUNNER_TEMP/unpacked"
+          tar xzf "sbr-${{ matrix.name }}.tar.gz" -C "$RUNNER_TEMP/unpacked"
+          "$RUNNER_TEMP/unpacked/sbr" version
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbr-cli-${{ matrix.name }}
+          path: sbr-${{ matrix.name }}.tar.gz
+          if-no-files-found: error
+          retention-days: ${{ needs.changes.outputs.release == 'true' && 90 || 7 }}
+
   # The one status a ruleset needs to require.
   checks:
     name: Checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [changes, actionlint, fmt, linux, apple, changelog, audit]
+    needs: [changes, actionlint, fmt, linux, apple, changelog, audit, cli]
     if: always()
     steps:
       - env:
@@ -446,12 +494,45 @@ jobs:
           rm -f "$RUNNER_TEMP/AuthKey.p8"
           security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
 
+  # The macOS command-line binary, for a release only and on a runner of its
+  # own beside `Release (macOS)`, so neither waits on the other. Signed ad hoc
+  # by the linker: Homebrew downloads it without the quarantine attribute, so
+  # Gatekeeper does not assess it. The `Apple` job already checks that the
+  # crate builds on macOS.
+  cli-macos:
+    name: CLI (macos-arm64)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    needs: [changes, make-room]
+    if: ${{ !cancelled() && needs.make-room.result == 'success' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: cli-macos-arm64
+      - run: |
+          cargo build --release --locked -p sbr --target aarch64-apple-darwin
+          tar czf sbr-macos-arm64.tar.gz -C target/aarch64-apple-darwin/release sbr
+          mkdir "$RUNNER_TEMP/unpacked"
+          tar xzf sbr-macos-arm64.tar.gz -C "$RUNNER_TEMP/unpacked"
+          "$RUNNER_TEMP/unpacked/sbr" version
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbr-cli-macos-arm64
+          path: sbr-macos-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 90
+
   publish-release:
     name: Publish GitHub release
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [changes, checks, macos-release]
-    if: ${{ !cancelled() && needs.changes.outputs.release == 'true' && needs.checks.result == 'success' && needs.macos-release.result == 'success' }}
+    needs: [changes, checks, macos-release, cli, cli-macos]
+    if: ${{ !cancelled() && needs.changes.outputs.release == 'true' && needs.checks.result == 'success' && needs.macos-release.result == 'success' && needs.cli.result == 'success' && needs.cli-macos.result == 'success' }}
     env:
       VERSION: ${{ needs.changes.outputs.version }}
     steps:
@@ -459,6 +540,11 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: sbr-macos
+          path: artifacts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: sbr-cli-*
+          merge-multiple: true
           path: artifacts
       # Release writes go through RELEASE_TOKEN: GitHub refuses the workflow
       # token's tag creation for a commit that changes a workflow ("refusing to
@@ -481,6 +567,10 @@ jobs:
           Open sbr-$VERSION.dmg and drag sbr to Applications. On first connect,
           allow its network extension under System Settings › General › Login
           Items & Extensions. macOS 15 or later.
+
+          The command line installs with \`brew install radiosilence/tap/sbr\`
+          on macOS (Apple silicon) and Linux; the sbr-*.tar.gz files hold the
+          same binary.
           $section
           NOTES
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
@@ -494,8 +584,88 @@ jobs:
           name: v${{ needs.changes.outputs.version }}
           body_path: ${{ runner.temp }}/notes.md
           draft: false
-          files: artifacts/sbr-${{ needs.changes.outputs.version }}.dmg
+          files: |
+            artifacts/sbr-${{ needs.changes.outputs.version }}.dmg
+            artifacts/sbr-*.tar.gz
           fail_on_unmatched_files: true
+
+  # The command line's Homebrew formula (radiosilence/homebrew-tap), once the
+  # release holds its tarballs, so the formula never names a download that
+  # does not exist. Beside `notarise` rather than after it: nothing in the
+  # formula waits on Apple's notary. A re-run writes the same formula and
+  # pushes nothing.
+  formula:
+    name: Homebrew formula
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [changes, publish-release]
+    if: ${{ !cancelled() && needs.publish-release.result == 'success' }}
+    env:
+      VERSION: ${{ needs.changes.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: sbr-cli-*
+          merge-multiple: true
+          path: artifacts
+      - name: Update the Homebrew formula
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GITHUB_TOKEN" ]; then
+            echo "::error::RELEASE_TOKEN is not set; the Homebrew formula cannot be updated"
+            exit 1
+          fi
+          mac_arm=$(sha256sum artifacts/sbr-macos-arm64.tar.gz | awk '{print $1}')
+          linux_arm=$(sha256sum artifacts/sbr-linux-arm64.tar.gz | awk '{print $1}')
+          linux_x86=$(sha256sum artifacts/sbr-linux-x86_64.tar.gz | awk '{print $1}')
+          base="https://github.com/radiosilence/sbr/releases/download/v${VERSION}"
+          git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/radiosilence/homebrew-tap.git" "$RUNNER_TEMP/tap"
+          cd "$RUNNER_TEMP/tap"
+          mkdir -p Formula
+          cat > Formula/sbr.rb <<FORMULA
+          class Sbr < Formula
+            desc "Proxy compatible with sing-box configurations"
+            homepage "https://sbr.blit.cc"
+            version "${VERSION}"
+            license any_of: ["MIT", "Apache-2.0"]
+
+            on_macos do
+              depends_on arch: :arm64
+              on_arm do
+                url "${base}/sbr-macos-arm64.tar.gz"
+                sha256 "${mac_arm}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "${base}/sbr-linux-arm64.tar.gz"
+                sha256 "${linux_arm}"
+              end
+              on_intel do
+                url "${base}/sbr-linux-x86_64.tar.gz"
+                sha256 "${linux_x86}"
+              end
+            end
+
+            def install
+              bin.install "sbr"
+            end
+
+            test do
+              assert_match "sbr version #{version}", shell_output("#{bin}/sbr version")
+            end
+          end
+          FORMULA
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/sbr.rb
+          git diff --cached --quiet && exit 0
+          git commit -m "Update sbr formula to v${VERSION}"
+          # The cask is pushed by `notarise`, which may land first.
+          git push || { git pull --rebase && git push; }
 
   # Apple's notary, apart from the release: everything else is out by the time
   # this starts, and its queue can take hours. It notarises and staples the

@@ -36,10 +36,11 @@
 <ul class="rows">
 <li><span class="name">iphone and ipad</span><div><p>In beta on TestFlight. An App Store release is planned.</p></div></li>
 <li><span class="name">mac and apple tv</span><div><p>Built from source with Xcode; see <a href="https://github.com/radiosilence/sbr/blob/main/apple/App/README.md">apple/App/README.md</a>.</p></div></li>
-<li><span class="name">command line</span><div><p>The <code>sbr</code> binary takes sing-box's flags, on macOS and Linux.</p>
-<pre>cargo build --release -p sbr
+<li><span class="name">command line</span><div><p>The <code>sbr</code> binary takes sing-box's flags, on macOS (Apple silicon) and Linux.</p>
+<pre>brew install radiosilence/tap/sbr
 sbr check -c config.json
-sbr run -c config.json</pre></div></li>
+sbr run -c config.json</pre>
+<p>To build it from source instead: <code>cargo build --release -p sbr</code>.</p></div></li>
 </ul>
 <p>Source, issues and documentation are on <a href="https://github.com/radiosilence/sbr">GitHub</a>.</p>
 </main>
