@@ -1,0 +1,1 @@
+- **TestFlight builds reach the public beta.** Every upload is added to the "open beta" group and submitted for beta review; uploads had been reaching internal testers only since October.

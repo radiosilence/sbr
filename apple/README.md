@@ -354,6 +354,14 @@ UTC time as `YYYYMMDDHHMM`, because App Store Connect accepts only rising build
 numbers within a version. The export runs with the system `PATH`, since
 Homebrew's `rsync` breaks its copy step.
 
+An upload reaches internal testers only. `tools/open-beta.py <build>` waits
+for App Store Connect to process that build number, sets its "What to Test"
+text (the last commit's subject unless given), adds it to the "open beta"
+group, whose public link is how external testers join, and submits it for
+beta review. CI runs it after every upload; after a manual upload, run it by
+hand. The first build of each version waits for Apple's review, usually under
+a day; later builds of the same version are normally approved at once.
+
 ## CI
 
 `.github/workflows/ci-cd.yml` runs on every push and pull request to `main`:
