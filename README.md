@@ -272,6 +272,14 @@ Vision skips sing-box's 5 ms sleep before the first raw write; rustls is fed one
 
 `shadowsocks` 1.25 `ProxyClientStream` assumes the first write (address header + payload) fits in one AEAD chunk. A larger first write is reported as fully written while only part of it is sent: a `debug_assert!` in debug builds, silent data loss in release builds. `FirstWriteCap` in `outbound/shadowsocks.rs` caps the first write. This should be reported upstream.
 
+## Installing the command line
+
+```sh
+brew install radiosilence/tap/sbr
+```
+
+installs the `sbr` binary on macOS (Apple silicon) and Linux (x86_64 and arm64, glibc 2.35 or later). Each [release](https://github.com/radiosilence/sbr/releases/latest) also carries the binaries as tarballs. To build from source instead: `cargo build --release -p sbr`.
+
 ## Installing the Mac app
 
 ```sh
@@ -288,7 +296,7 @@ Every push and pull request to `main` runs `cargo fmt`, clippy and the tests on 
 
 A change records itself as a fragment under `changelog.d/unreleased/` (see [`changelog.d/README.md`](changelog.d/README.md)), not in `CHANGELOG.md`, so open pull requests never conflict over it. `just release patch|minor|major|X.Y.Z` opens the release pull request: it bumps the workspace version and the Apple apps' `MARKETING_VERSION` together, and turns the fragments into that version's changelog section.
 
-Merging it is what releases: CI sees the push change the version to one with no GitHub release yet, builds and signs the Developer ID macOS disk image while the checks run, and once both have passed publishes the release with that image, creating the `vX.Y.Z` tag. Nothing else creates tags. Notarisation comes after the release is out, so Apple's queue holds nothing up: the `Notarise` job notarises the image, staples the app inside it and remakes the image around it (macOS will not activate the system extension of an app with no ticket of its own once Gatekeeper has passed it, as with one put back from the Bin), notarises and staples that image, replaces the release's copy, and then points the Homebrew cask at it. TestFlight likewise runs on its own and nothing waits on it. A failed release is retried by re-running the failed jobs (a re-run of a failed notarisation takes up the submission already made), or by running CI/CD by hand on `main`, which releases the workspace version if it is not out yet. It needs the `RELEASE_TOKEN` secret, a token with `contents: write` on this repository and on [radiosilence/homebrew-tap](https://github.com/radiosilence/homebrew-tap), the tap holding the cask, because GitHub does not let the workflow token create a tag on a commit that changes a workflow.
+Merging it is what releases: CI sees the push change the version to one with no GitHub release yet, builds and signs the Developer ID macOS disk image and builds the command-line binaries while the checks run, and once all have passed publishes the release with them, creating the `vX.Y.Z` tag, then points the Homebrew formula at the binaries. Nothing else creates tags. Notarisation comes after the release is out, so Apple's queue holds nothing up: the `Notarise` job notarises the image, staples the app inside it and remakes the image around it (macOS will not activate the system extension of an app with no ticket of its own once Gatekeeper has passed it, as with one put back from the Bin), notarises and staples that image, replaces the release's copy, and then points the Homebrew cask at it. TestFlight likewise runs on its own and nothing waits on it. A failed release is retried by re-running the failed jobs (a re-run of a failed notarisation takes up the submission already made), or by running CI/CD by hand on `main`, which releases the workspace version if it is not out yet. It needs the `RELEASE_TOKEN` secret, a token with `contents: write` on this repository and on [radiosilence/homebrew-tap](https://github.com/radiosilence/homebrew-tap), the tap holding the cask and the formula, because GitHub does not let the workflow token create a tag on a commit that changes a workflow.
 
 ## Website
 

@@ -37,12 +37,11 @@
 <li><span class="name">iphone, ipad and apple tv</span><div><p>In beta on <a href="https://testflight.apple.com/join/mubsuUwB">TestFlight</a>, where one invitation covers both iOS and tvOS. iOS 26 or tvOS 17 or later. An App Store release is planned.</p></div></li>
 <li><span class="name">mac</span><div><p>A notarised app, from Homebrew or as a disk image from the <a href="https://github.com/radiosilence/sbr/releases/latest">latest release</a>. macOS 26 or later. On first connect, allow its network extension under System Settings › General › Login Items &amp; Extensions.</p>
 <pre>brew install --cask radiosilence/tap/sbr</pre></div></li>
-<li><span class="name">command line</span><div><p>The <code>sbr</code> binary takes sing-box's flags, on macOS and Linux. It is built from source with Rust's toolchain.</p>
-<pre>git clone https://github.com/radiosilence/sbr
-cd sbr
-cargo build --release -p sbr
-target/release/sbr check -c config.json
-target/release/sbr run -c config.json</pre></div></li>
+<li><span class="name">command line</span><div><p>The <code>sbr</code> binary takes sing-box's flags, on macOS (Apple silicon) and Linux (x86_64 and arm64, glibc 2.35 or later).</p>
+<pre>brew install radiosilence/tap/sbr
+sbr check -c config.json
+sbr run -c config.json</pre>
+<p>To build it from source instead, clone the repository and run <code>cargo build --release -p sbr</code>.</p></div></li>
 </ul>
 <p>Source, issues and documentation are on <a href="https://github.com/radiosilence/sbr">GitHub</a>.</p>
 </main>
