@@ -1,0 +1,8 @@
+# App Store screenshot captions, in the order the screenshots appear. Keys are
+# the captured screens' file names (01-tunnel.png and so on); `just
+# app-store-shots` frames them. The same captions serve iPhone and iPad.
+"01-tunnel" = "Your own servers, one tap away"
+"02-groups" = "Every group and its latency"
+"03-connections" = "See where each connection goes"
+"04-profiles" = "Profiles from sing-box, unchanged"
+"05-diagnose" = "Test the tunnel end to end"

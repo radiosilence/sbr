@@ -1,0 +1,1 @@
+- **App Store submission.** `apple/store/push.py` pushes the iOS and tvOS listing, attaches the version's newest processed build and, with `--submit`, sends it to App Review; the `store.yml` workflow runs it by hand, and `just app-store-shots` frames screenshots.

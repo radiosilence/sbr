@@ -566,7 +566,7 @@ jobs:
 
           Open sbr-$VERSION.dmg and drag sbr to Applications. On first connect,
           allow its network extension under System Settings › General › Login
-          Items & Extensions. macOS 15 or later.
+          Items & Extensions. macOS 26 or later.
 
           The command line installs with \`brew install radiosilence/tap/sbr\`
           on macOS (Apple silicon) and Linux; the sbr-*.tar.gz files hold the
@@ -734,7 +734,7 @@ jobs:
             desc "Proxy client compatible with sing-box configurations"
             homepage "https://sbr.blit.cc"
 
-            depends_on macos: :sequoia
+            depends_on macos: :tahoe
 
             app "sbr.app"
 

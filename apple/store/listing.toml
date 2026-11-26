@@ -1,0 +1,170 @@
+# The App Store listing for the iOS and tvOS apps, pushed by `just app-store`
+# and promoted to App Review by the `store.yml` workflow. `[tv]` overrides the
+# fields that differ on the Apple TV; everything else is shared. The Mac app is
+# not listed: it ships as a Developer ID disk image.
+#
+# Apple's limits are in the comments. Other products' names stay out of the
+# keywords (guideline 2.3.7). The demonstration profile App Review connects
+# with is not kept here: push.py appends it from APPLE_REVIEW_PROFILE_URL.
+
+locale = "en-GB"
+
+[app]
+name = "sbr"                                 # 30
+subtitle = "Proxy client for your servers"   # 30
+primary_category = "UTILITIES"
+privacy_policy_url = "https://sbr.blit.cc/privacy/"
+
+[version]
+copyright = "2026 RADIOSILENCE HEAVY INDUSTRIES LTD"
+support_url = "https://github.com/radiosilence/sbr/issues"
+marketing_url = "https://sbr.blit.cc"
+
+# 100, comma-separated, no spaces needed after commas.
+keywords = "proxy,vpn,vless,reality,hysteria2,trojan,shadowsocks,tuic,tunnel,self-hosted,censorship,rules"
+
+# 170. Can be changed without a new version.
+promotional_text = """
+Runs the proxy profiles you already have, on a core written in Rust that stays well inside iOS's memory limit for a \
+VPN.\
+"""
+
+# 4000.
+description = """
+sbr connects your iPhone or iPad to proxy servers you run or have been given access to. It reads the same \
+configuration files as sing-box, so an existing profile works without changes. sbr does not provide a server or a \
+proxy service: you need a profile for your own.
+
+PROFILES
+Add a profile from a link, a QR code, a file, or a sing-box remote profile URL. Remote profiles refresh when the app \
+opens and from the tunnel itself. Every profile is checked when it is imported, and a setting sbr does not support \
+is reported with its location in the file rather than ignored, so a profile never routes traffic differently \
+without saying so.
+
+PROTOCOLS
+VLESS with Vision and REALITY, Hysteria 2, TUIC, Trojan, VMess, Shadowsocks (including 2022), AnyTLS, ShadowTLS, SSH \
+and WireGuard, with the WebSocket, gRPC, HTTP and XHTTP transports. Routing rules and rule-sets follow sing-box's \
+semantics.
+
+ROUTING YOU CAN SEE
+The groups in your profile, what each resolves to and its latency, with a test button. Live connections show their \
+destination, the rule that matched and the route they took. Long-press a connection to send its site through a \
+chosen server from then on.
+
+RELIABLE ON DIFFICULT NETWORKS
+Failover notices a server that completes a handshake and then stops carrying data, and moves to another. A TLS \
+handshake that is reset before the server answers is retried with the request split up. DNS falls over to the \
+profile's next resolver when one stops answering.
+
+LIGHT
+The core is written in Rust and runs in the system's packet tunnel extension, using a few tens of kilobytes per \
+connection, with its own TCP stack for the tunnel.
+
+AUTOMATIC
+Auto-connect on every network except the Wi-Fi networks you trust, Shortcuts actions to connect, disconnect and \
+choose a server, and a Control Center toggle.
+
+PRIVATE
+sbr has no account, no analytics, no advertising and no server of its own. It connects only to the addresses your \
+profile names. The diagnose checks, which run only when you start them, also contact Google and Cloudflare test \
+addresses to measure the tunnel.
+
+sbr is open source under the MIT and Apache 2.0 licences.\
+"""
+
+[review]
+first_name = "James"
+last_name = "Cleveland"
+email = "jc@blit.cc"
+# The phone number App Review requires is not kept here: push.py reads it from
+# APPLE_REVIEW_PHONE, in international format.
+notes = """
+sbr is a VPN client for proxy servers the user runs or has been given access to. It reads the same configuration \
+files as sing-box, the open-source proxy platform, and its core is the open-source sbr project \
+(https://github.com/radiosilence/sbr). It provides no servers and no proxy service of its own, has no account, no \
+in-app purchases and no user-generated content, and works the same in every region.
+
+A user needs a profile describing their own server. For review, the developer supplies a demonstration profile for \
+a server operated for that purpose; its link is at the end of these notes.
+
+To review it:
+
+1. Open the profiles tab at the bottom of the screen.
+2. Paste the demonstration profile's link into the field under "add" and tap add. (The link can also be opened from \
+Safari, scanned as a QR code with "scan qr", or imported as a file with "file".)
+3. Open the tunnel tab and tap connect. iOS asks once to allow sbr to add a VPN configuration; allow it.
+4. The tunnel tab shows the selected server and its latency. Browse the web: the connections tab lists each \
+connection with its destination and route. The logs tab has a diagnose button that tests DNS and downloads through \
+the tunnel.
+
+VPN (guideline 5.4): sbr uses the NEVPNManager API through a packet tunnel extension. It collects, sells and \
+shares no user data; traffic goes only to the servers the user's profile names.
+
+Permissions: the camera is used only while scanning a profile's QR code. The Wi-Fi network's name is read so the \
+user can mark it as trusted for auto-connect. Local network access is used to send a profile to sbr on an Apple TV \
+on the same network.
+
+External services: the servers, DNS resolvers and rule-set URLs named in the user's profile. The diagnose checks, run \
+only when the user starts them, fetch https://www.gstatic.com/generate_204, https://www.google.com/ and test files \
+from https://speed.cloudflare.com. No analytics, advertising, payments or AI services.\
+"""
+
+[tv.version]
+description = """
+sbr connects your Apple TV to proxy servers you run or have been given access to. It reads the same configuration \
+files as sing-box, so an existing profile works without changes. sbr does not provide a server or a proxy service: \
+you need a profile for your own.
+
+ADD A PROFILE FROM YOUR PHONE
+With sbr on an iPhone on the same network, scan the code the TV shows and send it a profile. The connection between \
+them is encrypted with a key only the TV's screen shows. A profile link can be entered with the remote instead.
+
+PROTOCOLS
+VLESS with Vision and REALITY, Hysteria 2, TUIC, Trojan, VMess, Shadowsocks (including 2022), AnyTLS, ShadowTLS, SSH \
+and WireGuard, with the WebSocket, gRPC, HTTP and XHTTP transports. Routing rules and rule-sets follow sing-box's \
+semantics.
+
+ROUTING YOU CAN SEE
+The groups in your profile, what each resolves to and its latency, and each live connection with its destination and \
+route.
+
+RELIABLE ON DIFFICULT NETWORKS
+Failover notices a server that completes a handshake and then stops carrying data, and moves to another. DNS falls \
+over to the profile's next resolver when one stops answering.
+
+PRIVATE
+sbr has no account, no analytics, no advertising and no server of its own. It connects only to the addresses your \
+profile names.
+
+sbr is open source under the MIT and Apache 2.0 licences.\
+"""
+
+[tv.review]
+notes = """
+sbr is a VPN client for proxy servers the user runs or has been given access to. This is its Apple TV app; the same \
+app runs on iPhone and iPad. It reads the same configuration files as sing-box, the open-source proxy platform, and \
+its core is the open-source sbr project (https://github.com/radiosilence/sbr). It provides no servers and no proxy \
+service of its own, has no account, no in-app purchases and no user-generated content, and works the same in every \
+region.
+
+A user needs a profile describing their own server. For review, the developer supplies a demonstration profile for \
+a server operated for that purpose; its link is at the end of these notes.
+
+To review it:
+
+1. Open the profiles tab at the bottom of the screen.
+2. Enter the demonstration profile's link in the field under "add" and select add. (With sbr on an iPhone on the \
+same network, the code shown under "add" can be scanned with the phone to send the profile instead.)
+3. Open the tunnel tab and select connect. tvOS asks once to allow sbr to add a VPN configuration; allow it.
+4. The tunnel tab shows the selected server and its latency; the connections tab lists live connections with their \
+destination and route.
+
+VPN (guideline 5.4): sbr uses the NEVPNManager API through a packet tunnel extension. It collects, sells and \
+shares no user data; traffic goes only to the servers the user's profile names.
+
+Permissions: local network access is used to receive a profile from sbr on an iPhone on the same network, over a \
+connection encrypted with a key shown only on the TV's screen.
+
+External services: the servers, DNS resolvers and rule-set URLs named in the user's profile. No analytics, \
+advertising, payments or AI services.\
+"""

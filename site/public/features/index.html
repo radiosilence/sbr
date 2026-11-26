@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>features · sbr</title>
-<meta name="description" content="What sbr supports: sing-box configs, the proxy protocols, browser TLS fingerprints, failover, fragmentation, DNS, the TUN stack and the app.">
+<meta name="description" content="What sbr supports: sing-box configs, the proxy protocols, browser TLS fingerprints, ECH, failover, fragmentation, DNS, the TUN stack and the app.">
 <meta name="referrer" content="no-referrer">
 <meta name="theme-color" content="#1e1e1e" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
@@ -25,7 +25,7 @@
 
 <h2>configuration</h2>
 <p>sbr takes a sing-box JSON config as it is, with sing-box's flags: <code>sbr run -c config.json</code>, <code>sbr check</code>, and the <code>rule-set compile</code>, <code>decompile</code>, <code>match</code> and <code>format</code> subcommands. Routing follows sing-box's rule semantics, and binary rule-sets (<code>.srs</code> v1–5) are read and written in sing-box's format.</p>
-<p>The parser is as strict as sing-box's: an unknown field is an error reported with its JSON path. A field sing-box accepts and sbr has not implemented is also an error, unless it cannot change where traffic goes, in which case it is a warning. The app runs every profile through this parser when it is imported.</p>
+<p>The parser is as strict as sing-box's: an unknown field is an error reported with its JSON path. A field sing-box accepts and sbr has not implemented is also an error, unless it cannot change where traffic goes, in which case it is a warning. The app runs every profile through this parser when it is imported, and lists the active profile's warnings, including DNS servers that would resolve outside the tunnel.</p>
 
 <h2>protocols</h2>
 <ul class="rows">
@@ -35,12 +35,13 @@
 <li><span class="name">vmess</span><div><p>AEAD.</p></div></li>
 <li><span class="name">shadowsocks</span><div><p>AEAD and 2022 ciphers, TCP and UDP, UDP over TCP v1 and v2.</p></div></li>
 <li><span class="name">tuic</span><div><p>Version 5, every UDP relay mode, 0-RTT.</p></div></li>
-<li><span class="name">wireguard</span><div><p>A userspace endpoint used as an outbound.</p></div></li>
+<li><span class="name">wireguard</span><div><p>A userspace endpoint used as an outbound. Its TCP runs on sbr's own TCP stack, whose buffers hold memory only for data in flight or unread, and recovers loss inside the tunnel with SACK.</p></div></li>
+<li><span class="name">ssh</span><div><p>One SSH connection per outbound carries a channel per stream, with pinned host keys and OpenSSH 9.9's banner and algorithm order, so the banner and the key exchange agree. It sends no keepalives, so an idle connection costs no wakeups. Keys are ed25519 or ECDSA; RSA is refused because the available implementation is not constant-time.</p></div></li>
 <li><span class="name">anytls</span><div><p>With its padding scheme.</p></div></li>
 <li><span class="name">shadowtls</span><div><p>Versions 1, 2 and 3.</p></div></li>
 <li><span class="name">xhttp</span><div><p>An sbr extension for VLESS, trojan and VMess, taking Xray's field names: stream-one, stream-up and packet-up over HTTP/1.1, HTTP/2 or HTTP/3, the transport Xray uses behind CDNs.</p></div></li>
 </ul>
-<p>Also <code>socks</code>, <code>http</code>, <code>direct</code>, <code>selector</code>, <code>urltest</code> and <code>detour</code> chains, and the <code>ws</code>, <code>httpupgrade</code>, <code>grpc</code> and <code>http</code> transports. Each is tested against real sing-box servers, and REALITY, Vision, XHTTP and hysteria2 also against Xray-core and apernet hysteria.</p>
+<p>Also <code>socks</code>, <code>http</code>, <code>direct</code>, <code>selector</code>, <code>urltest</code> and <code>detour</code> chains, and the <code>ws</code>, <code>httpupgrade</code>, <code>grpc</code> and <code>http</code> transports. <code>multiplex</code> runs sing-mux (smux, yamux or h2mux, with padding and UDP) on VLESS, VMess, trojan and Shadowsocks; set <code>max_connections</code> for streams to share sessions, since otherwise each concurrent stream opens its own. Each protocol is tested against real sing-box servers, and REALITY, Vision, XHTTP and hysteria2 also against Xray-core and apernet hysteria.</p>
 
 <h2>browser tls fingerprints</h2>
 <p>Every TLS client over TCP (trojan, VLESS, VMess, the transports, ShadowTLS's camouflage handshake, AnyTLS and DNS over HTTPS) sends a browser's ClientHello by default, and <code>utls.fingerprint</code> picks which:</p>
@@ -52,29 +53,39 @@
 </table></div>
 <p>sing-box 1.14.4 and Xray 26.10 still send Chrome 133's ClientHello for <code>chrome</code>, which current Chrome no longer matches. Fingerprints sbr does not have are refused rather than mapped to another browser.</p>
 
+<h2>encrypted client hello</h2>
+<p>With <code>tls.ech</code> enabled and no config given, sbr takes the ECH config from the server's DNS HTTPS record, as sing-box does. The lookup goes through the profile's own DNS servers and rules, never the local network's resolver in cleartext. When a server rejects the config and sends <code>retry_configs</code>, as after a key rotation, sbr retries once with them, so a stale config recovers without a profile update. ECH uses rustls' ClientHello rather than a browser's.</p>
+
 <h2>failover that sees blocking after the handshake</h2>
 <p>Censors now let a connection start and then stop it: Russia's TSPU freezes a flow after about 16–20 KB, and the GFW has reset all of TCP/443 for over an hour. A handshake still succeeds, so sing-box's <code>urltest</code> keeps choosing the dead server. sbr adds two checks to every <code>urltest</code> member without new config fields: a 64 KiB data probe after each latency probe, and passive detection of resets, unanswered requests and stalls in live traffic. A failing member is skipped for 120 s, doubling to 30 minutes on each relapse; stalled connections on it are closed so apps retry on the new path at once.</p>
+<p>A connect that fails through the selected member is made once more through the member the group would pick without it, and the group moves there if that works, so a server blocked between probes costs one attempt rather than every connection until the next probe.</p>
 <p>Probes to members that share a server are spaced 200–1200 ms apart and their period varies by up to 20%, so a profile with six identities on one server does not open six handshakes in the same millisecond on a fixed clock.</p>
 
-<h2>automatic clienthello fragmentation</h2>
-<p>When a TLS or REALITY handshake is reset before the server sends a byte, which is what SNI filtering looks like from the client, sbr retries it at once with the ClientHello split across TLS records, and then across TCP segments as well. The server name is cut inside every label, so no record or segment holds a whole label of it. The setting lasts until the network changes. <code>fragment</code> and <code>record_fragment</code> set it by hand, as in sing-box.</p>
+<h2>clienthello fragmentation</h2>
+<p>SNI filtering looks, from the client, like a handshake reset before the server sends a byte, or, where the filter drops blocked flows instead, like a ClientHello with no answer for 6 s. After either, sbr retries the handshake at once with the ClientHello split across TLS records, and then across TCP segments as well. The server name is cut inside every label, so no record or segment holds a whole label of it. Each outbound keeps its level until the network changes. <code>fragment</code> and <code>record_fragment</code> set it by hand, as in sing-box.</p>
+<p>A censor that sees the same split on every connection can learn it. <code>fragment_split</code>, an sbr extension, draws the number of pieces, their lengths and the delays between them afresh for each connection, while still cutting inside the server name.</p>
 <p>For QUIC, hysteria2 without Salamander and TUIC put the two halves of the server name in different Initial packets, as quic-go does.</p>
 
 <h2>dns failover</h2>
 <p>When a DNS server errors, times out or answers SERVFAIL or REFUSED, the query goes to the profile's next network resolver, after at most 4 s. The failed server is skipped for later queries and probed in the background, about once a minute, until it answers. sing-box does not fail over, so a profile whose first resolver is unreachable through the current path resolves nothing.</p>
 
 <h2>userspace tcp stack</h2>
-<p>sbr has its own TCP stack for the TUN, which the app uses on iOS and tvOS. Each segment crosses the kernel once instead of twice, which at MTU 1280 gave 1.5–1.75× the throughput of the kernel stack at about 40% less CPU per byte (<a href="/benchmarks/#tun-throughput">benchmarks</a>). An app's connect completes only once the outbound has connected, so a failed connect or a <code>reject</code> rule makes it fall back immediately. Buffers grow with use, idle connections hold none, and on iOS they are capped at 128 KiB per direction per connection and 8 MiB in total, inside the extension's memory limit. IPv4 and IPv6 fragments are reassembled, so a VPN nested inside the tunnel keeps working.</p>
+<p>sbr has its own TCP stack for the TUN, which the app uses by default, since iOS stops a tunnel that runs the kernel's under sustained load. Each segment crosses the kernel once instead of twice, which at MTU 1280 gave 1.5–1.75× the throughput of the kernel stack at about 40% less CPU per byte (<a href="/benchmarks/#tun-throughput">benchmarks</a>). An app's connect completes only once the outbound has connected, so a failed connect or a <code>reject</code> rule makes it fall back immediately. Buffers grow with use, idle connections hold none, and on iOS they are capped at 128 KiB per direction per connection and 8 MiB in total, inside the extension's memory limit. IPv4 and IPv6 fragments are reassembled, so a VPN nested inside the tunnel keeps working.</p>
 
 <h2>the app</h2>
+<p>On iPhone, iPad and Mac the app is written in Rust with GPUI. Its throughput graph and gauges are drawn on the GPU, and a page is redrawn only when new figures arrive, so an open window costs little CPU. The Apple TV app is SwiftUI, because GPUI has no tvOS backend.</p>
 <ul class="rows">
-<li><span class="name">profiles</span><div><p>Added from a <code>sing-box://import-remote-profile</code> link, an https URL or a JSON file. Remote profiles refresh when the app opens and from the tunnel itself, without the app.</p></div></li>
-<li><span class="name">groups</span><div><p>Every selector in the profile, what each nested group resolves to and its measured latency, with a test button.</p></div></li>
-<li><span class="name">live connections</span><div><p>Each open connection with its destination, sniffed domain, rule, route and current rate, sorted by when bytes last moved. Swipe to close one.</p></div></li>
-<li><span class="name">per-site rules</span><div><p>Long-press a connection to always route its domain through a chosen server or group. The rule survives profile switches and refreshes, and connections to that domain reconnect on the new route.</p></div></li>
-<li><span class="name">auto-connect</span><div><p>Connects on every network except the Wi-Fi networks you trust.</p></div></li>
-<li><span class="name">shortcuts</span><div><p>Connect, disconnect, toggle and select-outbound intents, and a Control Center toggle.</p></div></li>
-<li><span class="name">diagnose</span><div><p>Checks DNS, TCP, HTTP/3 and a bulk download through the tunnel, and reports why the tunnel last stopped if it was not asked to.</p></div></li>
+<li><span class="name">profiles</span><div><p>Added from a <code>sing-box://import-remote-profile</code> link, an https URL, pasted JSON or a file. Remote profiles refresh when the app opens and, while connected, from the tunnel itself.</p></div></li>
+<li><span class="name">keychain</span><div><p>A profile names its servers and carries their credentials, so profiles are kept in the Keychain rather than in files, out of iCloud Keychain and never restored onto another device. <strong>erase everything</strong> removes them with the VPN configuration, settings and logs.</p></div></li>
+<li><span class="name">groups</span><div><p>Every selector in the profile with its route and measured latency, and a test button. The group the profile's route ends in comes first; the others start folded.</p></div></li>
+<li><span class="name">live connections</span><div><p>Each open connection with its destination, sniffed domain, rule, route and current rate, sorted by when bytes last moved. A connection, or every connection to its domain, can be closed.</p></div></li>
+<li><span class="name">per-site rules</span><div><p>From a connection, always route its domain through a chosen server or group. The rule survives profile switches and refreshes, and connections to that domain reconnect on the new route.</p></div></li>
+<li><span class="name">auto-connect</span><div><p>Connects on every network except the Wi-Fi networks you name as trusted.</p></div></li>
+<li><span class="name">leak protection</span><div><p>Blocks traffic outside the tunnel. It follows the profile's <code>strict_route</code> until changed, and is off for profiles without it, because it also stops AirDrop, AirPlay and local servers. On iPhone, iPad and Mac the local network can be let through.</p></div></li>
+<li><span class="name">menu bar</span><div><p>On the Mac, sbr runs from the menu bar and can start at login. The menu connects, switches profiles, and chooses each group's route or tests its latency without opening the window.</p></div></li>
+<li><span class="name">control center</span><div><p>A toggle on iPhone and iPad that connects and disconnects without opening the app.</p></div></li>
+<li><span class="name">diagnose</span><div><p>Checks DNS and HTTPS, and while connected the exit address and whether IPv6 leaves outside the tunnel.</p></div></li>
+<li><span class="name">logs</span><div><p>The log keeps the lines from before the tunnel last restarted, and records how the previous session ended: a crash, or its last memory reading if the system stopped it, since a memory kill leaves no other trace.</p></div></li>
 </ul>
 <p>On the command line, <code>experimental.clash_api</code> serves the endpoints yacd, metacubexd and zashboard use.</p>
 </main>
