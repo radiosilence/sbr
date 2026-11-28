@@ -206,10 +206,10 @@ pub struct Configuration {
     pub bundle_id: String,
     /// Replaces the whole `providerConfiguration`.
     pub provider: Vec<(&'static str, ProviderValue)>,
-    /// `includeAllNetworks` and `enforceRoutes`: SbrKit's
+    /// `enforceRoutes`, and on macOS `includeAllNetworks`: SbrKit's
     /// `Sbr.applyLeakProtection`.
     pub leak_protection: bool,
-    /// Under leak protection, `excludeLocalNetworks`.
+    /// Under leak protection on macOS, `excludeLocalNetworks`.
     pub allow_local_network: bool,
     /// On-demand rules: off on these Wi-Fi networks, on everywhere else.
     /// None for no rules.
@@ -325,7 +325,10 @@ impl Manager {
             proto.setProviderBundleIdentifier(Some(&NSString::from_str(&c.bundle_id)));
             proto.setServerAddress(Some(&NSString::from_str("sbr")));
             proto.setProviderConfiguration(Some(&pc));
-            #[cfg(not(target_os = "tvos"))]
+            // iOS keeps blocking traffic while an update replaces the
+            // extension and can strand the device until it restarts, so
+            // there strict mode is enforced routes and on demand only.
+            #[cfg(target_os = "macos")]
             {
                 proto.setIncludeAllNetworks(c.leak_protection);
                 proto.setExcludeLocalNetworks(c.leak_protection && c.allow_local_network);

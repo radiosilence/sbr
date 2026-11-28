@@ -1,0 +1,1 @@
+- **Updating sbr on iOS no longer cuts the phone off.** Strict mode on iOS used `includeAllNetworks`, which keeps blocking traffic while an update replaces the tunnel extension: the update could not finish, deleting the app did not release it, and only a restart did. On iOS strict mode is now enforced routes and an on-demand restart; macOS keeps `includeAllNetworks`.
